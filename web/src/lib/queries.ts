@@ -3,7 +3,7 @@ import { useQuery } from "./cache";
 import { getJSON } from "./api";
 import type {
   ChatState, CompetitorsData, IssueResponse, IssuesResponse, Overview, PageResponse, PageSummary, PagesResponse,
-  RecommendationsResponse, SearchConsoleData, Settings, SiteResponse, SitesResponse,
+  FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, SiteResponse, SitesResponse,
 } from "./types";
 
 const s = (id: string) => `/sites/${encodeURIComponent(id)}`;
@@ -19,6 +19,7 @@ export const keys = {
   allPages: (id: string) => `${s(id)}/pages#all`,
   page: (id: string, pageId: string) => `${s(id)}/pages/${encodeURIComponent(pageId)}`,
   recommendations: (id: string) => `${s(id)}/recommendations`,
+  failedPages: (id: string) => `${s(id)}/failed-pages`,
   searchConsole: (id: string) => `${s(id)}/search-console`,
   competitors: (id: string) => `${s(id)}/competitors`,
   chat: (id: string) => `${s(id)}/chat`,
@@ -67,6 +68,7 @@ export const useIssue = (id: string, issueId: string | null) => useQuery<IssueRe
 export const useAllPages = (id: string) => useQuery<AllPages>(keys.allPages(id), getAllPagesFetcher(id));
 export const usePage = (id: string, pageId: string | null) => useQuery<PageResponse>(pageId ? keys.page(id, pageId) : null);
 export const useRecommendations = (id: string) => useQuery<RecommendationsResponse>(keys.recommendations(id));
+export const useFailedPages = (id: string, enabled = true) => useQuery<FailedPagesResponse>(enabled ? keys.failedPages(id) : null);
 export const useSearchConsole = (id: string) => useQuery<SearchConsoleData>(keys.searchConsole(id));
 export const useCompetitors = (id: string) => useQuery<CompetitorsData>(keys.competitors(id));
 export const useChat = (id: string) => useQuery<ChatState>(keys.chat(id));

@@ -9,14 +9,23 @@ export type Turn =
   | { text?: string[]; tools?: Array<{ name: string; input: Record<string, unknown> }> }
   | { error: unknown };
 
-export function mockClaude(turns: Turn[]): ChatClient & { requests: Anthropic.MessageStreamParams[] } {
+export function mockClaude(
+  turns: Turn[],
+  opts: { delayMs?: number } = {},
+): ChatClient & { requests: Anthropic.MessageStreamParams[]; aborted: boolean[] ; eventsSent: number } {
   const requests: Anthropic.MessageStreamParams[] = [];
+  const aborted: boolean[] = [];
   let i = 0;
-  return {
+  const self = {
     requests,
+    aborted,
+    eventsSent: 0,
     messages: {
-      stream(body) {
+      stream(body: Anthropic.MessageStreamParams, options?: { signal?: AbortSignal }) {
         requests.push(structuredClone(body));
+        const signal = options?.signal;
+        const idx = aborted.length;
+        aborted.push(false);
         const turn = turns[i++] ?? { text: ["(fin du script)"] };
         const content: Anthropic.ContentBlock[] = [];
         const events: Anthropic.MessageStreamEvent[] = [];
@@ -56,11 +65,20 @@ export function mockClaude(turns: Turn[]): ChatClient & { requests: Anthropic.Me
         } as unknown as Anthropic.Message;
         return {
           async *[Symbol.asyncIterator]() {
-            for (const e of events) yield e;
+            for (const e of events) {
+              if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+              if (signal?.aborted) {
+                aborted[idx] = true;
+                throw new Error("Request was aborted.");
+              }
+              self.eventsSent++;
+              yield e;
+            }
           },
           finalMessage: async () => final,
         };
       },
     },
   };
+  return self as never;
 }

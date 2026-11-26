@@ -60,8 +60,7 @@ export class FirecrawlSearch implements SearchProvider {
 }
 
 export function searchUnavailable(message = "Le service de recherche ne répond pas.", action = "Réessayez dans quelques minutes.") {
-  // Aucun code dédié dans le format d'échange : « internal » avec un message explicite (signalé à l'agent principal).
-  return new HttpError(502, "internal", message, action);
+  return new HttpError(502, "competitors_unavailable", message, action);
 }
 
 export const competitorsNotConfigured = () =>

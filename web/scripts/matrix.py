@@ -40,6 +40,28 @@ SCREENS = [
     ("24-parametres-non-configure", "/sites/site_8fk2/parametres", "sans-config", []),
     ("25-menu", "/sites/site_8fk2", "complet", ["menu"]),
     ("26-selecteur-site", "/sites/site_8fk2", "complet", ["switcher"]),
+    # États ajoutés après la revue QA
+    ("30-echec-vue", "/sites/site_sabl", "echec", []),
+    ("31-echec-audit", "/sites/site_sabl/audit", "echec", []),
+    ("32-echec-pages", "/sites/site_sabl/pages", "echec", []),
+    ("33-echec-reco", "/sites/site_sabl/recommandations", "echec", []),
+    ("34-echec-trafic", "/sites/site_sabl/trafic", "echec", []),
+    ("35-relance-vue", "/sites/site_8fk2", "relance-figee", ["wait:800"]),
+    ("36-relance-pages", "/sites/site_8fk2/pages", "relance-figee", ["wait:800"]),
+    ("37-relance-interrompue", "/sites/site_8fk2", "echec", []),
+    ("38-peu-fiable", "/sites/site_orlx", "echec", ["click:.notice .failed__toggle", "wait:600"]),
+    ("39-coupure", "/sites/site_8fk2", "coupure", ["wait:5500"]),
+    ("40-assistant-cle", "/sites/site_8fk2/assistant", "complet", ["type:#chat-input=Ma clé est-elle valide ?", "press:Enter", "wait:1600"]),
+    ("41-assistant-limite", "/sites/site_8fk2/assistant", "complet", ["type:#chat-input=Encore une question, sans limite ?", "press:Enter", "wait:1000"]),
+    ("42-assistant-panne", "/sites/site_8fk2/assistant", "sans-gsc", ["type:#chat-input=Test de panne", "press:Enter", "wait:1600"]),
+    ("43-assistant-liens", "/sites/site_8fk2/assistant", "complet", ["type:#chat-input=Quelles pages rapportent le plus de visites ?", "press:Enter", "wait:6500"]),
+    ("44-trafic-refuse", "/sites/site_8fk2/trafic", "sans-gsc", ["upload:.gsc-empty input[type=file]=/tmp/demo-files/pas-un-export.csv", "wait:1800"]),
+    ("45-ajout-plafond", "/ajouter", "complet", ["type:#root input=plafond.fr", "click:button[type=submit]", "wait:1800"]),
+    ("46-ajout-rafale", "/ajouter", "complet", ["type:#root input=rafale.fr", "click:button[type=submit]", "wait:1800"]),
+    ("47-concurrents-indispo", "/sites/site_orlx/concurrents", "erreurs", ["wait:2300", "click:.error-block button", "wait:900", "click:.empty .btn--primary", "wait:2600"]),
+    ("48-audit-doublon", "/sites/site_8fk2/audit/duplicate_title", "complet", ["wait:800"]),
+    ("49-trafic-import", "/sites/site_8fk2/trafic", "complet", []),
+    ("50-assistant-sans-config-vue", "/sites/site_8fk2", "sans-config", []),
 ]
 WIDTHS = [1440, 834, 390]
 THEMES = ["light", "dark"]
@@ -66,6 +88,10 @@ with sync_playwright() as pw:
                 for a in acts:
                     if a.startswith("wait:"):
                         page.wait_for_timeout(int(a[5:]))
+                    elif a.startswith("press:"):
+                        page.keyboard.press(a[6:])
+                    elif a.startswith("upload:"):
+                        sel, fp = a[7:].rsplit("=", 1); page.set_input_files(sel, fp)
                     elif a.startswith("type:"):
                         sel, txt = a[5:].split("=", 1); page.fill(sel, txt)
                     elif a.startswith("click:"):

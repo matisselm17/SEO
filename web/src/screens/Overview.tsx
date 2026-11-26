@@ -1,9 +1,10 @@
 import { ArrowDown, ArrowRight, ArrowUp, Bot, CircleCheck, FileUp, Info, OctagonAlert, TriangleAlert } from "lucide-react";
 import type { Issue, Overview, Recommendation, SiteSummary, Strength } from "../lib/types";
-import { useOverview } from "../lib/queries";
+import { useOverview, useSettings } from "../lib/queries";
 import { sitePath } from "../lib/router";
-import { fmtCompact, fmtDec, fmtInt, fmtPct, fmtPeriod, fmtPosition, plural } from "../lib/format";
+import { fmtCompact, fmtDec, fmtInt, fmtPct, fmtPeriod, fmtPosition, fmtScorePoints, pl } from "../lib/format";
 import { CATEGORY_LABEL, EFFORT_LABEL, IMPACT_LABEL, SEVERITY_LABEL, scoreVerdict } from "../lib/score";
+import { isRelaunching, isUnreliable, noResultsReason, resultsOf } from "../lib/results";
 import { PageHeader, Section } from "../ui/Section";
 import { ScoreGauge } from "../ui/ScoreGauge";
 import { CategoryBars } from "../ui/CategoryBars";
@@ -12,9 +13,8 @@ import { ButtonLink, Link } from "../ui/Button";
 import { Meter } from "../ui/Meter";
 import { Skeleton, SkeletonRows, LoadingLabel } from "../ui/Skeleton";
 import { TrendChart } from "../ui/TrendChart";
-import { EmptyState } from "../ui/States";
 import { useMedia } from "../ui/useVirtual";
-import { QueryError, RelaunchButton, auditLine, isRunning } from "./common";
+import { FailedPagesToggle, NoResults, QueryError, RelaunchButton, ReliabilityNote, auditLine, isRunning } from "./common";
 
 function Delta({ value, previous }: { value: number; previous: number | null }) {
   if (previous === null) return <span className="delta delta--none">Première analyse</span>;
@@ -31,7 +31,9 @@ function Delta({ value, previous }: { value: number; previous: number | null }) 
 function ScoreBand({ data, site }: { data: Overview; site: SiteSummary }) {
   const s = data.score;
   const c = data.counts.issues;
-  const running = isRunning(site);
+  // « Provisoire » seulement quand les résultats affichés sont ceux de l'analyse en cours (première analyse).
+  const running = isRunning(site) && !isRelaunching(site);
+  const r = resultsOf(site);
   const small = useMedia("(max-width: 767px)");
   return (
     <section className="scoreband" aria-label="Note du site">
@@ -42,6 +44,7 @@ function ScoreBand({ data, site }: { data: Overview; site: SiteSummary }) {
             <p className="scoreband__verdict-title">{scoreVerdict(s.value)}</p>
             <Delta value={s.value} previous={s.previous} />
             {running && <p className="scoreband__live">Provisoire : la note évolue à chaque page notée.</p>}
+            {isUnreliable(site) && <p className="scoreband__warn">Note peu fiable</p>}
           </div>
         ) : (
           <div className="scoreband__verdict">
@@ -59,8 +62,8 @@ function ScoreBand({ data, site }: { data: Overview; site: SiteSummary }) {
       <div className="scoreband__figures">
         <div className="figure">
           <span className="figure__label">Pages analysées</span>
-          <span className="figure__value tnum">{fmtInt(running ? Math.max(site.pagesAnalyzed, data.counts.pages) : data.counts.pages)}</span>
-          {site.audit && site.audit.pagesFailed > 0 && <span className="figure__note">{plural(site.audit.pagesFailed, "page n'a", "pages n'ont")} pas pu être lue{site.audit.pagesFailed > 1 ? "s" : ""}</span>}
+          <span className="figure__value tnum">{fmtInt(r?.pagesDone ?? data.counts.pages)}</span>
+          {r && r.pagesFailed > 0 && <FailedPagesToggle site={site} count={r.pagesFailed} />}
         </div>
         <div className="figure">
           <span className="figure__label">Problèmes détectés</span>
@@ -91,7 +94,7 @@ function IssueRow({ issue, siteId }: { issue: Issue; siteId: string }) {
           <span className="issue-row__summary">{issue.summary}</span>
         </span>
         <span className="issue-row__meta">
-          <span className="issue-row__pages tnum">{issue.pagesAffected} / {issue.pagesTotal} pages</span>
+          <span className="issue-row__pages tnum">{issue.pagesAffected} / {issue.pagesTotal} {pl(issue.pagesTotal, "page", "pages")}</span>
           <Meter value={issue.pagesAffected} max={issue.pagesTotal} tone={issue.severity === "critical" ? "critical" : issue.severity === "warning" ? "warning" : "neutral"} />
         </span>
         <ArrowRight size={16} className="row-arrow" aria-hidden />
@@ -109,7 +112,11 @@ function ActionRow({ rec, siteId }: { rec: Recommendation; siteId: string }) {
         <span className="action-row__tags">
           <Tag tone={rec.impact === "high" ? "accent" : "neutral"}>{IMPACT_LABEL[rec.impact]}</Tag>
           <Tag>{EFFORT_LABEL[rec.effort]}</Tag>
-          <span className="action-row__gain tnum">+{fmtInt(rec.pointsToGain)} pts</span>
+          {rec.scoreGain > 0 ? (
+            <span className="action-row__gain tnum">+{fmtScorePoints(rec.scoreGain)} sur la note</span>
+          ) : rec.pointsToGain === 0 ? (
+            <span className="action-row__neutral">Ne change pas la note</span>
+          ) : null}
         </span>
       </div>
     </li>
@@ -187,7 +194,10 @@ function OverviewSkeleton() {
 
 export function OverviewScreen({ site }: { site: SiteSummary }) {
   const q = useOverview(site.id);
+  const settings = useSettings();
+  const chatReady = settings.data?.integrations.chat.configured === true;
   const data = q.data;
+  const reason = noResultsReason(site);
   const totalIssues = data ? data.counts.issues.critical + data.counts.issues.warning + data.counts.issues.info : 0;
 
   return (
@@ -198,22 +208,26 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
         actions={
           <>
             <RelaunchButton site={site} />
-            <ButtonLink to={sitePath(site.id, "assistant")} variant="primary" icon={<Bot size={16} aria-hidden />}>Poser une question</ButtonLink>
+            {chatReady && reason === null && <ButtonLink to={sitePath(site.id, "assistant")} variant="primary" icon={<Bot size={16} aria-hidden />}>Poser une question</ButtonLink>}
           </>
         }
       />
+      {reason !== null && reason !== "running" ? (
+        <NoResults site={site} running={null} />
+      ) : (
+        <>
       <QueryError q={q} />
       {!data && !q.error && <OverviewSkeleton />}
       {data && (
         <>
+          <ReliabilityNote site={site} />
           <ScoreBand data={data} site={site} />
 
-          {data.counts.pages === 0 ? (
-            <EmptyState title={isRunning(site) ? "Les premiers résultats arrivent" : "Aucun résultat pour cette analyse"}>
-              {isRunning(site)
-                ? "Les problèmes, les actions et les points positifs s'afficheront ici au fil des pages notées. Vous pouvez parcourir les autres sections en attendant."
-                : "Aucune page n'a pu être notée. Vérifiez que le site est en ligne, puis relancez l'analyse."}
-            </EmptyState>
+          {reason === "running" || data.counts.pages === 0 ? (
+            <NoResults
+              site={site}
+              running="Les problèmes, les actions et les points positifs s'afficheront ici au fil des pages notées. Vous pouvez parcourir les autres sections en attendant."
+            />
           ) : (
             <>
               <div className="overview-cols">
@@ -221,12 +235,12 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
                   id="top-issues"
                   title="À corriger en priorité"
                   description="Les problèmes qui coûtent le plus de points à votre site."
-                  actions={<Link to={sitePath(site.id, "audit")} className="text-link">Voir les {totalIssues} problèmes</Link>}
+                  actions={<Link to={sitePath(site.id, "audit")} className="text-link">{totalIssues > 1 ? `Voir les ${totalIssues} problèmes` : "Voir le problème"}</Link>}
                 >
                   {data.topIssues.length ? (
                     <ul className="issue-list">{data.topIssues.map((i) => <IssueRow key={i.id} issue={i} siteId={site.id} />)}</ul>
                   ) : (
-                    <p className="muted">Aucun problème détecté. Votre site respecte tous les critères de la grille.</p>
+                    <p className="muted">{isRunning(site) && !isRelaunching(site) ? "Aucun problème pour l'instant sur les pages déjà notées." : "Aucun problème détecté. Les pages analysées respectent tous les critères de la grille."}</p>
                   )}
                 </Section>
                 <Section
@@ -238,7 +252,7 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
                   {data.actions.length ? (
                     <ol className="action-list">{data.actions.map((r) => <ActionRow key={r.id} rec={r} siteId={site.id} />)}</ol>
                   ) : (
-                    <p className="muted">Rien à faire pour l'instant.</p>
+                    <p className="muted">Aucune action à mener sur les pages analysées.</p>
                   )}
                 </Section>
               </div>
@@ -259,6 +273,8 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
               )}
             </>
           )}
+        </>
+      )}
         </>
       )}
     </>

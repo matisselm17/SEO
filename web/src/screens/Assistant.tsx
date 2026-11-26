@@ -4,7 +4,7 @@ import type { ChatEvent, ChatMessage, ChatRequest, ChatState, SiteSummary } from
 import { keys, useChat } from "../lib/queries";
 import { request, sendJSON, toAppError, type AppError } from "../lib/api";
 import { readSSE } from "../lib/sse";
-import { setQueryData } from "../lib/cache";
+import { invalidate, setQueryData } from "../lib/cache";
 import { takeDraft } from "../lib/draft";
 import { sitePath } from "../lib/router";
 import { fmtDateTime } from "../lib/format";
@@ -24,6 +24,11 @@ interface Pending {
   error: AppError | null;
 }
 
+/** Erreur qui ne se résoudra pas en réessayant : il faut une intervention sur le serveur. */
+function isDefinitive(e: AppError) {
+  return e.code === "chat_not_configured" || e.details?.retryable === false;
+}
+
 function Sources({ sources }: { sources: string[] }) {
   if (!sources.length) return null;
   return (
@@ -34,7 +39,7 @@ function Sources({ sources }: { sources: string[] }) {
   );
 }
 
-function Message({ m }: { m: ChatMessage }) {
+function Message({ m, siteHost }: { m: ChatMessage; siteHost: string }) {
   if (m.role === "user") {
     return (
       <div className="msg msg--user">
@@ -46,7 +51,7 @@ function Message({ m }: { m: ChatMessage }) {
     <div className="msg msg--assistant">
       <span className="msg__avatar" aria-hidden><Bot size={15} /></span>
       <div className="msg__body">
-        <Markdown source={m.content} />
+        <Markdown source={m.content} siteHost={siteHost} />
         <Sources sources={m.sources} />
         <time className="msg__time" dateTime={m.createdAt}>{fmtDateTime(m.createdAt)}</time>
       </div>
@@ -66,6 +71,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
   const state = q.data;
   const messages = state?.messages ?? [];
   const streaming = !!pending && !pending.error;
+  const blocked = pending?.error && isDefinitive(pending.error) ? pending.error : null;
 
   // Question préparée depuis un autre écran.
   useEffect(() => {
@@ -113,6 +119,14 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
       if (chunk) setPending((p) => (p ? { ...p, text: p.text + chunk } : p));
     };
     let finished = false;
+    let started: string | null = null;
+    let received = false;
+    /** Échec avant toute réponse : le serveur n'a pas gardé la question ; elle reste affichée ici seulement. */
+    const dropQuestion = () => {
+      if (!started) return;
+      const id = started;
+      setQueryData<ChatState>(keys.chat(site.id), (prev) => (prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== id) } : prev));
+    };
     try {
       const res = await request(keys.chat(site.id), {
         method: "POST",
@@ -129,6 +143,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
         }
         switch (ev.type) {
           case "start":
+            started = ev.userMessage.id;
             appendMessage(ev.userMessage);
             setPending((p) => (p ? { ...p, question: "" } : p));
             break;
@@ -136,6 +151,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
             setPending((p) => (p ? { ...p, tools: [...p.tools.map((t) => ({ ...t, done: true })), { label: ev.label, done: false }] } : p));
             break;
           case "delta":
+            received = true;
             buffer += ev.text;
             if (!raf) raf = requestAnimationFrame(flush);
             break;
@@ -149,7 +165,9 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
             finished = true;
             if (raf) cancelAnimationFrame(raf);
             flush();
-            setPending((p) => (p ? { ...p, error: { ...ev.error, status: 0 } } : p));
+            if (!received) dropQuestion();
+            setPending((p) => (p ? { ...p, question: received ? p.question : question, error: { ...ev.error, status: 0 } } : p));
+            invalidate(keys.chat(site.id));
             break;
         }
       }, ctrl.signal);
@@ -163,7 +181,8 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
         setPending(null);
         return;
       }
-      setPending((p) => (p ? { ...p, error: e } : { question, tools: [], text: "", error: e }));
+      if (!received) dropQuestion();
+      setPending((p) => (p ? { ...p, question: received ? p.question : question, error: e } : { question, tools: [], text: "", error: e }));
     } finally {
       if (controller.current === ctrl) controller.current = null;
     }
@@ -175,10 +194,13 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
     return users[users.length - 1]?.content ?? "";
   };
 
+  // « Arrêter » coupe le flux : le serveur arrête alors la génération. On relit ensuite la conversation
+  // telle qu'il l'a enregistrée (question, et réponse partielle s'il l'a gardée).
   const stop = () => {
     controller.current?.abort();
     setPending(null);
-    toast.show({ tone: "neutral", title: "Réponse arrêtée" });
+    setTimeout(() => invalidate(keys.chat(site.id)), 400);
+    toast.show({ tone: "neutral", title: "Réponse arrêtée", text: "L'assistant a cessé de rédiger." });
   };
 
   const onSubmit = (e: FormEvent) => {
@@ -259,7 +281,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
           </div>
         )}
 
-        {messages.map((m) => <Message key={m.id} m={m} />)}
+        {messages.map((m) => <Message key={m.id} m={m} siteHost={site.host} />)}
 
         {pending && (
           <>
@@ -280,7 +302,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
                   </ul>
                 )}
                 {pending.text ? (
-                  <div className={pending.error ? "msg__partial" : undefined}><Markdown source={pending.text} /></div>
+                  <div className={pending.error ? "msg__partial" : undefined}><Markdown source={pending.text} siteHost={site.host} /></div>
                 ) : (
                   !pending.error && pending.tools.length === 0 && <p className="typing" aria-label="L'assistant réfléchit"><span /><span /><span /></p>
                 )}
@@ -289,7 +311,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
                     <ErrorState
                       error={pending.error}
                       inline
-                      onRetry={pending.error.code === "chat_not_configured" ? undefined : () => { const qn = lastQuestion(); setPending(null); void send(qn); }}
+                      onRetry={isDefinitive(pending.error) ? undefined : () => { const qn = lastQuestion(); setPending(null); void send(qn); }}
                     />
                   </div>
                 )}
@@ -297,12 +319,12 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
             </div>
           </>
         )}
-        <div ref={endRef} />
+        <div ref={endRef} className="chat__end" />
       </div>
 
       {state && (
         <form className="composer" onSubmit={onSubmit}>
-          {!empty && state.suggestions.length > 0 && !streaming && messages.length < 3 && (
+          {!empty && !blocked && !pending && state.suggestions.length > 0 && messages.length < 3 && (
             <div className="composer__chips">
               {state.suggestions.filter((s) => !messages.some((m) => m.content === s)).slice(0, 3).map((s) => (
                 <button key={s} type="button" className="chip" onClick={() => void send(s)}>{s}</button>
@@ -318,16 +340,21 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKey}
-              placeholder="Posez une question sur votre site…"
+              placeholder={blocked ? "L'assistant est indisponible sur ce serveur" : "Posez une question sur votre site…"}
               maxLength={4000}
+              disabled={!!blocked}
             />
             {streaming ? (
               <Button variant="secondary" size="sm" icon={<Square size={11} fill="currentColor" aria-hidden />} onClick={stop}>Arrêter</Button>
             ) : (
-              <Button type="submit" variant="primary" size="sm" disabled={!input.trim()} aria-label="Envoyer la question" icon={<ArrowUp size={16} aria-hidden />} />
+              <Button type="submit" variant="primary" size="sm" disabled={!input.trim() || !!blocked} aria-label="Envoyer la question" icon={<ArrowUp size={16} aria-hidden />} />
             )}
           </div>
-          <p className="composer__hint">Entrée pour envoyer, Maj + Entrée pour aller à la ligne. Vérifiez les conseils importants avant de les appliquer.</p>
+          <p className="composer__hint">
+            {blocked
+              ? "Les questions sont désactivées tant que la configuration du serveur n'est pas corrigée. Le reste du logiciel fonctionne normalement."
+              : "Entrée pour envoyer, Maj + Entrée pour aller à la ligne. Vérifiez les conseils importants avant de les appliquer."}
+          </p>
         </form>
       )}
     </div>

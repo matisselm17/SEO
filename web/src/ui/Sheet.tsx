@@ -32,13 +32,18 @@ export function Sheet({ open, onClose, title, subtitle, children, footer, labell
     return () => clearTimeout(t);
   }, [open]);
 
+  // onClose change à chaque rendu du parent : on le lit par référence, pour que l'effet ci-dessous
+  // ne se rejoue pas (il replacerait le focus dans le panneau au moment où il se ferme).
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !open) return;
     panel.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        closeRef.current();
       }
       if (e.key === "Tab" && panel.current) {
         const f = panel.current.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input,select,textarea,[tabindex]:not([tabindex="-1"])');
@@ -56,7 +61,8 @@ export function Sheet({ open, onClose, title, subtitle, children, footer, labell
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [visible, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, open]);
 
   if (!mounted) return null;
   return (

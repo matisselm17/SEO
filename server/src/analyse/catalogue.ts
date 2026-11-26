@@ -3,7 +3,7 @@
  * (titre, résumé, explication, étapes) et un code prêt à copier construit à partir des vraies valeurs
  * d'une page concernée. Les valeurs tirées des pages sont du texte brut ; l'interface ne les interprète pas.
  */
-import type { Effort, Fix } from "../../../shared/api.ts";
+import type { Effort } from "../../../shared/api.ts";
 import { cut, type PageFacts } from "./grille.ts";
 
 export interface SamplePage {
@@ -25,11 +25,14 @@ interface Entry {
   summary: string;
   why: string;
   steps(c: IssueContext): string[];
-  snippet?(c: IssueContext): Fix["snippet"];
+  snippet?(c: IssueContext): { language: "html" | "text" | "json"; code: string } | null;
+  /** Le code est construit avec les valeurs de la page la plus touchée (Fix.snippet.forPath). */
+  snippetFromPage?: true;
   /** Nature du correctif : un réglage commun à tout le site, ou un travail page par page. */
   scope: "site" | "page" | "mixed";
   action(c: IssueContext): string;
-  strength: { title: string; detail: (passing: number, total: number) => string };
+  /** `title` quand toutes les pages valident le critère, `most` quand presque toutes (au moins 90 %). */
+  strength: { title: string; most: string; detail: (passing: number, total: number) => string };
 }
 
 const n = (k: number, one: string, many: string) => `${k} ${k > 1 ? many : one}`;
@@ -75,9 +78,10 @@ export const CATALOGUE: Record<string, Entry> = {
       proposal = trimWords(proposal, 60);
       return { language: "html", code: `<title>${textNode(proposal)}</title>` };
     },
+    snippetFromPage: true,
     scope: "page",
     action: (c) => `Réécrire le titre de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les titres de page ont la bonne longueur", detail: (p, t) => `${allPass(p, t)} ont un titre de 30 à 60 caractères.` },
+    strength: { title: "Les titres de page ont la bonne longueur", most: "Presque toutes les pages ont un titre de la bonne longueur", detail: (p, t) => `${allPass(p, t)} ont un titre de 30 à 60 caractères.` },
   },
   meta_description: {
     title: (c) =>
@@ -104,9 +108,10 @@ export const CATALOGUE: Record<string, Entry> = {
         code: `<!-- Point de départ tiré du texte de ${c.sample!.url} : à reformuler -->\n<meta name="description" content="${attr(draft)}">`,
       };
     },
+    snippetFromPage: true,
     scope: "page",
     action: (c) => (c.failing === c.affected ? `Rédiger une description pour ${pagesTxt(c.affected)}` : `Revoir la description de ${pagesTxt(c.affected)}`),
-    strength: { title: "Les descriptions sont bien calibrées", detail: (p, t) => `${allPass(p, t)} ont une description de 70 à 160 caractères.` },
+    strength: { title: "Les descriptions sont bien calibrées", most: "Presque toutes les descriptions sont bien calibrées", detail: (p, t) => `${allPass(p, t)} ont une description de 70 à 160 caractères.` },
   },
   h1: {
     title: (c) =>
@@ -139,9 +144,10 @@ export const CATALOGUE: Record<string, Entry> = {
       const subject = f.title.split(/\s[|–—-]\s/)[0]?.trim();
       return subject ? { language: "html", code: `<h1>${textNode(cut(subject, 90))}</h1>` } : null;
     },
+    snippetFromPage: true,
     scope: "mixed",
     action: (c) => (c.failing === c.affected ? `Ajouter un titre principal sur ${pagesTxt(c.affected)}` : `Garder un seul titre principal sur ${pagesTxt(c.affected)}`),
-    strength: { title: "Chaque page a un titre principal unique", detail: (p, t) => `${allPass(p, t)} ont exactement un H1.` },
+    strength: { title: "Chaque page a un titre principal unique", most: "Presque toutes les pages ont un titre principal unique", detail: (p, t) => `${allPass(p, t)} ont exactement un H1.` },
   },
   heading_hierarchy: {
     title: (c) => `Les intertitres sont mal organisés sur ${pagesTxt(c.affected)}`,
@@ -154,20 +160,21 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "mixed",
     action: (c) => `Remettre les intertitres dans l'ordre sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les intertitres suivent un plan clair", detail: (p, t) => `${allPass(p, t)} ont des H2 et des niveaux qui s'enchaînent.` },
+    strength: { title: "Les intertitres suivent un plan clair", most: "Les intertitres suivent un plan clair sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} ont des H2 et des niveaux qui s'enchaînent.` },
   },
   canonical: {
-    title: (c) => `${n(c.affected, "page ne déclare", "pages ne déclarent")} pas leur adresse de référence`,
-    summary: "La balise canonique indique à Google l'adresse officielle d'une page. Sans elle, des variantes (avec paramètres, avec ou sans slash final) peuvent se faire concurrence.",
+    title: (c) => `L'adresse de référence manque ou est invalide sur ${pagesTxt(c.affected)}`,
+    summary: "La balise canonique indique à Google l'adresse officielle d'une page ; elle doit pointer vers une page de ce site. Sans elle, des variantes (avec paramètres, avec ou sans slash final) peuvent se faire concurrence.",
     why: "Quand plusieurs adresses affichent le même contenu, Google peut répartir la popularité entre elles ou choisir la mauvaise. La balise canonique règle la question une fois pour toutes ; la plupart des thèmes et extensions SEO l'ajoutent automatiquement.",
     steps: () => [
       "Activez l'option « URL canonique » de votre extension SEO ou de votre thème : elle s'applique à toutes les pages.",
       "À défaut, ajoutez dans l'en-tête (<head>) de chaque page une balise canonique qui pointe vers sa propre adresse.",
     ],
     snippet: (c) => (c.sample ? { language: "html", code: `<link rel="canonical" href="${attr(c.sample.url)}">` } : null),
+    snippetFromPage: true,
     scope: "site",
     action: (c) => `Déclarer l'adresse de référence de ${pagesTxt(c.affected)}`,
-    strength: { title: "Chaque page déclare son adresse de référence", detail: (p, t) => `${allPass(p, t)} ont une balise canonique.` },
+    strength: { title: "Chaque page déclare son adresse de référence", most: "Presque toutes les pages déclarent leur adresse de référence", detail: (p, t) => `${allPass(p, t)} ont une balise canonique.` },
   },
   lang: {
     title: (c) => `La langue n'est pas déclarée sur ${pagesTxt(c.affected)}`,
@@ -180,7 +187,7 @@ export const CATALOGUE: Record<string, Entry> = {
     snippet: () => ({ language: "html", code: '<html lang="fr">' }),
     scope: "site",
     action: (c) => `Déclarer la langue de ${pagesTxt(c.affected)}`,
-    strength: { title: "La langue des pages est déclarée", detail: (p, t) => `${allPass(p, t)} indiquent leur langue.` },
+    strength: { title: "La langue des pages est déclarée", most: "La langue est déclarée sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} indiquent leur langue.` },
   },
   word_count: {
     title: (c) => `${n(c.affected, "page a", "pages ont")} trop peu de texte`,
@@ -193,7 +200,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "page",
     action: (c) => `Étoffer le texte de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages ont assez de texte", detail: (p, t) => `${allPass(p, t)} ont au moins 300 mots.` },
+    strength: { title: "Les pages ont assez de texte", most: "Presque toutes les pages ont assez de texte", detail: (p, t) => `${allPass(p, t)} ont au moins 300 mots.` },
   },
   title_h1_match: {
     title: (c) => `Le titre et le titre principal ne parlent pas du même sujet sur ${pagesTxt(c.affected)}`,
@@ -205,7 +212,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "page",
     action: (c) => `Accorder titre et titre principal sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Titres et titres principaux concordent", detail: (p, t) => `${allPass(p, t)} partagent des mots clés entre titre et H1.` },
+    strength: { title: "Titres et titres principaux concordent", most: "Titres et titres principaux concordent sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} partagent des mots clés entre titre et H1.` },
   },
   h2_sections: {
     title: (c) => `${n(c.affected, "page n'est", "pages ne sont")} pas découpées en sections`,
@@ -217,7 +224,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "page",
     action: (c) => `Ajouter des intertitres sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages sont découpées en sections", detail: (p, t) => `${allPass(p, t)} ont au moins deux H2.` },
+    strength: { title: "Les pages sont découpées en sections", most: "Presque toutes les pages sont découpées en sections", detail: (p, t) => `${allPass(p, t)} ont au moins deux H2.` },
   },
   description_distinct: {
     title: (c) => `La description manque ou recopie le titre sur ${pagesTxt(c.affected)}`,
@@ -229,7 +236,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "page",
     action: (c) => `Écrire une description distincte du titre pour ${pagesTxt(c.affected)}`,
-    strength: { title: "Les descriptions complètent les titres", detail: (p, t) => `${allPass(p, t)} ont une description différente du titre.` },
+    strength: { title: "Les descriptions complètent les titres", most: "Presque toutes les descriptions complètent leur titre", detail: (p, t) => `${allPass(p, t)} ont une description différente du titre.` },
   },
   viewport: {
     title: (c) => `${n(c.affected, "page ne s'adapte", "pages ne s'adaptent")} pas aux téléphones`,
@@ -239,10 +246,10 @@ export const CATALOGUE: Record<string, Entry> = {
     snippet: () => ({ language: "html", code: '<meta name="viewport" content="width=device-width, initial-scale=1">' }),
     scope: "site",
     action: (c) => `Activer l'affichage mobile sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Le site s'affiche correctement sur mobile", detail: (p, t) => `${allPass(p, t)} déclarent l'affichage adapté aux téléphones.` },
+    strength: { title: "Le site s'affiche correctement sur mobile", most: "Presque toutes les pages s'affichent correctement sur mobile", detail: (p, t) => `${allPass(p, t)} déclarent l'affichage adapté aux téléphones.` },
   },
   https: {
-    title: (c) => `${n(c.affected, "page n'est", "pages ne sont")} pas sécurisées (HTTPS)`,
+    title: (c) => `${n(c.affected, "page n'est pas sécurisée", "pages ne sont pas sécurisées")} (HTTPS)`,
     summary: "Ces pages sont servies en http:// et non en https://. Les navigateurs les signalent comme « non sécurisées ».",
     why: "Google favorise les pages en HTTPS, et l'avertissement « non sécurisé » du navigateur fait fuir les visiteurs, surtout au moment de payer ou de remplir un formulaire.",
     steps: () => [
@@ -252,7 +259,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "site",
     action: (c) => `Passer ${pagesTxt(c.affected)} en HTTPS`,
-    strength: { title: "Les pages sont sécurisées (HTTPS)", detail: (p, t) => `${allPass(p, t)} sont servies en HTTPS.` },
+    strength: { title: "Les pages sont sécurisées (HTTPS)", most: "Presque toutes les pages sont sécurisées (HTTPS)", detail: (p, t) => `${allPass(p, t)} sont servies en HTTPS.` },
   },
   indexable: {
     title: (c) => `${n(c.affected, "page demande", "pages demandent")} à ne pas apparaître dans Google`,
@@ -269,7 +276,7 @@ export const CATALOGUE: Record<string, Entry> = {
     }),
     scope: "site",
     action: (c) => `Retirer la consigne noindex de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages peuvent apparaître dans Google", detail: (p, t) => `${allPass(p, t)} n'ont aucune consigne noindex.` },
+    strength: { title: "Les pages peuvent apparaître dans Google", most: "Presque toutes les pages peuvent apparaître dans Google", detail: (p, t) => `${allPass(p, t)} n'ont aucune consigne noindex.` },
   },
   charset: {
     title: (c) => `L'encodage des caractères n'est pas déclaré sur ${pagesTxt(c.affected)}`,
@@ -279,7 +286,7 @@ export const CATALOGUE: Record<string, Entry> = {
     snippet: () => ({ language: "html", code: '<meta charset="utf-8">' }),
     scope: "site",
     action: (c) => `Déclarer l'encodage sur ${pagesTxt(c.affected)}`,
-    strength: { title: "L'encodage des caractères est déclaré", detail: (p, t) => `${allPass(p, t)} déclarent leur encodage.` },
+    strength: { title: "L'encodage des caractères est déclaré", most: "L'encodage est déclaré sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} déclarent leur encodage.` },
   },
   structured_data: {
     title: (c) =>
@@ -299,7 +306,7 @@ export const CATALOGUE: Record<string, Entry> = {
     },
     scope: "mixed",
     action: (c) => `Ajouter des données structurées sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages décrivent leur contenu à Google", detail: (p, t) => `${allPass(p, t)} contiennent des données structurées valides.` },
+    strength: { title: "Les pages décrivent leur contenu à Google", most: "Presque toutes les pages décrivent leur contenu à Google", detail: (p, t) => `${allPass(p, t)} contiennent des données structurées valides.` },
   },
   blocking_scripts: {
     title: (c) => `Des scripts retardent l'affichage de ${pagesTxt(c.affected)}`,
@@ -314,9 +321,10 @@ export const CATALOGUE: Record<string, Entry> = {
       const src = c.sample?.facts.blockingScripts[0];
       return src ? { language: "html", code: `<script src="${attr(src)}" defer></script>` } : null;
     },
+    snippetFromPage: true,
     scope: "site",
     action: (c) => `Différer les scripts bloquants sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les scripts ne retardent pas l'affichage", detail: (p, t) => `${allPass(p, t)} ont au plus deux scripts bloquants.` },
+    strength: { title: "Les scripts ne retardent pas l'affichage", most: "Les scripts ne retardent pas l'affichage de presque toutes les pages", detail: (p, t) => `${allPass(p, t)} ont au plus deux scripts bloquants.` },
   },
   image_alt: {
     title: (c) => `Des images n'ont pas de texte alternatif sur ${pagesTxt(c.affected)}`,
@@ -331,9 +339,10 @@ export const CATALOGUE: Record<string, Entry> = {
       const src = c.sample?.facts.imagesWithoutAlt[0];
       return src ? { language: "html", code: `<img src="${attr(src)}" alt="Décrivez ici ce que montre l'image">` } : null;
     },
+    snippetFromPage: true,
     scope: "page",
     action: (c) => `Décrire les images de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les images sont décrites", detail: (p, t) => `${allPass(p, t)} ont un texte alternatif sur toutes leurs images.` },
+    strength: { title: "Les images sont décrites", most: "Les images sont décrites sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} ont un texte alternatif sur toutes leurs images.` },
   },
   image_dimensions: {
     title: (c) => `Des images ne sont pas optimisées sur ${pagesTxt(c.affected)}`,
@@ -347,9 +356,10 @@ export const CATALOGUE: Record<string, Entry> = {
       const src = c.sample?.facts.firstImage;
       return src ? { language: "html", code: `<img src="${attr(src)}" loading="lazy" alt="…">` } : null;
     },
+    snippetFromPage: true,
     scope: "site",
     action: (c) => `Activer le chargement différé des images sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les images sont optimisées", detail: (p, t) => `${allPass(p, t)} précisent les dimensions ou le chargement différé de leurs images.` },
+    strength: { title: "Les images sont optimisées", most: "Les images sont optimisées sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} précisent les dimensions ou le chargement différé de leurs images.` },
   },
   internal_links: {
     title: (c) => `${n(c.affected, "page a", "pages ont")} trop peu de liens vers le reste du site`,
@@ -361,7 +371,7 @@ export const CATALOGUE: Record<string, Entry> = {
     ],
     scope: "page",
     action: (c) => `Ajouter des liens internes sur ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages sont bien reliées entre elles", detail: (p, t) => `${allPass(p, t)} ont au moins trois liens internes.` },
+    strength: { title: "Les pages sont bien reliées entre elles", most: "Presque toutes les pages sont bien reliées entre elles", detail: (p, t) => `${allPass(p, t)} ont au moins trois liens internes.` },
   },
   link_text: {
     title: (c) => `Des liens sont vides ou vagues sur ${pagesTxt(c.affected)}`,
@@ -375,9 +385,10 @@ export const CATALOGUE: Record<string, Entry> = {
       const href = c.sample?.facts.vagueLinks[0];
       return href ? { language: "html", code: `<a href="${attr(href)}">Décrivez ici la page visée</a>` } : null;
     },
+    snippetFromPage: true,
     scope: "mixed",
     action: (c) => `Rendre explicites les liens de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les liens disent où ils mènent", detail: (p, t) => `${allPass(p, t)} n'ont aucun lien vide ou vague.` },
+    strength: { title: "Les liens disent où ils mènent", most: "Les liens disent où ils mènent sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} n'ont aucun lien vide ou vague.` },
   },
   open_graph: {
     title: (c) => `L'aperçu lors d'un partage est incomplet sur ${pagesTxt(c.affected)}`,
@@ -407,9 +418,10 @@ export const CATALOGUE: Record<string, Entry> = {
         ].join("\n"),
       };
     },
+    snippetFromPage: true,
     scope: "site",
     action: (c) => `Compléter l'aperçu de partage de ${pagesTxt(c.affected)}`,
-    strength: { title: "Les pages s'affichent bien quand on les partage", detail: (p, t) => `${allPass(p, t)} ont un titre, un texte et une image de partage.` },
+    strength: { title: "Les pages s'affichent bien quand on les partage", most: "Presque toutes les pages s'affichent bien quand on les partage", detail: (p, t) => `${allPass(p, t)} ont un titre, un texte et une image de partage.` },
   },
   twitter_card: {
     title: (c) => `L'aperçu sur X (Twitter) n'est pas configuré sur ${pagesTxt(c.affected)}`,
@@ -419,7 +431,7 @@ export const CATALOGUE: Record<string, Entry> = {
     snippet: () => ({ language: "html", code: '<meta name="twitter:card" content="summary_large_image">' }),
     scope: "site",
     action: (c) => `Configurer l'aperçu X (Twitter) de ${pagesTxt(c.affected)}`,
-    strength: { title: "L'aperçu sur X (Twitter) est configuré", detail: (p, t) => `${allPass(p, t)} ont une balise twitter:card.` },
+    strength: { title: "L'aperçu sur X (Twitter) est configuré", most: "L'aperçu sur X (Twitter) est configuré sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} ont une balise twitter:card.` },
   },
   favicon: {
     title: (c) => `L'icône du site n'est pas déclarée sur ${pagesTxt(c.affected)}`,
@@ -432,7 +444,7 @@ export const CATALOGUE: Record<string, Entry> = {
     snippet: () => ({ language: "html", code: '<link rel="icon" href="/favicon.ico" sizes="any">' }),
     scope: "site",
     action: (c) => `Déclarer l'icône du site sur ${pagesTxt(c.affected)}`,
-    strength: { title: "L'icône du site est déclarée", detail: (p, t) => `${allPass(p, t)} déclarent un favicon.` },
+    strength: { title: "L'icône du site est déclarée", most: "L'icône du site est déclarée sur presque toutes les pages", detail: (p, t) => `${allPass(p, t)} déclarent un favicon.` },
   },
 };
 
@@ -464,6 +476,27 @@ export const DUPLICATES = {
     action: (affected: number) => `Écrire une description unique pour ${pagesTxt(affected)}`,
   },
 };
+
+const CODE_REFS: Array<[RegExp, string]> = [
+  [/Collez ce code tout en haut/g, "Collez le code fourni dans le détail du problème tout en haut"],
+  [/Collez ce code/g, "Collez le code fourni dans le détail du problème"],
+  [/le code ci-dessous/g, "le code fourni dans le détail du problème"],
+  [/le modèle ci-dessous/g, "le modèle fourni dans le détail du problème"],
+  [/les pages listées ci-dessous/g, "les pages concernées, listées dans le détail du problème"],
+  [/des pages listées ci-dessous/g, "des pages concernées, listées dans le détail du problème"],
+];
+const mentionsCode = (s: string) => /ce code|code ci-dessous|modèle ci-dessous/.test(s);
+
+/** Étapes du détail d'un problème : sans code à copier, les étapes qui y renvoient sont retirées. */
+export function issueSteps(steps: string[], hasSnippet: boolean): string[] {
+  return hasSnippet ? steps : steps.filter((s) => !mentionsCode(s));
+}
+
+/** Étapes d'une recommandation (qui ne porte pas de code) : le renvoi pointe vers le détail du problème. */
+export function recommendationSteps(steps: string[], hasSnippet: boolean): string[] {
+  const kept = hasSnippet ? steps : steps.filter((s) => !mentionsCode(s));
+  return kept.map((s) => CODE_REFS.reduce((acc, [re, rep]) => acc.replace(re, rep), s));
+}
 
 /** Effort d'un correctif : un réglage commun est rapide même sur 200 pages ; un travail page par page grandit avec le nombre de pages. */
 export function effortFor(scope: Entry["scope"] | "page", affected: number): Effort {

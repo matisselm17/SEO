@@ -6,7 +6,7 @@ import { createApp } from "./app.ts";
 import { createClient } from "./chat/assistant.ts";
 import { FirecrawlSearch } from "./competitors/competitors.ts";
 import { loadConfig } from "./config.ts";
-import { Crawler } from "./crawl/crawler.ts";
+import { Crawler, DEFAULT_CRAWL, INTERRUPTED } from "./crawl/crawler.ts";
 import { openDb } from "./db.ts";
 import { EventHub } from "./events.ts";
 import { setAllowPrivateHosts } from "./net/fetch.ts";
@@ -17,22 +17,7 @@ setAllowPrivateHosts(config.allowPrivateHosts);
 
 const store = new Store(openDb(config.dataDir));
 const hub = new EventHub();
-const crawler = new Crawler(store, hub);
-
-// Une analyse interrompue par un arrêt du serveur ne reprendra pas : on le dit clairement.
-for (const a of store.runningAudits()) {
-  store.updateAudit(a.id, {
-    state: "failed",
-    finished_at: new Date().toISOString(),
-    current_url: null,
-    pages_queued: 0,
-    error_json: JSON.stringify({
-      code: "internal",
-      message: "L'analyse a été interrompue par un redémarrage du serveur. Les pages déjà notées sont conservées.",
-      action: "Relancez l'analyse.",
-    }),
-  });
-}
+const crawler = new Crawler(store, hub, DEFAULT_CRAWL, config.limits.maxConcurrentAudits);
 
 const app = createApp({
   config,
@@ -43,8 +28,22 @@ const app = createApp({
   searchProvider: config.firecrawlApiKey ? new FirecrawlSearch(config.firecrawlApiKey) : null,
 });
 
-const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`[serveur] Chat SEO ${config.version} à l'écoute sur http://localhost:${info.port}`);
+/** Une analyse interrompue par un arrêt brutal ne reprendra pas : on le dit clairement. Fait une fois le port obtenu, pour ne pas toucher aux analyses d'une autre instance déjà lancée. */
+function markInterruptedAudits(): void {
+  for (const a of store.runningAudits()) {
+    store.updateAudit(a.id, {
+      state: "failed",
+      finished_at: new Date().toISOString(),
+      current_url: null,
+      pages_queued: 0,
+      error_json: JSON.stringify(INTERRUPTED),
+    });
+  }
+}
+
+const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
+  markInterruptedAudits();
+  console.log(`[serveur] Chat SEO ${config.version} à l'écoute sur http://${config.host}:${info.port}`);
   console.log(`[serveur] Données : ${config.dataDir}`);
   console.log(`[serveur] Assistant : ${config.anthropicApiKey ? `activé (${config.anthropicModel})` : "désactivé (pas de clé ANTHROPIC_API_KEY)"}`);
   console.log(`[serveur] Concurrents : ${config.firecrawlApiKey ? "activé" : "désactivé (pas de clé FIRECRAWL_API_KEY)"}`);
@@ -53,11 +52,25 @@ const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   }
 });
 
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`[serveur] Le port ${config.port} est déjà utilisé sur ${config.host}. Arrêtez l'autre programme qui l'occupe, ou choisissez un autre port avec la variable PORT.`);
+  } else if (err.code === "EACCES") {
+    console.error(`[serveur] Pas le droit d'écouter sur ${config.host}:${config.port}. Choisissez un port au-dessus de 1024 avec la variable PORT.`);
+  } else if (err.code === "EADDRNOTAVAIL") {
+    console.error(`[serveur] L'adresse ${config.host} n'existe pas sur cette machine. Vérifiez la variable HOST.`);
+  } else {
+    console.error(`[serveur] Impossible de démarrer : ${err.message}`);
+  }
+  process.exit(1);
+});
+
 let stopping = false;
 function shutdown(): void {
   if (stopping) return;
   stopping = true;
-  crawler.cancelAll();
+  // Arrêt du serveur : les analyses en cours passent en « failed » avec un message qui le dit.
+  crawler.stopAllForShutdown();
   void crawler.waitAll().finally(() => {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2_000).unref();

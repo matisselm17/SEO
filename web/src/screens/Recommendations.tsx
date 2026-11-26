@@ -3,15 +3,16 @@ import { ArrowRight } from "lucide-react";
 import type { Effort, SiteSummary } from "../lib/types";
 import { useRecommendations } from "../lib/queries";
 import { sitePath } from "../lib/router";
-import { EFFORT_HINT, EFFORT_LABEL, IMPACT_LABEL } from "../lib/score";
-import { fmtInt, plural } from "../lib/format";
+import { DUPLICATE_NOTE, EFFORT_HINT, EFFORT_LABEL, IMPACT_LABEL } from "../lib/score";
+import { isRelaunching, noResultsReason } from "../lib/results";
+import { fmtScorePoints, plural } from "../lib/format";
 import { PageHeader } from "../ui/Section";
 import { Tabs } from "../ui/Tabs";
 import { Tag } from "../ui/Badge";
 import { Link } from "../ui/Button";
 import { EmptyState } from "../ui/States";
 import { SkeletonRows, LoadingLabel } from "../ui/Skeleton";
-import { QueryError, isRunning } from "./common";
+import { NoResults, QueryError, RelaunchButton, isRunning } from "./common";
 
 type F = "all" | Effort;
 
@@ -25,8 +26,8 @@ export function RecommendationsScreen({ site }: { site: SiteSummary }) {
     return c;
   }, [recs]);
   const list = (recs ?? []).filter((r) => f === "all" || r.effort === f);
-  const total = (recs ?? []).reduce((s, r) => s + r.pointsToGain, 0);
-  const pagesTotal = site.pagesAnalyzed || 1;
+  const reason = noResultsReason(site);
+  const firstRun = isRunning(site) && !isRelaunching(site);
 
   // Arrivée depuis un lien « #rec_… » : défilement et mise en évidence.
   const [hash, setHash] = useState(() => window.location.hash.slice(1));
@@ -44,17 +45,19 @@ export function RecommendationsScreen({ site }: { site: SiteSummary }) {
     <>
       <PageHeader
         title="Recommandations"
-        description="Une action par problème, classée : d'abord ce qui rapporte le plus de points pour le moins d'effort."
-        meta={recs && recs.length > 0 ? <span className="muted small">En tout, {fmtInt(total)} points à regagner, soit {Math.round(total / pagesTotal)} points de plus sur la note moyenne de vos pages.</span> : undefined}
+        description="Une action par problème, classée : d'abord ce qui fait gagner le plus de points sur la note du site pour le moins d'effort."
+        meta={recs && recs.length > 0 && reason === null ? <span className="muted small">{plural(recs.length, "action", "actions")}, dont {plural(counts.quick, "rapide", "rapides")} à mener.{isRelaunching(site) ? " Elles portent sur l'analyse précédente, une nouvelle est en cours." : ""}</span> : undefined}
+        actions={<RelaunchButton site={site} />}
       />
-      <QueryError q={q} />
-      {!recs && !q.error && (<><LoadingLabel /><SkeletonRows rows={6} height={120} /></>)}
-      {recs && recs.length === 0 && (
-        <EmptyState title={isRunning(site) ? "Les actions arrivent" : "Rien à faire pour l'instant"}>
-          {isRunning(site) ? "Elles s'affichent au fil des pages notées." : "Aucun problème n'a été détecté sur les pages analysées."}
+      {reason !== null && <NoResults site={site} running="Les actions s'affichent au fil des pages notées, classées par gain et par effort." />}
+      {reason === null && <QueryError q={q} />}
+      {reason === null && !recs && !q.error && (<><LoadingLabel /><SkeletonRows rows={6} height={120} /></>)}
+      {reason === null && recs && recs.length === 0 && (
+        <EmptyState title={firstRun ? "Les actions arrivent" : "Aucune action à mener"}>
+          {firstRun ? "Elles s'affichent au fil des pages notées." : "Aucun problème n'a été détecté sur les pages analysées."}
         </EmptyState>
       )}
-      {recs && recs.length > 0 && (
+      {reason === null && recs && recs.length > 0 && (
         <>
           <div className="toolbar">
             <Tabs<F>
@@ -77,13 +80,18 @@ export function RecommendationsScreen({ site }: { site: SiteSummary }) {
                 <div className="rec__main">
                   <div className="rec__head">
                     <h2 className="rec__title">{r.title}</h2>
-                    <span className="rec__gain tnum">+{fmtInt(r.pointsToGain)} pts</span>
+                    {r.scoreGain > 0 ? (
+                      <span className="rec__gain tnum">+{fmtScorePoints(r.scoreGain)}<span className="rec__gain-unit">sur la note</span></span>
+                    ) : r.pointsToGain === 0 ? (
+                      <span className="rec__gain rec__gain--none">Ne change pas la note</span>
+                    ) : null}
                   </div>
                   <div className="rec__tags">
                     <Tag tone={r.impact === "high" ? "accent" : "neutral"}>{IMPACT_LABEL[r.impact]}</Tag>
                     <Tag>Effort : {EFFORT_LABEL[r.effort].toLowerCase()}</Tag>
                     <span className="small muted">{plural(r.pagesAffected, "page concernée", "pages concernées")}</span>
                   </div>
+                  {r.scoreGain === 0 && r.pointsToGain === 0 && <p className="rec__why">{DUPLICATE_NOTE}</p>}
                   <ol className="steps rec__steps">
                     {r.steps.map((s, i) => <li key={i}>{s}</li>)}
                   </ol>

@@ -53,7 +53,8 @@ export function CompetitorsScreen({ site }: { site: SiteSummary }) {
         actions={data?.available ? <Button icon={<RefreshCw size={15} aria-hidden />} loading={r.busy} onClick={r.run}>{r.busy ? "Relevé en cours…" : "Refaire le relevé"}</Button> : undefined}
       />
       <QueryError q={q} />
-      {r.error && <ErrorState error={r.error} inline onRetry={r.error.code === "competitors_not_configured" ? undefined : r.run} retrying={r.busy} />}
+      {/* Sans relevé précédent, le bouton « Relever les concurrents » juste dessous sert de relance : pas de doublon. */}
+      {r.error && <ErrorState error={r.error} inline onRetry={r.error.code === "competitors_not_configured" || !data?.available ? undefined : r.run} retrying={r.busy} />}
       {!data && !q.error && (<><LoadingLabel /><SkeletonRows rows={6} height={88} /></>)}
 
       {data && !data.available && data.reason === "not_configured" && (

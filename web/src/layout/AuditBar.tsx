@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CircleAlert, RefreshCw, Square } from "lucide-react";
 import type { AuditResponse, SiteSummary } from "../lib/types";
 import { sendJSON, toAppError } from "../lib/api";
@@ -6,8 +6,9 @@ import { keys } from "../lib/queries";
 import { patchSite } from "../lib/live";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
-import { fmtInt, plural } from "../lib/format";
+import { fmtDateTime, fmtInt, pl, plural } from "../lib/format";
 import { startAudit } from "../lib/actions";
+import { applyAudit, isNewerAudit, resultsOf } from "../lib/results";
 
 function pathOf(url: string) {
   try {
@@ -18,8 +19,16 @@ function pathOf(url: string) {
   }
 }
 
+/** Dernière page lue de l'analyse : entre deux pages, le serveur n'en signale aucune, on garde la précédente. */
+function useLastUrl(auditId: string | undefined, url: string | null | undefined) {
+  const last = useRef<{ id?: string; url: string | null }>({ url: null });
+  if (last.current.id !== auditId) last.current = { id: auditId, url: null };
+  if (url) last.current.url = url;
+  return last.current.url;
+}
+
 /**
- * Bandeau d'analyse, visible sur tous les écrans pendant une analyse.
+ * Bandeau d'analyse, visible sur tous les écrans pendant une analyse ou après un échec.
  * Chiffres réels reçus du serveur : pages notées, en attente, en échec, page en cours.
  * Aucun pourcentage : le total n'est pas connu d'avance.
  */
@@ -28,16 +37,23 @@ export function AuditBar({ site }: { site: SiteSummary }) {
   const [stopping, setStopping] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const a = site.audit;
+  const lastUrl = useLastUrl(a?.id, a?.currentUrl);
   if (!a) return null;
+  const older = isNewerAudit(site);
+  const r = resultsOf(site);
+  const olderLine = older && r ? `Les résultats affichés sont ceux de l'analyse ${r.finishedAt ? `du ${fmtDateTime(r.finishedAt)}` : "précédente"}.` : null;
 
   if (a.state === "failed") {
     return (
       <div className="auditbar auditbar--failed" role="alert">
         <CircleAlert size={16} aria-hidden className="auditbar__icon" />
-        <p className="auditbar__text">
-          <strong>L'analyse a échoué.</strong> {a.error?.message ?? "Le site n'a pas pu être analysé."}
-          {a.error?.action && <span className="auditbar__muted"> {a.error.action}</span>}
-        </p>
+        <div className="auditbar__text">
+          <p>
+            <strong>{older ? "La nouvelle analyse a échoué." : "L'analyse a échoué."}</strong> {a.error?.message ?? "Le site n'a pas pu être analysé."}
+            {a.error?.action && <span className="auditbar__muted"> {a.error.action}</span>}
+          </p>
+          {olderLine && <p className="auditbar__note">{olderLine}</p>}
+        </div>
         <Button
           size="sm"
           icon={<RefreshCw size={14} aria-hidden />}
@@ -60,8 +76,14 @@ export function AuditBar({ site }: { site: SiteSummary }) {
     setStopping(true);
     try {
       const res = await sendJSON<AuditResponse>("POST", `${keys.audits(site.id)}/cancel`);
-      patchSite(site.id, (s) => ({ ...s, audit: res.audit }));
-      toast.show({ tone: "neutral", title: "Analyse arrêtée", text: `${plural(res.audit.pagesDone, "page notée est conservée", "pages notées sont conservées")}.` });
+      patchSite(site.id, (s) => applyAudit(s, res.audit, undefined));
+      toast.show({
+        tone: "neutral",
+        title: "Analyse arrêtée",
+        text: older
+          ? "Les résultats de l'analyse précédente restent affichés."
+          : `${plural(res.audit.pagesDone, "page notée est conservée", "pages notées sont conservées")}.`,
+      });
     } catch (err) {
       const e = toAppError(err);
       toast.show({ tone: "error", title: e.message, text: e.action });
@@ -70,22 +92,28 @@ export function AuditBar({ site }: { site: SiteSummary }) {
     }
   };
 
+  const title = a.state === "queued" ? (older ? "Nouvelle analyse en file d'attente" : "Analyse en file d'attente") : older ? "Nouvelle analyse en cours" : "Analyse en cours";
+
   return (
     <div className="auditbar" role="status" aria-live="off">
       <span className="live-dot" aria-hidden />
       <div className="auditbar__main">
         <p className="auditbar__title">
-          {a.state === "queued" ? "Analyse en file d'attente" : "Analyse en cours"}
+          {title}
           <span className="auditbar__counts">
-            <span><strong className="tnum">{fmtInt(a.pagesDone)}</strong> {a.pagesDone > 1 ? "pages notées" : "page notée"}</span>
+            <span><strong className="tnum">{fmtInt(a.pagesDone)}</strong> {pl(a.pagesDone, "page notée", "pages notées")}</span>
             <span><strong className="tnum">{fmtInt(a.pagesQueued)}</strong> en attente</span>
             {a.pagesFailed > 0 && <span className="auditbar__failed"><strong className="tnum">{fmtInt(a.pagesFailed)}</strong> en échec</span>}
             <span className="auditbar__muted">plafond {fmtInt(a.maxPages)}</span>
           </span>
         </p>
-        <p className="auditbar__url" title={a.currentUrl ?? undefined}>
-          {a.currentUrl ? <>Lecture de <span className="mono">{pathOf(a.currentUrl)}</span></> : "Préparation…"}
-        </p>
+        {olderLine ? (
+          <p className="auditbar__url auditbar__url--wrap">{olderLine} Ils seront remplacés à la fin.</p>
+        ) : (
+          <p className="auditbar__url" title={lastUrl ?? undefined}>
+            {lastUrl ? <>Lecture de <span className="mono">{pathOf(lastUrl)}</span></> : a.state === "queued" ? "Elle démarre dès qu'une autre analyse se termine." : "Démarrage…"}
+          </p>
+        )}
       </div>
       <Button size="sm" variant="ghost" icon={<Square size={12} aria-hidden fill="currentColor" />} onClick={stop} loading={stopping}>
         Arrêter

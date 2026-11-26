@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Menu, Moon, Sun, X } from "lucide-react";
+import { Menu, Moon, Sun, WifiOff, X } from "lucide-react";
 import type { SiteSummary } from "../lib/types";
 import { sitePath, usePath, type SectionName } from "../lib/router";
 import { prefetch } from "../lib/cache";
@@ -10,6 +10,35 @@ import { Link } from "../ui/Button";
 import { NAV } from "./nav";
 import { SiteSwitcher } from "./SiteSwitcher";
 import { AuditBar } from "./AuditBar";
+import { useLiveStatus } from "../lib/live";
+import { noResultsReason } from "../lib/results";
+
+/** Sections dont l'écran vide affiche lui-même l'échec de l'analyse et son « Relancer ». */
+const RESULT_SECTIONS: SectionName[] = ["overview", "audit", "pages", "recommendations"];
+
+/**
+ * Indicateur unique de coupure du direct. Il n'apparaît qu'après 1,5 s sans connexion,
+ * pour ne pas clignoter lors d'une reconnexion rapide.
+ */
+function ConnectionBar() {
+  const status = useLiveStatus();
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (status !== "retrying") {
+      setShow(false);
+      return;
+    }
+    const t = setTimeout(() => setShow(true), 1500);
+    return () => clearTimeout(t);
+  }, [status]);
+  if (!show) return null;
+  return (
+    <div className="connbar" role="status">
+      <WifiOff size={14} aria-hidden />
+      <span><strong>Connexion au serveur perdue</strong> — nouvelle tentative… Les chiffres affichés peuvent dater.</span>
+    </div>
+  );
+}
 
 const PREFETCH: Partial<Record<SectionName, (id: string) => string>> = {
   overview: keys.overview,
@@ -114,6 +143,8 @@ export function Shell({ sites, site, section, counts, children }: {
   }, [drawer]);
 
   const running = site?.audit && (site.audit.state === "running" || site.audit.state === "queued");
+  // Échec sans aucun résultat : sur les écrans de résultats, le bloc vide porte le message et « Relancer ».
+  const hideFailedBar = !!site && noResultsReason(site) === "failed" && RESULT_SECTIONS.includes(section);
 
   return (
     <div className={`shell ${drawer ? "shell--drawer" : ""}`}>
@@ -139,13 +170,17 @@ export function Shell({ sites, site, section, counts, children }: {
 
       <div className="main">
         <header className="topbar">
-          <button type="button" className="icon-btn" onClick={() => setDrawer(true)} aria-label="Ouvrir le menu" aria-expanded={drawer}>
+          <button type="button" className="icon-btn topbar__menu" onClick={() => setDrawer(true)} aria-label="Ouvrir le menu" aria-expanded={drawer}>
             <Menu size={19} aria-hidden />
           </button>
-          <span className="topbar__title">{site?.name ?? "Chat SEO"}</span>
+          <span className="topbar__title">
+            <span className="topbar__name">{site?.name ?? "Chat SEO"}</span>
+            {site && site.name !== site.host && <span className="topbar__host">{site.host}</span>}
+          </span>
           {running && <span className="live-chip"><span className="live-dot" aria-hidden />Analyse</span>}
         </header>
-        {site && <AuditBar site={site} />}
+        <ConnectionBar />
+        {site && !(hideFailedBar && site.audit?.state === "failed") && <AuditBar site={site} />}
         <main id="contenu" className="content" tabIndex={-1}>
           {children}
         </main>

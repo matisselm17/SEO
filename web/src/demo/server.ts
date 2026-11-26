@@ -4,21 +4,29 @@
  * y compris les flux SSE (analyse en cours, réponse de l'assistant).
  * Ce module n'est jamais inclus dans le build de production (voir lib/transport.ts).
  *
- * Scénarios, choisis avec ?demo=… dans l'adresse (mémorisé pour l'onglet) :
- *   complet (défaut) · vide · sans-gsc · sans-config · analyse · analyse-figee · erreurs · lent
- * Saisies spéciales à l'ajout d'un site : une adresse contenant « injoignable » renvoie site_unreachable.
+ * Il suit la règle « Quelle analyse est affichée » : les résultats (`results`) sont ceux de la dernière
+ * analyse terminée ; à défaut, de la plus récente qui a au moins une page notée. Une relance ne les remplace
+ * qu'à sa fin.
+ *
+ * Scénarios, choisis avec ?demo=… dans l'adresse (mémorisé pour l'onglet) : voir web/README.md.
+ * Saisies spéciales :
+ *   - ajout d'un site : « injoignable » → site_unreachable, « plafond » → limit_reached, « rafale » → rate_limited ;
+ *   - assistant : « clé » → clé refusée (erreur définitive), « panne » → échec avant toute réponse,
+ *     « limite » → rate_limited avec délai.
  */
 import examples from "../../../docs/exemples/exemples.json";
 import type {
-  ApiError, AuditStatus, ChatMessage, CompetitorsData, ErrorCode, Overview, SearchConsoleData, Settings, SiteEvent, SiteSummary,
+  ApiError, AuditStatus, ChatMessage, CompetitorsData, ErrorCode, FailedPage, Overview, SearchConsoleData, Settings, SiteEvent, SiteSummary,
 } from "../lib/types";
 import {
   LUNE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, categoriesOf, issuesOf,
   recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
 } from "./data";
 
-type Scenario = "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "erreurs" | "lent";
-const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "erreurs", "lent"];
+type Scenario =
+  | "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "relance" | "relance-figee"
+  | "echec" | "coupure" | "erreurs" | "lent";
+const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "relance", "relance-figee", "echec", "coupure", "erreurs", "lent"];
 
 function readScenario(): Scenario {
   const fromUrl = new URLSearchParams(location.search).get("demo") as Scenario | null;
@@ -35,6 +43,7 @@ export const demoScenario = scenario;
 const ex = examples as unknown as Record<string, unknown>;
 const exSettings = ex["GET /api/settings"] as Settings;
 const exChat = ex["GET /api/sites/site_8fk2/chat"] as { messages: ChatMessage[]; suggestions: string[] };
+const exFailed = (ex["GET /api/sites/site_8fk2/failed-pages"] as { pages: FailedPage[] }).pages;
 
 const settings: Settings = {
   ...exSettings,
@@ -46,11 +55,21 @@ const settings: Settings = {
 
 // ───────── État en mémoire
 
+/** Une analyse : son état, ses pages notées et ses pages non chargées. */
+interface Run {
+  audit: AuditStatus;
+  pages: DemoPage[];
+  failed: FailedPage[];
+}
+
 interface DemoSite {
   summary: SiteSummary;
   profile: SiteProfile;
   truth: DemoPage[];
-  pages: DemoPage[];
+  /** Analyse dont les résultats sont affichés (SiteSummary.results). */
+  shown: Run | null;
+  /** Dernière analyse lancée (SiteSummary.audit). */
+  current: Run | null;
   previousScore: number | null;
   gsc: Extract<SearchConsoleData, { available: true }> | null;
   competitors: CompetitorsData;
@@ -63,26 +82,62 @@ const sites: DemoSite[] = [];
 let seq = 100;
 const nextId = (p: string) => `${p}_${(seq++).toString(36)}`;
 
-function makeSite(id: string, name: string, profile: SiteProfile, createdAt: string, opts: { score?: number | null; gsc: boolean; auditEnd: string; previous: number | null; competitors: CompetitorsData; chat: ChatMessage[] }): DemoSite {
-  const truth = buildPages(profile, opts.auditEnd);
+function failedPage(host: string, path: string, httpStatus: number | null, reason: string): FailedPage {
+  return { url: `https://${host}${path}`, path, httpStatus, reason };
+}
+
+/** Recalcule le résumé du site selon la règle « Quelle analyse est affichée ». */
+function sync(site: DemoSite) {
+  const cur = site.current;
+  if (cur) {
+    if (cur.audit.state === "done") {
+      if (site.shown && site.shown !== cur && site.shown.audit.state === "done") site.previousScore = siteScore(site.shown.pages);
+      site.shown = cur;
+    } else if ((!site.shown || site.shown.audit.state !== "done") && cur.pages.length > 0) {
+      site.shown = cur;
+    }
+  }
+  const sh = site.shown;
+  site.summary = {
+    ...site.summary,
+    audit: cur ? { ...cur.audit } : null,
+    results: sh ? { auditId: sh.audit.id, state: sh.audit.state, finishedAt: sh.audit.finishedAt, pagesDone: sh.audit.pagesDone, pagesFailed: sh.audit.pagesFailed } : null,
+    score: sh ? siteScore(sh.pages) : null,
+    pagesAnalyzed: sh ? sh.pages.length : 0,
+  };
+}
+
+function doneRun(truth: DemoPage[], end: string, failed: FailedPage[]): Run {
+  return {
+    audit: {
+      id: nextId("aud"), state: "done", startedAt: new Date(new Date(end).getTime() - 102000).toISOString(), finishedAt: end,
+      maxPages: Math.max(100, truth.length), pagesDone: truth.length, pagesFailed: failed.length, pagesQueued: 0, currentUrl: null, error: null,
+    },
+    pages: truth,
+    failed,
+  };
+}
+
+function makeSite(id: string, name: string, profile: SiteProfile, createdAt: string, opts: { gsc: boolean; auditEnd: string; previous: number | null; competitors: CompetitorsData; chat: ChatMessage[]; limit?: number; failed?: FailedPage[] }): DemoSite {
+  const truth = buildPages(profile, opts.auditEnd).slice(0, opts.limit ?? Infinity);
   const gsc = opts.gsc
     ? buildSearchConsole(truth, profile.seed + 1, "2026-11-26T14:05:00.000Z", {
         queries: LUNE_QUERIES, host: profile.host, clicksPerDay: 20,
-        extraPages: [{ path: "/blog/emaillage", clicks: 12, impressions: 900, position: 22.5 }],
+        extraPages: [{ path: "/blog/emaillage", clicks: 12, impressions: 900, position: 22.5 }, { path: "/ancienne-collection", clicks: 3, impressions: 410, position: 31.2 }],
       })
     : null;
   attachOrganic(truth, gsc);
-  const audit: AuditStatus = {
-    id: nextId("aud"), state: "done", startedAt: new Date(new Date(opts.auditEnd).getTime() - 102000).toISOString(), finishedAt: opts.auditEnd,
-    maxPages: Math.max(100, truth.length), pagesDone: truth.length, pagesFailed: 1, pagesQueued: 0, currentUrl: null, error: null,
-  };
-  return {
+  const failed = opts.failed ?? exFailed.map((f) => ({ ...f, url: f.url.replace("atelier-lune.example", profile.host) }));
+  const run = doneRun(truth, opts.auditEnd, failed);
+  const site: DemoSite = {
     summary: {
-      id, url: `https://${profile.host}/`, host: profile.host, name, createdAt, audit, score: siteScore(truth), pagesAnalyzed: truth.length,
+      id, url: `https://${profile.host}/`, host: profile.host, name, createdAt, audit: null, results: null, score: null, pagesAnalyzed: 0,
       searchConsole: { available: !!gsc, importedAt: gsc?.importedAt ?? null },
     },
-    profile, truth, pages: truth, previousScore: opts.previous, gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
+    profile, truth, shown: run, current: run, previousScore: opts.previous, gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
   };
+  sync(site);
+  return site;
 }
 
 if (scenario !== "vide") {
@@ -97,6 +152,57 @@ if (scenario !== "vide") {
       competitors: scenario === "sans-config" ? { available: false, reason: "not_configured" } : { available: false, reason: "not_run" }, chat: [],
     }),
   );
+}
+
+if (scenario === "echec") {
+  // 1. Première analyse en échec : aucune page notée, results null.
+  const sable: SiteProfile = { ...LUNE, host: "boutique-sable.example", seed: 31 };
+  const s1 = makeSite("site_sabl", "boutique-sable.example", sable, "2026-11-26T08:00:00.000Z", { gsc: false, auditEnd: "2026-11-26T08:01:00.000Z", previous: null, competitors: { available: false, reason: "no_audit" }, chat: [] });
+  s1.shown = null;
+  s1.current = {
+    audit: {
+      id: nextId("aud"), state: "failed", startedAt: "2026-11-26T15:20:00.000Z", finishedAt: "2026-11-26T15:20:09.000Z", maxPages: 100,
+      pagesDone: 0, pagesFailed: 1, pagesQueued: 0, currentUrl: null,
+      error: { code: "site_unreachable", message: "Le site n'a pas pu être chargé : connexion impossible.", action: "Vérifiez que le site est en ligne et accessible, puis relancez l'analyse." },
+    },
+    pages: [],
+    failed: [failedPage(sable.host, "/", null, "Connexion impossible : le serveur du site ne répond pas.")],
+  };
+  sync(s1);
+  sites.unshift(s1);
+
+  // 2. Relance interrompue par un redémarrage du serveur : les résultats précédents restent affichés.
+  const lune = sites.find((s) => s.summary.id === "site_8fk2")!;
+  lune.current = {
+    audit: {
+      id: nextId("aud"), state: "failed", startedAt: "2026-11-26T15:02:00.000Z", finishedAt: "2026-11-26T15:02:40.000Z", maxPages: 100,
+      pagesDone: 12, pagesFailed: 0, pagesQueued: 0, currentUrl: null,
+      error: { code: "internal", message: "L'analyse a été interrompue par un redémarrage du serveur.", action: "Relancez l'analyse. Les résultats précédents restent affichés en attendant." },
+    },
+    pages: lune.truth.slice(0, 12),
+    failed: [],
+  };
+  sync(lune);
+
+  // 3. Plus de pages en échec que de pages notées : note peu fiable.
+  const orlux = sites.find((s) => s.summary.id === "site_orlx")!;
+  const orluxFailed = [
+    ["/collections/bagues", 403, "Accès refusé par le site (403)"],
+    ["/collections/colliers", 403, "Accès refusé par le site (403)"],
+    ["/collections/bracelets", 403, "Accès refusé par le site (403)"],
+    ["/collections/boucles-d-oreilles", 403, "Accès refusé par le site (403)"],
+    ["/collections/piercings", 503, "Le site est temporairement indisponible (503)"],
+    ["/collections/chevilleres", 503, "Le site est temporairement indisponible (503)"],
+    ["/pages/livraison", 404, "Page introuvable (404)"],
+    ["/pages/guide-des-tailles-bagues-et-bracelets-en-or-18-carats-et-argent-925", null, "Délai dépassé : la page n'a pas répondu en 15 secondes"],
+    ["/blogs/journal", 500, "Erreur du serveur du site (500)"],
+  ] as const;
+  const keep = orlux.truth.slice(0, 4);
+  const run = doneRun(keep, "2026-11-24T09:40:00.000Z", orluxFailed.map(([p, st, r]) => failedPage(ORLUX.host, p, st, r)));
+  orlux.truth = keep;
+  orlux.shown = run;
+  orlux.current = run;
+  sync(orlux);
 }
 
 // ───────── Réponses
@@ -116,20 +222,19 @@ const notFound = () => apiError(404, "not_found", "Cette ressource n'existe pas 
 // Scénario « erreurs » : toute lecture échoue pendant les 2 premières secondes après le chargement
 // (couvre les relances automatiques au montage des écrans) ; une relance manuelle ensuite réussit.
 const loadedAt = Date.now();
-function maybeFail(key: string): Response | null {
+function maybeFail(): Response | null {
   if (scenario !== "erreurs" || Date.now() - loadedAt > 2000) return null;
-  void key;
   return apiError(500, "internal", "Le serveur n'a pas pu lire les résultats de l'analyse.", "Réessayez dans un instant.");
 }
 
 // ───────── Calculs
 
-function pagesTotal(site: DemoSite) {
-  return site.pages.length;
+function shownPages(site: DemoSite): DemoPage[] {
+  return site.shown?.pages ?? [];
 }
 
 function overviewOf(site: DemoSite): Overview {
-  const pages = site.pages;
+  const pages = shownPages(site);
   const issues = issuesOf(pages);
   const score = siteScore(pages);
   const counts = { critical: 0, warning: 0, info: 0 };
@@ -179,53 +284,66 @@ function sseResponse(start: (push: (event: string, data: unknown) => void, close
 function startAudit(site: DemoSite, maxPages: number, frozenAt?: number) {
   if (site.timer) clearInterval(site.timer);
   const truth = site.truth.slice(0, Math.min(maxPages, site.truth.length));
-  site.previousScore = site.summary.score;
-  site.pages = [];
-  const audit: AuditStatus = {
-    id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages,
-    pagesDone: 0, pagesFailed: 0, pagesQueued: 1, currentUrl: site.summary.url, error: null,
+  const run: Run = {
+    audit: {
+      id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages,
+      pagesDone: 0, pagesFailed: 0, pagesQueued: 1, currentUrl: site.summary.url, error: null,
+    },
+    pages: [],
+    failed: [],
   };
-  site.summary = { ...site.summary, audit, score: null, pagesAnalyzed: 0 };
-  emit(site, { type: "audit", audit, score: null });
+  site.current = run;
+  sync(site);
+  emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
   let i = 0;
-  const failAt = new Set([Math.min(13, truth.length - 1)]);
+  const failAt = Math.min(13, truth.length - 1);
   const interval = truth.length > 100 ? 140 : 420;
   const tick = () => {
-    const a = site.summary.audit!;
+    const a = run.audit;
     if (a.state !== "running") return;
     if (frozenAt !== undefined && a.pagesDone >= frozenAt) return;
     if (i >= truth.length) {
-      const done: AuditStatus = { ...a, state: "done", finishedAt: new Date().toISOString(), pagesQueued: 0, currentUrl: null };
-      site.summary = { ...site.summary, audit: done, score: siteScore(site.pages), pagesAnalyzed: site.pages.length };
-      emit(site, { type: "audit", audit: done, score: site.summary.score });
+      run.audit = { ...a, state: "done", finishedAt: new Date().toISOString(), pagesQueued: 0, currentUrl: null };
+      sync(site);
+      emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
       clearInterval(site.timer!);
       site.timer = null;
       return;
     }
-    let failed = a.pagesFailed;
-    if (failAt.has(i) && failed === 0) failed++;
+    if (i === failAt && run.failed.length === 0) run.failed.push(failedPage(site.profile.host, "/ancienne-page", 404, "Page introuvable (404)"));
     const page = truth[i++];
-    site.pages = [...site.pages, page];
-    emit(site, { type: "page", page: page.summary });
+    run.pages.push(page);
     const discovered = Math.min(truth.length, Math.max(i + 1, Math.round(i * 2.4) + 3));
     const next = truth[i];
-    const audit2: AuditStatus = { ...a, pagesDone: site.pages.length, pagesFailed: failed, pagesQueued: Math.max(0, discovered - i), currentUrl: next ? next.summary.url : null };
-    site.summary = { ...site.summary, audit: audit2, score: siteScore(site.pages), pagesAnalyzed: site.pages.length };
-    emit(site, { type: "audit", audit: audit2, score: site.summary.score });
+    run.audit = { ...a, pagesDone: run.pages.length, pagesFailed: run.failed.length, pagesQueued: Math.max(0, discovered - i), currentUrl: next ? next.summary.url : a.currentUrl };
+    sync(site);
+    emit(site, { type: "page", page: page.summary });
+    emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
   };
   if (frozenAt !== undefined) for (let k = 0; k < frozenAt; k++) tick();
   site.timer = setInterval(tick, interval);
 }
 
 if (scenario === "analyse" || scenario === "analyse-figee") {
+  // Première analyse : aucun résultat avant la première page notée.
   const s = sites[0];
-  if (s) startAudit(s, 100, scenario === "analyse-figee" ? 17 : undefined);
+  if (s) {
+    s.shown = null;
+    s.current = null;
+    s.previousScore = null;
+    startAudit(s, 100, scenario === "analyse-figee" ? 17 : undefined);
+  }
+}
+if (scenario === "relance" || scenario === "relance-figee") {
+  // Relance : les résultats de l'analyse terminée restent affichés jusqu'à la fin de la nouvelle.
+  const s = sites[0];
+  if (s) startAudit(s, 100, scenario === "relance-figee" ? 9 : undefined);
 }
 
 // ───────── Assistant
 
 function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: string; sources: string[] } {
-  const issues = issuesOf(site.pages);
+  const issues = issuesOf(shownPages(site));
   const recs = recommendationsOf(issues);
   const low = q.toLowerCase();
   if (/visite|clic|trafic|rapport/.test(low)) {
@@ -236,28 +354,31 @@ function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: st
     return {
       tools: ["Lecture des données Search Console", "Lecture des pages analysées"],
       sources: ["Search Console", "Pages analysées"],
-      text: `Sur la période importée, vos pages qui apportent le plus de visites depuis Google sont :\n\n${top.map((p) => `- \`${p.path}\` : **${p.clicks} clics**${p.score !== null ? `, note ${p.score}/100` : ", page non analysée"}`).join("\n")}\n\nCe sont elles qu'il faut soigner en premier : chaque point gagné sur ces pages profite à plus de visiteurs.`,
+      text: `Sur la période importée, vos pages qui apportent le plus de visites depuis Google sont :\n\n${top.map((p) => `- [${p.path}](${p.url}) : **${p.clicks} clics**${p.score !== null ? `, note ${p.score}/100` : ", page non analysée"}`).join("\n")}\n\nCe sont elles qu'il faut soigner en premier. Pour aller plus loin, le guide de Google sur les [extraits de résultats](https://developers.google.com/search/docs/appearance/snippet) explique comment il choisit le texte affiché.\n\n![capture](https://exemple.invalid/capture.png)`,
     };
   }
   if (/description|rédige|écri/.test(low)) {
     return {
       tools: ["Lecture de la page /boutique"],
       sources: ["Page /boutique"],
-      text: "Voici une proposition pour la page `/boutique` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
+      text: "Voici une proposition pour la page `/boutique` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Le nom de champ `meta__description` de certains thèmes n'a rien à voir avec du gras. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
     };
   }
   const first = recs[0];
   const second = recs[1];
+  const gain = first && first.scoreGain > 0 ? ` (environ ${String(first.scoreGain).replace(".", ",")} points de plus sur la note du site)` : "";
   return {
     tools: ["Lecture des problèmes du site", "Lecture des recommandations"],
     sources: ["Problèmes du site", "Recommandations"],
     text: first
-      ? `Je commencerais par **${first.title.toLowerCase()}** : c'est l'action qui rapporte le plus pour l'effort demandé (${first.pointsToGain} points à regagner sur ${first.pagesAffected} pages).\n\n${second ? `Ensuite : ${second.title.toLowerCase()}.\n\n` : ""}Étapes pour la première action :\n\n${first.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`
-      : "Votre site ne présente aucun problème détecté par l'analyse. Bravo !",
+      ? `Je commencerais par **${first.title.toLowerCase()}** : c'est l'action qui rapporte le plus pour l'effort demandé${gain}.\n\n${second ? `Ensuite : ${second.title.toLowerCase()}.\n\n` : ""}Étapes pour la première action :\n\n${first.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`
+      : "Votre site ne présente aucun problème détecté par l'analyse.",
   };
 }
 
 // ───────── Routeur
+
+let eventsConnections = 0;
 
 export async function demoFetch(input: string, init?: RequestInit): Promise<Response> {
   const url = new URL(input, location.origin);
@@ -294,6 +415,8 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       }
       await delay(900);
       const host = u.hostname.replace(/^www\./, "");
+      if (host.includes("plafond")) return apiError(409, "limit_reached", "Vous suivez déjà 10 sites, le maximum de cette installation.", "Supprimez un site dans ses paramètres pour en ajouter un autre.", { limit: 10 });
+      if (host.includes("rafale")) return apiError(429, "rate_limited", "Trop d'ajouts de sites en peu de temps.", "Patientez un instant, puis réessayez.", { retryAfterSeconds: 20 });
       const existing = sites.find((s) => s.summary.host === host);
       if (existing) return apiError(409, "site_exists", "Ce site est déjà suivi.", "Ouvrez-le depuis la liste de vos sites.", { siteId: existing.summary.id });
       if (host.includes("injoignable")) return apiError(422, "site_unreachable", "Ce site ne répond pas.", "Vérifiez l'adresse, puis réessayez.", { url: u.href });
@@ -301,10 +424,10 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       const site = makeSite(nextId("site"), host, profile, new Date().toISOString(), {
         gsc: false, auditEnd: new Date().toISOString(), previous: null, competitors: settings.integrations.competitors.configured ? { available: false, reason: "not_run" } : { available: false, reason: "not_configured" }, chat: [],
       });
-      site.summary.score = null;
+      site.shown = null;
+      site.current = null;
       sites.unshift(site);
       startAudit(site, body.maxPages ?? settings.maxPagesDefault);
-      site.previousScore = null;
       return json({ site: site.summary }, 201);
     }
     return json({ sites: sites.map((s) => s.summary) });
@@ -318,61 +441,74 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
     if (method === "DELETE") {
       if (site.timer) clearInterval(site.timer);
       sites.splice(sites.indexOf(site), 1);
+      site.listeners.clear();
       return json(null, 204);
     }
     return json({ site: site.summary });
   }
 
   if (sub === "events") {
-    return sseResponse((push) => {
+    // Scénario « coupure » : la première connexion se coupe après 2,5 s, les suivantes échouent (serveur injoignable).
+    if (scenario === "coupure" && eventsConnections++ > 0) {
+      await delay(300);
+      throw new TypeError("Failed to fetch");
+    }
+    return sseResponse((push, close) => {
       push("site", { type: "site", site: site.summary });
       const l = (e: SiteEvent) => push(e.type, e);
       site.listeners.add(l);
-      return () => site.listeners.delete(l);
+      const t = scenario === "coupure" ? setTimeout(close, 2500) : undefined;
+      return () => {
+        site.listeners.delete(l);
+        if (t) clearTimeout(t);
+      };
     }, init?.signal);
   }
 
   if (sub === "audits") {
     if (parts[3] === "cancel") {
-      const a = site.summary.audit;
-      if (!a || a.state !== "running") return apiError(409, "no_audit", "Aucune analyse n'est en cours.", null);
+      const run = site.current;
+      if (!run || (run.audit.state !== "running" && run.audit.state !== "queued")) return apiError(409, "no_audit", "Aucune analyse n'est en cours.", null);
       if (site.timer) clearInterval(site.timer);
       site.timer = null;
-      const cancelled: AuditStatus = { ...a, state: "cancelled", finishedAt: new Date().toISOString(), currentUrl: null, pagesQueued: 0 };
-      site.summary = { ...site.summary, audit: cancelled };
-      emit(site, { type: "audit", audit: cancelled, score: site.summary.score });
-      return json({ audit: cancelled });
+      run.audit = { ...run.audit, state: "cancelled", finishedAt: new Date().toISOString(), currentUrl: null, pagesQueued: 0 };
+      sync(site);
+      emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
+      return json({ audit: run.audit });
     }
-    if (site.summary.audit?.state === "running") return apiError(409, "audit_running", "Une analyse est déjà en cours pour ce site.", "Attendez la fin de l'analyse ou arrêtez-la.");
+    if (site.current?.audit.state === "running") return apiError(409, "audit_running", "Une analyse est déjà en cours pour ce site.", "Attendez la fin de l'analyse ou arrêtez-la.");
     const body = JSON.parse(String(init?.body ?? "{}")) as { maxPages?: number };
     startAudit(site, body.maxPages ?? settings.maxPagesDefault);
     return json({ audit: site.summary.audit }, 202);
   }
 
-  const failure = method === "GET" ? maybeFail(path) : null;
+  const failure = method === "GET" ? maybeFail() : null;
   if (failure) return failure;
 
+  const pages = shownPages(site);
   switch (sub) {
     case "overview":
       return json(overviewOf(site));
     case "issues": {
-      const issues = issuesOf(site.pages);
+      const issues = issuesOf(pages);
       if (parts[3]) {
         const d = issues.find((i) => i.id === parts[3]);
         return d ? json({ issue: d }) : notFound();
       }
-      return json({ issues: issues.map(toIssue), strengths: strengthsOf(site.pages), categories: categoriesOf(site.pages) });
+      return json({ issues: issues.map(toIssue), strengths: strengthsOf(pages), categories: pages.length ? categoriesOf(pages) : [] });
     }
+    case "failed-pages":
+      return json({ pages: site.shown?.failed ?? [] });
     case "pages": {
       if (parts[3]) {
-        const p = site.pages.find((x) => x.summary.id === parts[3]) ?? site.truth.find((x) => x.summary.id === parts[3]);
+        const p = pages.find((x) => x.summary.id === parts[3]) ?? site.truth.find((x) => x.summary.id === parts[3]);
         return p ? json({ page: p.detail }) : notFound();
       }
       const sort = url.searchParams.get("sort") ?? "score_asc";
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const limit = Math.min(200, Number(url.searchParams.get("limit") ?? 50));
-      let list = site.pages.map((p) => p.summary);
+      let list = pages.map((p) => p.summary);
       if (q) list = list.filter((p) => p.path.toLowerCase().includes(q) || (p.title ?? "").toLowerCase().includes(q));
       const cmp: Record<string, (a: (typeof list)[0], b: (typeof list)[0]) => number> = {
         score_asc: (a, b) => a.score - b.score, score_desc: (a, b) => b.score - a.score, issues_desc: (a, b) => b.issues - a.issues,
@@ -382,7 +518,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       return json({ pages: list.slice(offset, offset + limit), total: list.length, offset, limit });
     }
     case "recommendations":
-      return json({ recommendations: recommendationsOf(issuesOf(site.pages)) });
+      return json({ recommendations: recommendationsOf(issuesOf(pages)) });
     case "search-console": {
       if (method === "DELETE") {
         site.gsc = null;
@@ -397,9 +533,10 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
         await delay(1200);
         if (!file) return apiError(400, "bad_request", "Aucun fichier reçu.", "Choisissez le fichier exporté depuis la Search Console.");
         if (file.size > 20 * 1024 * 1024) return apiError(413, "file_too_large", "Ce fichier dépasse 20 Mo.", "Exportez une période plus courte, puis réessayez.");
-        if (!/\.(zip|csv)$/i.test(file.name)) return apiError(422, "invalid_file", "Ce fichier n'est pas un export Search Console lisible.", "Déposez le fichier .zip téléchargé depuis « Performances » de la Search Console.");
+        if (!/\.(zip|csv)$/i.test(file.name) || /pas-un-export/.test(file.name)) return apiError(422, "invalid_file", "Ce fichier n'est pas un export Search Console lisible.", "Déposez le fichier .zip téléchargé depuis « Performances » de la Search Console.");
         site.gsc = buildSearchConsole(site.truth, site.profile.seed + 1, new Date().toISOString(), {
-          queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20, extraPages: [],
+          queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20,
+          extraPages: [{ path: "/ancienne-collection", clicks: 3, impressions: 410, position: 31.2 }],
         });
         attachOrganic(site.truth, site.gsc);
         site.summary = { ...site.summary, searchConsole: { available: true, importedAt: site.gsc.importedAt } };
@@ -412,10 +549,11 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       if (method === "POST") {
         if (!settings.integrations.competitors.configured) return apiError(503, "competitors_not_configured", "Le relevé des concurrents n'est pas configuré sur le serveur.", "Ajoutez une clé de recherche côté serveur pour l'activer.");
         await delay(1800);
+        if (scenario === "erreurs") return apiError(503, "competitors_unavailable", "Le service de recherche ne répond pas pour le moment.", "Réessayez dans quelques minutes.");
         site.competitors = buildCompetitors(site.summary.host);
         return json(site.competitors);
       }
-      if (!site.summary.audit) return json({ available: false, reason: "no_audit" });
+      if (!site.summary.results) return json({ available: false, reason: "no_audit" });
       return json(site.competitors);
     }
     case "chat": {
@@ -426,13 +564,29 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       if (method === "POST") {
         if (!settings.integrations.chat.configured) return apiError(503, "chat_not_configured", "L'assistant n'est pas configuré sur ce serveur.", "Ajoutez la clé d'API Claude côté serveur pour l'activer.");
         const { message } = JSON.parse(String(init?.body ?? "{}")) as { message: string };
+        const low = message.toLowerCase();
+        if (low.includes("limite")) return apiError(429, "rate_limited", "Vous avez posé beaucoup de questions en peu de temps.", "Patientez un peu, puis renvoyez votre question.", { retryAfterSeconds: 45 });
         const userMessage: ChatMessage = { id: nextId("msg"), role: "user", content: message, createdAt: new Date().toISOString(), sources: [] };
         site.chat = [...site.chat, userMessage];
         const answer = assistantAnswer(site, message);
+        // Échec avant toute réponse : la question n'est pas conservée (comme le serveur).
+        const failEarly = low.includes("clé") || low.includes("panne");
         return sseResponse((push, close) => {
           let cancelled = false;
           (async () => {
             push("start", { type: "start", userMessage });
+            if (failEarly) {
+              await delay(700);
+              site.chat = site.chat.filter((m) => m.id !== userMessage.id);
+              push("error", {
+                type: "error",
+                error: low.includes("clé")
+                  ? { code: "chat_not_configured", message: "La clé de l'API Claude configurée sur le serveur est refusée.", action: "Vérifiez la clé ANTHROPIC_API_KEY du serveur, puis redémarrez-le." }
+                  : { code: "chat_unavailable", message: "L'assistant est momentanément saturé.", action: "Réessayez dans quelques instants." },
+              });
+              close();
+              return;
+            }
             for (const t of answer.tools) {
               await delay(500);
               if (cancelled) return;
@@ -447,9 +601,15 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
               return;
             }
             const chunks = answer.text.match(/[\s\S]{1,14}/g) ?? [];
+            let sent = "";
             for (const c of chunks) {
-              if (cancelled) return;
+              if (cancelled) {
+                // Flux coupé par le navigateur : la génération s'arrête, la réponse partielle est enregistrée.
+                if (sent) site.chat = [...site.chat, { id: nextId("msg"), role: "assistant", content: `${sent}…`, createdAt: new Date().toISOString(), sources: answer.sources }];
+                return;
+              }
               push("delta", { type: "delta", text: c });
+              sent += c;
               await delay(28);
             }
             const msg: ChatMessage = { id: nextId("msg"), role: "assistant", content: answer.text, createdAt: new Date().toISOString(), sources: answer.sources };
@@ -462,10 +622,9 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
           };
         }, init?.signal);
       }
-      const suggestions = site.pages.length ? exChat.suggestions : [];
+      const suggestions = pages.length ? [...exChat.suggestions] : [];
       return json({ available: settings.integrations.chat.configured, messages: site.chat, suggestions });
     }
   }
-  void pagesTotal;
   return notFound();
 }

@@ -2,15 +2,18 @@
 import { createApp } from "../../src/app.ts";
 import type { ChatClient } from "../../src/chat/assistant.ts";
 import type { SearchProvider } from "../../src/competitors/competitors.ts";
-import type { Config } from "../../src/config.ts";
+import { DEFAULT_LIMITS, type Config, type Limits } from "../../src/config.ts";
 import { Crawler } from "../../src/crawl/crawler.ts";
 import { openDb } from "../../src/db.ts";
 import { EventHub } from "../../src/events.ts";
 import { Store } from "../../src/store.ts";
 
-export function testEnv(opts: { chatClient?: ChatClient | null; searchProvider?: SearchProvider | null; delayMs?: number } = {}) {
+export function testEnv(opts: { chatClient?: ChatClient | null; searchProvider?: SearchProvider | null; delayMs?: number; limits?: Partial<Limits> } = {}) {
+  const limits = { ...DEFAULT_LIMITS, ...opts.limits };
   const config: Config = {
     port: 0,
+    host: "127.0.0.1",
+    limits,
     dataDir: ":memory:",
     anthropicApiKey: opts.chatClient ? "sk-ant-test-SECRET-KEY" : null,
     anthropicModel: "claude-sonnet-5-5",
@@ -21,7 +24,7 @@ export function testEnv(opts: { chatClient?: ChatClient | null; searchProvider?:
   };
   const store = new Store(openDb(":memory:"));
   const hub = new EventHub();
-  const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024 });
+  const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024 }, limits.maxConcurrentAudits);
   const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null });
   return { app, store, hub, crawler, config };
 }
@@ -53,3 +56,9 @@ export async function readSse(res: Response, until?: (ev: { event: string; data:
   }
   return out;
 }
+
+/** En-têtes d'une requête JSON qui modifie (exigés par le serveur). */
+export const JSON_HEADERS = { "content-type": "application/json" };
+export const post = (body: unknown) => ({ method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
+export const del = () => ({ method: "DELETE", headers: JSON_HEADERS });
+export const postEmpty = () => ({ method: "POST", headers: JSON_HEADERS });

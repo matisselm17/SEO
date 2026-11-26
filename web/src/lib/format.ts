@@ -52,3 +52,12 @@ export function plural(n: number, one: string, many: string) {
 export function displayUrl(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "");
 }
+
+/** Points sur la note du site (sur 100), une décimale : « 5,2 points », « 1,5 point ». */
+export function fmtScorePoints(n: number): string {
+  const v = Math.abs(n);
+  return `${dec1.format(v)} ${v < 2 ? "point" : "points"}`;
+}
+
+/** Accord simple : « 1 page », « 3 pages » (sans le nombre). */
+export const pl = (n: number, one: string, many: string) => (n > 1 ? many : one);

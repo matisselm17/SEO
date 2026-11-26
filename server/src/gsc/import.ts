@@ -6,6 +6,7 @@
 import { unzipSync } from "fflate";
 import type { OrganicPoint, OrganicQuery, OrganicTotals } from "../../../shared/api.ts";
 import { HttpError } from "../errors.ts";
+import { bareHost } from "../crawl/url.ts";
 
 export interface ImportedPage extends OrganicTotals {
   url: string;
@@ -27,13 +28,10 @@ const MAX_ENTRY_BYTES = 40 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 80 * 1024 * 1024;
 const MAX_ROWS = 50_000;
 
-export const invalidFile = (message = "Ce fichier n'est pas un export Search Console lisible.") =>
-  new HttpError(
-    422,
-    "invalid_file",
-    message,
-    "Dans la Search Console, ouvrez « Performances », cliquez sur « Exporter » puis « Télécharger le fichier CSV », et déposez le .zip obtenu.",
-  );
+export const invalidFile = (
+  message = "Ce fichier n'est pas un export Search Console lisible.",
+  action = "Dans la Search Console, ouvrez « Performances », cliquez sur « Exporter » puis « Télécharger le fichier CSV », et déposez le .zip obtenu.",
+) => new HttpError(422, "invalid_file", message, action);
 
 // ───────── CSV
 
@@ -172,6 +170,12 @@ function readTable(name: string, text: string): ParsedFile {
   return { kind: detectKind(header, name), rows: rows.slice(1), header, locale: detectLocale(header, name), name };
 }
 
+/** Vrai si la ligne a des clics ou des impressions lisibles comme des nombres. */
+function hasNumbers(file: ParsedFile, r: string[]): boolean {
+  const c = columns(file.header);
+  return [c.clicks, c.impressions].some((i) => i >= 0 && parseNumber(r[i] ?? "", file.locale) !== null);
+}
+
 function metrics(file: ParsedFile, r: string[]) {
   const c = columns(file.header);
   const get = (i: number) => (i >= 0 ? parseNumber(r[i] ?? "", file.locale) : null);
@@ -193,23 +197,52 @@ function hasMetrics(file: ParsedFile): boolean {
   return c.clicks >= 0 && c.impressions >= 0;
 }
 
-export function buildImport(files: Array<{ name: string; text: string }>): GscImport {
+export function buildImport(files: Array<{ name: string; text: string }>, siteHost?: string): GscImport {
   const parsed = files.map((f) => readTable(f.name, f.text)).filter((f) => f.kind !== "other" && hasMetrics(f));
   const byKind = (k: Kind) => parsed.find((f) => f.kind === k);
   const q = byKind("queries");
   const p = byKind("pages");
   const d = byKind("dates");
   if (!q && !p && !d) throw invalidFile();
+  if (![q, p, d].some((f) => f && f.rows.some((r) => hasNumbers(f, r)))) {
+    throw invalidFile("Ce fichier ne contient aucun chiffre de clics ni d'impressions lisible : ce n'est pas un export « Performances » exploitable.");
+  }
+  // Les adresses d'un autre site sont écartées ; un export entièrement étranger est refusé.
+  let pageRows = p ? p.rows.filter((r) => /^https?:\/\//i.test((r[0] ?? "").trim()) && hasNumbers(p, r)) : null;
+  if (p && siteHost) {
+    const own = bareHost(siteHost);
+    const onSite = (u: string) => {
+      try {
+        return bareHost(new URL(u.trim()).hostname) === own;
+      } catch {
+        return false;
+      }
+    };
+    const kept = pageRows!.filter((r) => onSite(r[0]));
+    if (pageRows!.length && !kept.length) {
+      const other = (() => {
+        try {
+          return bareHost(new URL(pageRows![0][0].trim()).hostname);
+        } catch {
+          return null;
+        }
+      })();
+      throw invalidFile(
+        `Cet export semble venir d'un autre site${other ? ` (${other})` : ""} : aucune de ses pages n'est sur ${own}.`,
+        `Dans la Search Console, choisissez la propriété de ${own}, puis exportez « Performances » à nouveau.`,
+      );
+    }
+    pageRows = kept;
+  }
 
   const queries = q
     ? q.rows
-        .filter((r) => (r[0] ?? "").trim())
+        .filter((r) => (r[0] ?? "").trim() && hasNumbers(q, r))
         .map((r) => ({ query: r[0].trim(), ...metrics(q, r) }))
         .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
     : null;
-  const pages = p
-    ? p.rows
-        .filter((r) => /^https?:\/\//i.test((r[0] ?? "").trim()))
+  const pages = p && pageRows
+    ? pageRows
         .map((r) => ({ url: r[0].trim(), ...metrics(p, r) }))
         .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
     : null;
@@ -219,7 +252,7 @@ export function buildImport(files: Array<{ name: string; text: string }>): GscIm
     const points: Array<OrganicPoint & { position: number }> = [];
     for (const r of d.rows) {
       const date = parseDate(r[0] ?? "", d.locale);
-      if (!date) continue;
+      if (!date || !hasNumbers(d, r)) continue;
       const m = metrics(d, r);
       points.push({ date, clicks: m.clicks, impressions: m.impressions, position: m.position });
     }
@@ -265,7 +298,7 @@ function decodeText(bytes: Uint8Array): string {
 }
 
 /** Point d'entrée : un fichier déposé (.zip ou .csv). */
-export function importFile(name: string, bytes: Uint8Array): GscImport {
+export function importFile(name: string, bytes: Uint8Array, siteHost?: string): GscImport {
   if (bytes.length > MAX_UPLOAD_BYTES) {
     throw new HttpError(413, "file_too_large", "Ce fichier dépasse 20 Mo.", "Exportez une période plus courte, ou déposez seulement le .zip de l'onglet « Performances ».");
   }
@@ -277,7 +310,9 @@ export function importFile(name: string, bytes: Uint8Array): GscImport {
       entries = unzipSync(bytes, {
         filter: (f) => {
           if (!/\.csv$/i.test(f.name) || f.name.includes("__MACOSX")) return false;
-          if (f.originalSize > MAX_ENTRY_BYTES) return false;
+          if (f.originalSize > MAX_ENTRY_BYTES) {
+            throw invalidFile(`Le fichier « ${(f.name.split("/").pop() ?? f.name).slice(0, 80)} » de l'archive dépasse 40 Mo une fois décompressé.`);
+          }
           total += f.originalSize;
           if (total > MAX_TOTAL_BYTES) throw invalidFile("Cette archive est trop volumineuse une fois décompressée.");
           return true;
@@ -291,8 +326,8 @@ export function importFile(name: string, bytes: Uint8Array): GscImport {
       .slice(0, 30)
       .map(([n, b]) => ({ name: n.split("/").pop() ?? n, text: decodeText(b) }));
     if (!files.length) throw invalidFile("Cette archive ne contient aucun fichier CSV.");
-    return buildImport(files);
+    return buildImport(files, siteHost);
   }
   if (!/\.(csv|txt)$/i.test(name) && bytes.includes(0)) throw invalidFile();
-  return buildImport([{ name, text: decodeText(bytes) }]);
+  return buildImport([{ name, text: decodeText(bytes) }], siteHost);
 }

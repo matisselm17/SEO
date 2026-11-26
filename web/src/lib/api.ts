@@ -89,7 +89,8 @@ export async function getJSON<T>(path: string, etag?: string, signal?: AbortSign
 export async function sendJSON<T>(method: "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await request(path, {
     method,
-    headers: body === undefined ? { accept: "application/json" } : { "content-type": "application/json", accept: "application/json" },
+    // Le serveur exige ce type sur toute requête qui modifie, même sans corps (sinon 415).
+    headers: { "content-type": "application/json", accept: "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (res.status === 204) return undefined as T;

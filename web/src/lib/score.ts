@@ -47,3 +47,14 @@ export const CATEGORY_HINT: Record<CategoryId, string> = {
   medias: "Images décrites et liens entre vos pages",
   partage: "L'aperçu affiché quand on partage un lien",
 };
+
+/**
+ * Doublons (même titre ou même description sur plusieurs pages) : ils ne changent pas la note.
+ * Identifiés par leur identifiant ; à défaut, par un impact nul sans aucun point perdu.
+ */
+export function isDuplicateIssue(i: { id: string; scoreImpact: number; pointsLost: number }): boolean {
+  return i.id.startsWith("duplicate_") || (i.scoreImpact === 0 && i.pointsLost === 0);
+}
+
+export const DUPLICATE_NOTE =
+  "Ne change pas la note : elle est calculée page par page. Mais des pages identiques dans Google se font concurrence, et l'internaute ne sait pas laquelle choisir.";

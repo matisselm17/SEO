@@ -47,7 +47,7 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 
 **Quelle analyse est affichée.** `overview`, `issues`, `pages`, `failed-pages` et `recommendations` portent toujours sur l'analyse désignée par `SiteSummary.results` : la dernière analyse terminée ; à défaut (première analyse en cours, ou jamais terminée), la plus récente qui a au moins une page notée. Une analyse en cours, arrêtée ou en échec ne remplace jamais une analyse terminée : pendant une relance, les résultats précédents restent affichés et `SiteSummary.audit` décrit la nouvelle analyse. Avant la première page notée, `results` et `overview.score` valent `null` et les listes sont vides — l'interface dit alors « aucune page analysée », jamais « aucun problème ».
 
-**Fin d'une analyse.** Aucune page notée : `failed`. Arrêt demandé par l'utilisateur : `cancelled`. Arrêt ou redémarrage du serveur : `failed` avec un message qui le dit. Sinon `done`, même avec des pages en échec ; l'interface signale une note peu fiable quand `pagesFailed > pagesDone`.
+**Fin d'une analyse.** Arrêt demandé par l'utilisateur : `cancelled`, même avant la première page. Aucune page notée sans arrêt demandé : `failed`. Arrêt ou redémarrage du serveur : `failed` avec un message qui le dit. Sinon `done`, même avec des pages en échec ; l'interface signale une note peu fiable quand `pagesFailed > pagesDone`.
 
 **Les points.** Seuls `Issue.scoreImpact` et `Recommendation.scoreGain` s'affichent : ce sont des points sur la note du site, sur 100. `pointsLost` et `pointsToGain` sont des sommes brutes réservées au tri.
 
@@ -90,6 +90,8 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 - Les routes qui modifient (POST, PATCH, DELETE) exigent `content-type: application/json` (ou multipart pour le dépôt de fichier) et refusent un en-tête `Origin` qui n'est pas celui du serveur.
 - Le corps d'une requête est limité au fil de la lecture : 64 Ko en JSON, 21 Mo pour le dépôt.
 - Limites : nombre de sites, analyses simultanées (les suivantes attendent en `queued`), demandes par minute à l'assistant et au relevé des concurrents. Dépassement : `rate_limited` (statut 429) ou `limit_reached` (statut 409).
+- Une erreur `chat_unavailable` qui ne se résoudra pas en réessayant (clé refusée, modèle refusé) porte `details.retryable: false` : l'interface désactive alors la saisie.
+- À la suppression d'un site, le serveur ferme ses flux `/events` ouverts ; la reconnexion reçoit un 404.
 - L'assistant : si l'API échoue avant toute réponse, la question n'est pas conservée (une relance ne crée pas de doublon) ; si le navigateur coupe le flux, la génération s'arrête côté serveur.
 
 ## Variables d'environnement (côté serveur uniquement)

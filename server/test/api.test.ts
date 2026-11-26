@@ -8,7 +8,7 @@ import { strToU8, zipSync } from "fflate";
 import Anthropic from "@anthropic-ai/sdk";
 import { setAllowPrivateHosts } from "../src/net/fetch.ts";
 import { startFixtureSite, type FixtureSite } from "./helpers/fixture-site.ts";
-import { readSse, testEnv } from "./helpers/env.ts";
+import { del, post, postEmpty, readSse, testEnv } from "./helpers/env.ts";
 import { mockClaude } from "./helpers/mock-claude.ts";
 import type { SearchProvider } from "../src/competitors/competitors.ts";
 
@@ -22,7 +22,6 @@ after(async () => {
   await site.close();
 });
 
-const post = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 function keysOf(o: object) {
   return Object.keys(o).sort();
@@ -33,7 +32,7 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   const created = await app.request("/api/sites", post({ url: site.origin.replace("http://", "http://"), maxPages: 20 }));
   assert.equal(created.status, 201);
   const { site: s } = (await created.json()) as any;
-  assert.deepEqual(keysOf(s), ["audit", "createdAt", "host", "id", "name", "pagesAnalyzed", "score", "searchConsole", "url"]);
+  assert.deepEqual(keysOf(s), ["audit", "createdAt", "host", "id", "name", "pagesAnalyzed", "results", "score", "searchConsole", "url"]);
   assert.equal(s.host, "localhost");
   assert.ok(["queued", "running"].includes(s.audit.state));
 
@@ -78,9 +77,9 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   // Problèmes.
   const iss = (await (await app.request(`/api/sites/${s.id}/issues`)).json()) as any;
   assert.deepEqual(keysOf(iss), ["categories", "issues", "strengths"]);
-  assert.deepEqual(keysOf(iss.issues[0]), ["category", "id", "pagesAffected", "pagesTotal", "pointsLost", "severity", "summary", "title"]);
+  assert.deepEqual(keysOf(iss.issues[0]), ["category", "id", "pagesAffected", "pagesTotal", "pointsLost", "scoreImpact", "severity", "summary", "title"]);
   const detail = (await (await app.request(`/api/sites/${s.id}/issues/meta_description`)).json()) as any;
-  assert.deepEqual(keysOf(detail.issue), ["category", "evidence", "fix", "id", "pagesAffected", "pagesTotal", "pointsLost", "severity", "summary", "title", "why"]);
+  assert.deepEqual(keysOf(detail.issue), ["category", "evidence", "fix", "id", "pagesAffected", "pagesTotal", "pointsLost", "scoreImpact", "severity", "summary", "title", "why"]);
   assert.deepEqual(keysOf(detail.issue.evidence[0]), ["expected", "found", "pageId", "path", "url"]);
   assert.ok(Array.isArray(detail.issue.fix.steps));
   const dup = await app.request(`/api/sites/${s.id}/issues/duplicate_title`);
@@ -106,7 +105,7 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   // Recommandations.
   const recs = (await (await app.request(`/api/sites/${s.id}/recommendations`)).json()) as any;
   assert.equal(recs.recommendations[0].rank, 1);
-  assert.deepEqual(keysOf(recs.recommendations[0]), ["effort", "id", "impact", "issueId", "pagesAffected", "pointsToGain", "rank", "steps", "title"]);
+  assert.deepEqual(keysOf(recs.recommendations[0]), ["effort", "id", "impact", "issueId", "pagesAffected", "pointsToGain", "rank", "scoreGain", "steps", "title"]);
 
   // ETag.
   const r1 = await app.request(`/api/sites/${s.id}/overview`);
@@ -133,8 +132,9 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   assert.equal(up.status, 200);
   const gsc = (await up.json()) as any;
   assert.equal(gsc.available, true);
-  assert.deepEqual(keysOf(gsc), ["available", "importedAt", "pages", "period", "queries", "series", "totals"]);
+  assert.deepEqual(keysOf(gsc), ["available", "importedAt", "matching", "pages", "period", "queries", "series", "totals"]);
   assert.equal(gsc.series, null);
+  assert.deepEqual(gsc.matching, { matched: 2, total: 3 });
   assert.equal(gsc.pages.find((p: any) => p.path === "/services/").pageId !== null, true);
   assert.equal(gsc.pages.find((p: any) => p.path === "/inconnue").pageId, null);
   const withOrganic = (await (await app.request(`/api/sites/${s.id}/pages?sort=clicks_desc`)).json()) as any;
@@ -146,12 +146,12 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   const badRes = await app.request(`/api/sites/${s.id}/search-console`, { method: "POST", body: bad });
   assert.equal(badRes.status, 422);
   assert.equal(((await badRes.json()) as any).error.code, "invalid_file");
-  assert.equal((await app.request(`/api/sites/${s.id}/search-console`, { method: "DELETE" })).status, 204);
+  assert.equal((await app.request(`/api/sites/${s.id}/search-console`, del())).status, 204);
   assert.deepEqual(await (await app.request(`/api/sites/${s.id}/search-console`)).json(), { available: false });
 
   // Sans clés : assistant et concurrents désactivés.
   assert.deepEqual(await (await app.request(`/api/sites/${s.id}/competitors`)).json(), { available: false, reason: "not_configured" });
-  const comp = await app.request(`/api/sites/${s.id}/competitors`, { method: "POST" });
+  const comp = await app.request(`/api/sites/${s.id}/competitors`, postEmpty());
   assert.equal(comp.status, 503);
   assert.equal(((await comp.json()) as any).error.code, "competitors_not_configured");
   const chat = (await (await app.request(`/api/sites/${s.id}/chat`)).json()) as any;
@@ -167,15 +167,22 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   const running = await app.request(`/api/sites/${s.id}/audits`, post({}));
   assert.equal(running.status, 409);
   assert.equal(((await running.json()) as any).error.code, "audit_running");
-  const cancel = await app.request(`/api/sites/${s.id}/audits/cancel`, { method: "POST" });
+  const cancel = await app.request(`/api/sites/${s.id}/audits/cancel`, postEmpty());
   const cancelled = (await cancel.json()) as any;
-  assert.ok(["cancelled", "done"].includes(cancelled.audit.state));
-  // La note précédente est celle de l'analyse terminée.
+  // Arrêtée avant ou après sa première page : « failed » (aucune page) ou « cancelled ».
+  assert.ok(["cancelled", "failed", "done"].includes(cancelled.audit.state));
+  // Les résultats affichés restent ceux de l'analyse terminée.
   const ov3 = (await (await app.request(`/api/sites/${s.id}/overview`)).json()) as any;
-  assert.ok(ov3.site.score !== null);
+  assert.equal(ov3.site.results.auditId, final.audit.id);
+  assert.equal(ov3.site.results.state, "done");
+  assert.equal(ov3.site.audit.id, cancelled.audit.id);
+  assert.equal(ov3.score.value, final.score);
+  assert.equal(ov3.counts.pages, 6);
+  const fp = (await (await app.request(`/api/sites/${s.id}/failed-pages`)).json()) as any;
+  assert.deepEqual(fp, { pages: [{ url: `${site.origin}/missing`, path: "/missing", httpStatus: 404, reason: "Page introuvable (404)" }] });
 
   // Suppression.
-  assert.equal((await app.request(`/api/sites/${s.id}`, { method: "DELETE" })).status, 204);
+  assert.equal((await app.request(`/api/sites/${s.id}`, del())).status, 204);
   assert.equal((await app.request(`/api/sites/${s.id}`)).status, 404);
 });
 
@@ -265,7 +272,7 @@ test("assistant (client simulé) : outils côté serveur, flux, sources, histori
   const after = (await (await app.request(`/api/sites/${siteId}/chat`)).json()) as any;
   assert.equal(after.messages.length, 2);
   assert.equal(after.messages[1].role, "assistant");
-  assert.equal((await app.request(`/api/sites/${siteId}/chat`, { method: "DELETE" })).status, 204);
+  assert.equal((await app.request(`/api/sites/${siteId}/chat`, del())).status, 204);
   assert.equal(((await (await app.request(`/api/sites/${siteId}/chat`)).json()) as any).messages.length, 0);
 });
 
@@ -299,7 +306,7 @@ test("concurrents (fournisseur simulé) : relevé réel, preuves, site lui-même
   };
   const { app, siteId } = await auditedEnv({ searchProvider: provider });
   assert.deepEqual(await (await app.request(`/api/sites/${siteId}/competitors`)).json(), { available: false, reason: "not_run" });
-  const res = await app.request(`/api/sites/${siteId}/competitors`, { method: "POST" });
+  const res = await app.request(`/api/sites/${siteId}/competitors`, postEmpty());
   assert.equal(res.status, 200);
   const data = (await res.json()) as any;
   assert.equal(data.available, true);

@@ -33,7 +33,8 @@ export const chatNotConfigured = () =>
 
 export function systemPrompt(site: SiteRow): string {
   return [
-    `Tu es l'assistant SEO de l'application Chat SEO. Tu aides le propriétaire du site ${site.name || site.host} (${site.url}) à améliorer sa visibilité dans Google.`,
+    // Seul l'hôte (validé par le serveur) entre dans la consigne : le nom du site vient de la page, il n'est pas fiable.
+    `Tu es l'assistant SEO de l'application Chat SEO. Tu aides le propriétaire du site ${site.host} à améliorer sa visibilité dans Google.`,
     "",
     "Règles :",
     "- Réponds uniquement à partir des données du site, que tu consultes avec les outils (analyse des pages, problèmes, recommandations, export Search Console, concurrents). Consulte les outils avant de répondre à toute question sur le site.",
@@ -47,7 +48,7 @@ export function systemPrompt(site: SiteRow): string {
 }
 
 export function suggestions(store: Store, site: SiteRow): string[] {
-  const audit = store.dataAudit(site.id);
+  const audit = store.resultsAudit(site.id);
   if (!audit || audit.pages_done === 0) return [];
   const agg = store.aggregate(audit.id, site.name || site.host);
   const out = ["Par quoi je commence ?"];
@@ -69,11 +70,11 @@ export function translateApiError(err: unknown): ApiError["error"] {
   if (err instanceof Anthropic.APIError) {
     const status = err.status;
     if (status === 401 || status === 403)
-      return { code: "chat_unavailable", message: "La clé de l'API Claude configurée sur le serveur est refusée.", action: "Vérifiez la clé ANTHROPIC_API_KEY du serveur, puis redémarrez-le." };
+      return { code: "chat_unavailable", message: "La clé de l'API Claude configurée sur le serveur est refusée.", action: "Vérifiez la clé ANTHROPIC_API_KEY du serveur, puis redémarrez-le.", details: { retryable: false } };
     if (status === 429)
       return { ...base, message: "L'assistant a atteint sa limite d'utilisation pour le moment.", action: "Patientez une minute, puis réessayez. Si cela persiste, vérifiez le quota du compte API." };
     if (status === 404 || status === 400)
-      return { code: "chat_unavailable", message: "L'assistant n'a pas pu traiter la demande (modèle ou requête refusés par l'API).", action: "Vérifiez le modèle ANTHROPIC_MODEL configuré sur le serveur." };
+      return { code: "chat_unavailable", message: "L'assistant n'a pas pu traiter la demande (modèle ou requête refusés par l'API).", action: "Vérifiez le modèle ANTHROPIC_MODEL configuré sur le serveur.", details: { retryable: false } };
     if (err.type === "overloaded_error" || status === 529 || (status ?? 0) >= 500)
       return { ...base, message: "L'assistant est momentanément saturé." };
     if (err instanceof Anthropic.APIConnectionError) return { ...base, message: "L'assistant est injoignable pour le moment." };
@@ -118,14 +119,19 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
 
   let text = "";
   const sources: string[] = [];
+  /** Sans aucune réponse produite, la question n'est pas conservée (une relance ne crée pas de doublon). */
+  const dropQuestion = () => {
+    if (!text.trim()) store.deleteChatMessage(userMessage.id);
+  };
   try {
-    for (let round = 0; round < MAX_ROUNDS; round++) {
+    for (let round = 0; round < MAX_ROUNDS && !o.signal.aborted; round++) {
       const stream = o.client.messages.stream(
         { model: o.model, max_tokens: 2048, system: systemPrompt(site), tools: TOOLS, messages },
         { signal: o.signal },
       );
       let roundText = "";
       for await (const ev of stream) {
+        if (o.signal.aborted) break;
         if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
           let chunk = ev.delta.text;
           if (!roundText && text && chunk) chunk = (text.endsWith("\n") ? "\n" : "\n\n") + chunk.replace(/^\n+/, "");
@@ -134,6 +140,7 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
           if (chunk) send({ type: "delta", text: chunk });
         }
       }
+      if (o.signal.aborted) break;
       const final = await stream.finalMessage();
       if (final.stop_reason === "tool_use") {
         messages.push({ role: "assistant", content: final.content as Anthropic.ContentBlockParam[] });
@@ -154,8 +161,14 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
       }
       break;
     }
-    if (o.signal.aborted) return;
+    if (o.signal.aborted) {
+      // Le navigateur a coupé le flux : la génération est arrêtée ; un début de réponse est gardé.
+      if (text.trim()) store.insertChatMessage(site.id, "assistant", text, sources);
+      else dropQuestion();
+      return;
+    }
     if (!text.trim()) {
+      dropQuestion();
       send({
         type: "error",
         error: { code: "chat_unavailable", message: "L'assistant n'a pas produit de réponse.", action: "Reformulez votre question, puis réessayez." },
@@ -165,8 +178,13 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
     const message: ChatMessage = store.insertChatMessage(site.id, "assistant", text, sources);
     send({ type: "done", message });
   } catch (err) {
-    if (o.signal.aborted) return;
+    if (o.signal.aborted) {
+      if (text.trim()) store.insertChatMessage(site.id, "assistant", text, sources);
+      else dropQuestion();
+      return;
+    }
     console.error("[assistant] Échec de l'appel à l'API Claude :", err instanceof Anthropic.APIError ? `statut ${err.status ?? "inconnu"}, type ${err.type ?? "inconnu"}` : "erreur réseau ou interne");
+    dropQuestion();
     send({ type: "error", error: translateApiError(err) });
   }
 }

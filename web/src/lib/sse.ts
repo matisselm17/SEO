@@ -2,7 +2,7 @@
  * Lecture de flux Server-Sent Events avec fetch et un lecteur de flux.
  * Sert au flux permanent d'un site (GET /events) et à la réponse de l'assistant (POST /chat).
  */
-import { request } from "./api";
+import { ApiRequestError, request } from "./api";
 
 export interface SSEMessage {
   event: string;
@@ -46,7 +46,8 @@ export async function readSSE(res: Response, onMessage: (m: SSEMessage) => void,
   }
 }
 
-export type StreamStatus = "connecting" | "open" | "retrying";
+/** "gone" : le serveur répond 404 (site supprimé) ; plus aucune tentative. */
+export type StreamStatus = "connecting" | "open" | "retrying" | "gone";
 
 /**
  * Ouvre un flux GET qui reste ouvert, et se reconnecte après une coupure
@@ -68,7 +69,11 @@ export function openLiveStream(
       onStatus("open");
       attempt = 0;
       await readSSE(res, onMessage, controller.signal);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 404) {
+        onStatus("gone");
+        return;
+      }
       /* coupure ou erreur : on retente */
     }
     if (controller.signal.aborted) return;

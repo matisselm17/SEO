@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { navigate, parseRoute, sitePath, usePath, type Route, type SectionName } from "./lib/router";
-import { useOverview, useSites } from "./lib/queries";
+import { useOverview, useSettings, useSites } from "./lib/queries";
 import { useSiteEvents } from "./lib/live";
 import { Shell } from "./layout/Shell";
 import { NAV } from "./layout/nav";
@@ -72,6 +72,8 @@ export function App() {
   const path = usePath();
   const route = parseRoute(path);
   const sitesQ = useSites();
+  // Chargés tôt : certains boutons dépendent de ce qui est configuré côté serveur (assistant).
+  useSettings();
   const siteId = siteIdOf(route);
   useSiteEvents(siteId);
   const overview = useOverview(siteId);

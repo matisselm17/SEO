@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Virtualisation sur le défilement de la fenêtre, pour des lignes de hauteur fixe.
@@ -45,4 +45,36 @@ export function useMedia(query: string) {
     return () => mq.removeEventListener("change", on);
   }, [query]);
   return m;
+}
+
+/**
+ * Indice de défilement horizontal : pose data-more="right|left|both" sur l'élément quand son contenu déborde,
+ * pour estomper le bord où il reste du contenu (voir .scroll-hint dans components.css).
+ * Renvoie [référence à poser sur l'élément (il peut apparaître après le premier rendu), nœud courant].
+ */
+export function useOverflowHint<T extends HTMLElement>() {
+  const cleanup = useRef<(() => void) | null>(null);
+  const node = useRef<T | null>(null);
+  const setRef = useCallback((el: T | null) => {
+    cleanup.current?.();
+    cleanup.current = null;
+    node.current = el;
+    if (!el) return;
+    const update = () => {
+      const left = el.scrollLeft > 2;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+      const v = left && right ? "both" : right ? "right" : left ? "left" : "";
+      if (v) el.dataset.more = v;
+      else delete el.dataset.more;
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    cleanup.current = () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, []);
+  return [setRef, node] as const;
 }

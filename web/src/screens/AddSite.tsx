@@ -7,6 +7,7 @@ import { navigate, sitePath } from "../lib/router";
 import type { CreateSiteRequest, SiteResponse, SitesResponse } from "../lib/types";
 import { Button, Link } from "../ui/Button";
 import { TextField } from "../ui/Field";
+import { ErrorState } from "../ui/States";
 import { Logo } from "../layout/Shell";
 import { fmtInt } from "../lib/format";
 
@@ -29,10 +30,11 @@ export function checkAddress(raw: string): { ok: true; url: string } | { ok: fal
   return { ok: true, url: v };
 }
 
+// Même ordre que le serveur : balises, contenu, technique, liens et images, partage social.
 const GRID = [
   { id: "balises", label: "Balises", max: 30, hint: "Titre, description, titres de la page" },
-  { id: "technique", label: "Technique", max: 25, hint: "Mobile, sécurité, visibilité dans Google" },
   { id: "contenu", label: "Contenu", max: 20, hint: "Quantité et organisation du texte" },
+  { id: "technique", label: "Technique", max: 25, hint: "Mobile, sécurité, visibilité dans Google" },
   { id: "medias", label: "Liens et images", max: 15, hint: "Images décrites, liens entre les pages" },
   { id: "partage", label: "Partage social", max: 10, hint: "Aperçu sur les réseaux" },
 ];
@@ -46,8 +48,8 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   const maxPages = settings.data?.maxPagesDefault;
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault();
     setServerError(null);
     const check = checkAddress(value);
     if (!check.ok) {
@@ -121,15 +123,26 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
           </form>
 
           {serverError && (
-            <div className="error-banner onboard__error" role="alert">
-              <div className="error__body">
-                <p className="error__message">{serverError.message}</p>
-                {serverError.action && <p className="error__action">{serverError.action}</p>}
-              </div>
+            <div className="onboard__error">
               {existingId ? (
-                <Button size="sm" onClick={() => navigate(sitePath(existingId))}>Ouvrir ce site</Button>
+                <div className="error-banner" role="alert">
+                  <div className="error__body">
+                    <p className="error__message">{serverError.message}</p>
+                    {serverError.action && <p className="error__action">{serverError.action}</p>}
+                  </div>
+                  <Button size="sm" className="error__retry" onClick={() => navigate(sitePath(existingId))}>Ouvrir ce site</Button>
+                </div>
+              ) : serverError.code === "limit_reached" ? (
+                // Plafond atteint : réessayer ne servirait à rien, on mène là où l'on peut libérer une place.
+                <div className="error-banner" role="alert">
+                  <div className="error__body">
+                    <p className="error__message">{serverError.message}</p>
+                    {serverError.action && <p className="error__action">{serverError.action}</p>}
+                  </div>
+                  {hasSites && <Button size="sm" className="error__retry" onClick={() => navigate("/")}>Voir mes sites</Button>}
+                </div>
               ) : (
-                <Button size="sm" onClick={(e) => submit(e as unknown as FormEvent)}>Réessayer</Button>
+                <ErrorState error={serverError} inline onRetry={() => void submit()} retrying={busy} />
               )}
             </div>
           )}
@@ -152,7 +165,7 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
 
         <aside className="onboard__grid" aria-labelledby="grid-title">
           <h2 id="grid-title" className="onboard__grid-title">Comment la note sur 100 est calculée</h2>
-          <p className="onboard__grid-lead">Chaque page est évaluée sur 19 critères répartis en cinq familles. La note du site est la moyenne de ses pages.</p>
+          <p className="onboard__grid-lead">Chaque page est évaluée sur une grille de critères répartis en cinq familles. La note du site est la moyenne de ses pages.</p>
           <div className="grid-bar" aria-hidden>
             {GRID.map((g) => (
               <span key={g.id} className={`grid-bar__seg grid-bar__seg--${g.id}`} style={{ flexGrow: g.max }} />

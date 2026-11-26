@@ -17,7 +17,7 @@ export const isPageSort = (s: string): s is PageSort => (PAGE_SORTS as string[])
 
 export function overview(store: Store, site: SiteRow): Overview {
   const summary = store.siteSummary(site);
-  const audit = store.dataAudit(site.id);
+  const audit = store.resultsAudit(site.id);
   const agg = audit ? store.aggregate(audit.id, summary.name) : null;
   const gsc = store.getGsc(site.id);
   const prev = audit ? store.previousDoneAudit(site.id, audit.seq) : null;
@@ -44,20 +44,20 @@ export function overview(store: Store, site: SiteRow): Overview {
 }
 
 export function issues(store: Store, site: SiteRow): IssuesResponse {
-  const audit = store.dataAudit(site.id);
+  const audit = store.resultsAudit(site.id);
   if (!audit) return { issues: [], strengths: [], categories: [] };
   const agg = store.aggregate(audit.id, site.name || site.host);
   return { issues: agg.issues.map(toIssue), strengths: agg.strengths, categories: agg.categories };
 }
 
 export function recommendations(store: Store, site: SiteRow): RecommendationsResponse {
-  const audit = store.dataAudit(site.id);
+  const audit = store.resultsAudit(site.id);
   if (!audit) return { recommendations: [] };
   return { recommendations: store.aggregate(audit.id, site.name || site.host).recommendations };
 }
 
 export function listPages(store: Store, siteId: string, q: { sort: PageSort; q: string; offset: number; limit: number }): PagesResponse {
-  const audit = store.dataAudit(siteId);
+  const audit = store.resultsAudit(siteId);
   if (!audit) return { pages: [], total: 0, offset: q.offset, limit: q.limit };
   const gsc = store.gscIndex(siteId);
   let rows = store.pageRows(audit.id).map((r) => store.pageSummary(r, gsc));

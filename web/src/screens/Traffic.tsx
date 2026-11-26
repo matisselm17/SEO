@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Search, Trash2, Upload } from "lucide-react";
+import { FileUp, Link2, Search, Trash2, Upload } from "lucide-react";
 import type { OrganicPage, OrganicQuery, SearchConsoleData, SiteSummary } from "../lib/types";
 import { keys, useSearchConsole } from "../lib/queries";
 import { sendFile, sendJSON, toAppError, type AppError } from "../lib/api";
@@ -47,14 +47,50 @@ function useUpload(siteId: string) {
       invalidate(keys.overview(siteId));
       invalidate(keys.allPages(siteId));
       invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
-      toast.show({ tone: "success", title: "Export importé", text: "Vos clics et vos recherches sont reliés à vos pages." });
+      const m = data.available ? data.matching : null;
+      toast.show({
+        tone: "success",
+        title: "Export importé",
+        text: m
+          ? m.total === 0
+            ? "L'export ne contient aucune page de ce site."
+            : m.matched === 0
+            ? `Aucune des ${fmtInt(m.total)} pages de l'export ne correspond aux pages analysées.`
+            : `${fmtInt(m.matched)} ${m.matched > 1 ? "pages" : "page"} sur ${fmtInt(m.total)} reliée${m.matched > 1 ? "s" : ""} à l'analyse.`
+          : "Vos clics et vos recherches sont importés. L'export ne contient pas la liste des pages.",
+      });
     } catch (err) {
       setError(toAppError(err));
     } finally {
       setBusy(false);
     }
   };
-  return { busy, error, upload, retry: () => last.current && upload(last.current), clear: () => setError(null) };
+  // Choisir un autre fichier : sélecteur de fichier du système, sans dépendre d'un champ présent à l'écran.
+  const pick = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ACCEPT;
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (f) void upload(f);
+    };
+    input.click();
+  };
+  return { busy, error, upload, pick, retry: () => last.current && upload(last.current), clear: () => setError(null) };
+}
+
+/**
+ * Erreur de dépôt : un fichier refusé appelle un autre fichier ; une erreur du serveur ou du réseau,
+ * un nouvel essai avec le même fichier.
+ */
+function UploadError({ u }: { u: ReturnType<typeof useUpload> }) {
+  if (!u.error) return null;
+  const refused = u.error.code === "invalid_file" || u.error.code === "file_too_large" || u.error.code === "bad_request";
+  return refused ? (
+    <ErrorState error={u.error} inline onRetry={u.pick} retryLabel="Choisir un autre fichier" retryIcon={<FileUp size={14} aria-hidden />} retrying={u.busy} />
+  ) : (
+    <ErrorState error={u.error} inline onRetry={() => void u.retry()} retrying={u.busy} />
+  );
 }
 
 function HowTo() {
@@ -86,7 +122,7 @@ function NoImport({ siteId }: { siteId: string }) {
           L'analyse dit comment vos pages sont construites. L'export de la Search Console dit ce qu'elles vous rapportent : les recherches qui mènent à votre site, les clics, la position dans Google. C'est facultatif, et vous pouvez le remplacer à tout moment.
         </p>
         <Dropzone onFile={u.upload} accept={ACCEPT} busy={u.busy} title="Déposez ici l'export de la Search Console" hint="Le fichier .zip tel quel, ou un fichier .csv. 20 Mo au plus." />
-        {u.error && <div className="gsc-error"><ErrorState error={u.error} inline onRetry={u.error.status ? () => void u.retry() : undefined} /></div>}
+        {u.error && <div className="gsc-error"><UploadError u={u} /></div>}
       </div>
       <aside className="gsc-empty__aside" aria-labelledby="howto-t">
         <h3 id="howto-t" className="gsc-empty__aside-title">Où trouver l'export</h3>
@@ -131,7 +167,7 @@ function QueriesTable({ rows, mode }: { rows: OrganicQuery[]; mode: "all" | "rea
           <tbody>
             {list.slice(0, shown).map((r) => (
               <tr key={r.query}>
-                <td className="gsc-table__q">{r.query}</td>
+                <td className="gsc-table__q" title={r.query.length > 60 ? r.query : undefined}><span className="query-clamp">{r.query}</span></td>
                 <td className="num tnum">{fmtInt(r.clicks)}</td>
                 <td className="num tnum">{fmtInt(r.impressions)}</td>
                 <td className="num tnum col-ctr">{fmtPct(r.ctr)}</td>
@@ -184,6 +220,36 @@ function PagesTable({ rows, siteId }: { rows: OrganicPage[]; siteId: string }) {
   );
 }
 
+/** Rapprochement entre les pages de l'export et les pages analysées. */
+function Matching({ data }: { data: Available }) {
+  const m = data.matching;
+  if (!m) {
+    return <p className="gsc-match muted small"><Link2 size={14} aria-hidden /> L'export ne contient pas la liste des pages : les clics ne peuvent pas être reliés aux pages analysées. Le fichier .zip complet la contient.</p>;
+  }
+  if (m.total === 0) return null;
+  if (m.matched === 0) {
+    return (
+      <p className="gsc-match small">
+        <Link2 size={14} aria-hidden />
+        <span>
+          <strong>Aucune des {fmtInt(m.total)} pages de l'export</strong> ne correspond aux pages analysées : leurs clics ne peuvent pas être reliés à vos pages.
+          <span className="muted"> Vérifiez que l'export vient bien de ce site, ou relancez l'analyse avec un plafond de pages plus élevé.</span>
+        </span>
+      </p>
+    );
+  }
+  const rest = m.total - m.matched;
+  return (
+    <p className="gsc-match small">
+      <Link2 size={14} aria-hidden />
+      <span>
+        <strong className="tnum">{fmtInt(m.matched)} {m.matched > 1 ? "pages" : "page"} sur {fmtInt(m.total)}</strong> de l'export {m.matched > 1 ? "sont reliées" : "est reliée"} aux pages analysées : leurs clics apparaissent dans « Pages analysées ».
+        {rest > 0 && <span className="muted"> {rest > 1 ? `Les ${fmtInt(rest)} autres n'ont pas été analysées` : "L'autre n'a pas été analysée"} (au-delà du plafond de pages, ou introuvable depuis les liens du site).</span>}
+      </span>
+    </p>
+  );
+}
+
 function Imported({ data, site }: { data: Available; site: SiteSummary }) {
   const [tab, setTab] = useState<"queries" | "reach" | "pages">(data.queries ? "queries" : "pages");
   const reach = data.queries?.filter((r) => r.position > 3 && r.position <= 15).length ?? 0;
@@ -204,6 +270,8 @@ function Imported({ data, site }: { data: Available; site: SiteSummary }) {
           </div>
         ))}
       </dl>
+
+      <Matching data={data} />
 
       <Section id="series" title="Évolution jour par jour" description={data.period ? fmtPeriod(data.period) : undefined}>
         {data.series && data.series.length > 1 ? (
@@ -275,7 +343,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
         }
       />
       <QueryError q={q} />
-      {u.error && data?.available && <ErrorState error={u.error} inline onRetry={u.error.status ? () => void u.retry() : undefined} />}
+      {u.error && data?.available && <UploadError u={u} />}
       {!data && !q.error && (
         <>
           <LoadingLabel />

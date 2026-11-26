@@ -1,7 +1,7 @@
 /**
  * Petit site d'essai servi en local (plusieurs pages avec des défauts variés), pour les tests
  * et la vérification de bout en bout. Utilisé uniquement avec ALLOW_PRIVATE_HOSTS / setAllowPrivateHosts(true).
- * Lancement manuel : `npx tsx test/helpers/fixture-site.ts 8790`
+ * Lancement manuel : `npx tsx test/helpers/fixture-site.ts 8790 [délai en ms par réponse]`
  */
 import { existsSync, readFileSync } from "node:fs";
 import http from "node:http";
@@ -16,7 +16,7 @@ export interface FixtureSite {
   close(): Promise<void>;
 }
 
-export function startFixtureSite(port = 0, opts: { slowMs?: number } = {}): Promise<FixtureSite> {
+export function startFixtureSite(port = 0, opts: { slowMs?: number; listen?: string } = {}): Promise<FixtureSite> {
   const requests: string[] = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -45,7 +45,7 @@ export function startFixtureSite(port = 0, opts: { slowMs?: number } = {}): Prom
     else go();
   });
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, opts.listen ?? "127.0.0.1", () => {
       const addr = server.address() as { port: number };
       resolve({
         origin: `http://localhost:${addr.port}`,
@@ -58,5 +58,5 @@ export function startFixtureSite(port = 0, opts: { slowMs?: number } = {}): Prom
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.argv[2] ?? 8790);
-  void startFixtureSite(port).then((s) => console.log(`Site d'essai sur ${s.origin}`));
+  void startFixtureSite(port, { slowMs: Number(process.argv[3] ?? 0), listen: "0.0.0.0" }).then((s) => console.log(`Site d'essai sur ${s.origin}`));
 }

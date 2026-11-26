@@ -2,7 +2,8 @@ import { useDeferredValue, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ExternalLink, Search } from "lucide-react";
 import type { CategoryId, PageCheck, PageDetail, PageSummary, SiteSummary } from "../lib/types";
 import { useAllPages, usePage } from "../lib/queries";
-import { navigate, sitePath } from "../lib/router";
+import { closeDetail, sitePath } from "../lib/router";
+import { isRelaunching, noResultsReason, resultsOf } from "../lib/results";
 import { CATEGORY_LABEL, scoreBand } from "../lib/score";
 import { fmtCompact, fmtDateTime, fmtInt, fmtPct, fmtPosition, plural } from "../lib/format";
 import { PageHeader } from "../ui/Section";
@@ -14,7 +15,7 @@ import { Link } from "../ui/Button";
 import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { useMedia, useWindowVirtual } from "../ui/useVirtual";
-import { QueryError, isRunning } from "./common";
+import { FailedPagesToggle, NoResults, QueryError, ReliabilityNote, isRunning } from "./common";
 
 type SortKey = "path" | "score" | "issues" | "words" | "clicks" | "position";
 type Band = "all" | "critical" | "warning" | "good";
@@ -114,7 +115,7 @@ function PageDetailBody({ page, siteName }: { page: PageDetail; siteName: string
                 <thead><tr><th scope="col">Recherche</th><th scope="col" className="num">Clics</th><th scope="col" className="num">Taux de clic</th><th scope="col" className="num">Position</th></tr></thead>
                 <tbody>
                   {page.queries.map((q) => (
-                    <tr key={q.query}><td>{q.query}</td><td className="num tnum">{fmtInt(q.clicks)}</td><td className="num tnum">{fmtPct(q.ctr)}</td><td className="num tnum">{fmtPosition(q.position)}</td></tr>
+                    <tr key={q.query}><td className="query-cell" title={q.query}><span className="query-clamp">{q.query}</span></td><td className="num tnum">{fmtInt(q.clicks)}</td><td className="num tnum">{fmtPct(q.ctr)}</td><td className="num tnum">{fmtPosition(q.position)}</td></tr>
                   ))}
                 </tbody>
               </table>
@@ -212,20 +213,29 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
   const v = useWindowVirtual(rows.length, rowH);
   const onSort = (k: SortKey) => setSort((s) => (s.key === k ? { key: k, dir: (s.dir * -1) as 1 | -1 } : { key: k, dir: k === "path" || k === "score" || k === "position" ? 1 : -1 }));
 
+  const reason = noResultsReason(site);
+  const r = resultsOf(site);
+  const firstRun = isRunning(site) && !isRelaunching(site);
   return (
     <>
       <PageHeader
         title="Pages analysées"
-        description={all ? `${plural(all.length, "page notée", "pages notées")} sur 100. Triez, filtrez, et ouvrez une page pour voir chacun de ses critères et son aperçu dans Google.` : "Chaque page notée sur 100, avec ses critères et son aperçu dans Google."}
+        description={
+          r
+            ? `${plural(r.pagesDone, "page analysée", "pages analysées")}${isRelaunching(site) ? " lors de l'analyse précédente" : ""}, chacune notée sur 100. Triez, filtrez, et ouvrez une page pour voir chacun de ses critères et son aperçu dans Google.`
+            : "Chaque page est notée sur 100, avec ses critères et son aperçu dans Google."
+        }
       />
-      <QueryError q={q} />
-      {!all && !q.error && (<><LoadingLabel /><Skeleton w={420} h={34} r={8} /><div style={{ height: 20 }} /><SkeletonRows rows={10} height={60} /></>)}
-      {all && all.length === 0 && (
-        <EmptyState title={isRunning(site) ? "Les pages arrivent" : "Aucune page analysée"}>
-          {isRunning(site) ? "Chaque page s'ajoute ici dès qu'elle est notée." : "Relancez l'analyse depuis la vue d'ensemble."}
+      {reason !== null && <NoResults site={site} running="Chaque page s'ajoute ici dès qu'elle est notée." />}
+      {reason === null && <ReliabilityNote site={site} compact />}
+      {reason === null && <QueryError q={q} />}
+      {reason === null && !all && !q.error && (<><LoadingLabel /><Skeleton w={420} h={34} r={8} /><div style={{ height: 20 }} /><SkeletonRows rows={10} height={60} /></>)}
+      {reason === null && all && all.length === 0 && (
+        <EmptyState title={firstRun ? "Les pages arrivent" : "Aucune page analysée"}>
+          {firstRun ? "Chaque page s'ajoute ici dès qu'elle est notée." : "La liste n'est pas encore disponible. Réessayez dans un instant."}
         </EmptyState>
       )}
-      {all && all.length > 0 && (
+      {reason === null && all && all.length > 0 && (
         <>
           <div className="toolbar toolbar--pages">
             <label className="search pages__search">
@@ -254,10 +264,13 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
               </select>
             )}
           </div>
-          <p className="pages__count" aria-live="polite">
-            {rows.length === all.length ? plural(all.length, "page", "pages") : `${fmtInt(rows.length)} sur ${plural(all.length, "page", "pages")}`}
-            {isRunning(site) && " — la liste s'allonge au fil de l'analyse"}
-          </p>
+          <div className="pages__count">
+            <p aria-live="polite">
+              {rows.length === all.length ? plural(all.length, "page", "pages") : `${fmtInt(rows.length)} sur ${plural(all.length, "page", "pages")}`}
+              {firstRun && " — la liste s'allonge au fil de l'analyse"}
+            </p>
+            {r && r.pagesFailed > 0 && <FailedPagesToggle site={site} count={r.pagesFailed} label={`${plural(r.pagesFailed, "page non chargée", "pages non chargées")}, absente${r.pagesFailed > 1 ? "s" : ""} de la liste`} />}
+          </div>
 
           <div className={`ptable ${hasOrganic ? "ptable--organic" : ""}`} role="table" aria-label="Pages analysées" aria-rowcount={rows.length + 1}>
             <div className="ptable__head" role="row">
@@ -278,7 +291,7 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
           </div>
         </>
       )}
-      <PageSheet site={site} pageId={pageId} onClose={() => navigate(sitePath(site.id, "pages"))} />
+      <PageSheet site={site} pageId={pageId} onClose={() => closeDetail(sitePath(site.id, "pages"))} />
     </>
   );
 }

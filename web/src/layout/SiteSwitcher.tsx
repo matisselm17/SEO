@@ -41,6 +41,7 @@ export function SiteSwitcher({ sites, current, section, collapsed }: { sites: Si
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         aria-label={current ? `Site : ${current.name}. Changer de site` : "Choisir un site"}
+        title={current ? (current.name === current.host ? current.host : `${current.name} — ${current.host}`) : undefined}
       >
         <Monogram name={current?.name ?? "?"} />
         <span className="switcher__text">
@@ -53,12 +54,12 @@ export function SiteSwitcher({ sites, current, section, collapsed }: { sites: Si
         <div className="switcher__menu" role="listbox" aria-label="Vos sites">
           <p className="switcher__menu-label">Vos sites</p>
           {sites.map((s) => (
-            <button key={s.id} type="button" role="option" aria-selected={s.id === current?.id} className="switcher__item" onClick={() => go(s.id)}>
+            <button key={s.id} type="button" role="option" aria-selected={s.id === current?.id} className="switcher__item" onClick={() => go(s.id)} title={s.host}>
               <Monogram name={s.name} />
               <span className="switcher__text">
                 <span className="switcher__name">{s.name}</span>
                 <span className="switcher__host">
-                  {s.audit?.state === "running" ? "Analyse en cours…" : s.host}
+                  {s.audit?.state === "running" ? "Analyse en cours…" : s.audit?.state === "failed" && !s.results ? "Analyse en échec" : s.host}
                 </span>
               </span>
               {s.score !== null ? <ScorePill score={s.score} /> : null}

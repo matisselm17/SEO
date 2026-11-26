@@ -116,3 +116,14 @@ test("fichier illisible, archive sans CSV, fichier trop gros", () => {
   expectCode(() => importFile("x.zip", new Uint8Array([0x50, 0x4b, 1, 2, 3, 4, 5])), "invalid_file");
   expectCode(() => importFile("x.csv", new Uint8Array(21 * 1024 * 1024)), "file_too_large");
 });
+
+test("entrée d'archive trop grosse : message exact ; adresses d'un autre site écartées", () => {
+  const big = zipSync({ "Requêtes.csv": new Uint8Array(41 * 1024 * 1024).fill(65) });
+  assert.throws(
+    () => importFile("x.zip", big),
+    (e: unknown) => e instanceof HttpError && e.code === "invalid_file" && e.message === "Le fichier « Requêtes.csv » de l'archive dépasse 40 Mo une fois décompressé.",
+  );
+  const data = importFile("export.zip", zipOf(FR_FILES), "atelier-lune.example");
+  assert.equal(data.pages?.length, 3);
+  assert.throws(() => importFile("export.zip", zipOf(FR_FILES), "autre-site.fr"), (e: unknown) => e instanceof HttpError && /autre site \(atelier-lune\.example\)/.test(e.message));
+});

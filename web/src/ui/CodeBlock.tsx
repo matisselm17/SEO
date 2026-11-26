@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 
 const LANG_LABEL = { html: "HTML", text: "Texte", json: "JSON" } as const;
 
 /** Code prêt à copier, affiché comme du texte. */
-export function CodeBlock({ code, language = "text", label }: { code: string; language?: keyof typeof LANG_LABEL; label?: string }) {
+export function CodeBlock({ code, language = "text", label }: { code: string; language?: keyof typeof LANG_LABEL; label?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {

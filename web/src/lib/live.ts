@@ -6,11 +6,13 @@ import { useEffect, useSyncExternalStore } from "react";
 import { getQueryData, invalidate, setQueryData } from "./cache";
 import { keys, type AllPages } from "./queries";
 import { openLiveStream, type StreamStatus } from "./sse";
-import type { AuditStatus, Overview, SiteEvent, SiteResponse, SiteSummary, SitesResponse } from "./types";
+import { applyAudit, resultsOf } from "./results";
+import type { Overview, SiteEvent, SiteResponse, SiteSummary, SitesResponse } from "./types";
 
 let status: StreamStatus = "connecting";
 const statusListeners = new Set<() => void>();
 function setStatus(s: StreamStatus) {
+  if (status === s) return;
   status = s;
   statusListeners.forEach((l) => l());
 }
@@ -24,6 +26,11 @@ export function useLiveStatus(): StreamStatus {
   );
 }
 
+/** Résumé du site le plus à jour parmi les copies en cache. */
+function currentSite(siteId: string): SiteSummary | undefined {
+  return getQueryData<SitesResponse>(keys.sites)?.sites.find((s) => s.id === siteId) ?? getQueryData<SiteResponse>(keys.site(siteId))?.site;
+}
+
 /** Applique un résumé de site à toutes les copies en cache. */
 export function patchSite(siteId: string, patch: (s: SiteSummary) => SiteSummary) {
   setQueryData<SitesResponse>(keys.sites, (prev) => (prev ? { sites: prev.sites.map((x) => (x.id === siteId ? patch(x) : x)) } : prev));
@@ -31,11 +38,7 @@ export function patchSite(siteId: string, patch: (s: SiteSummary) => SiteSummary
   setQueryData<Overview>(keys.overview(siteId), (prev) => (prev ? { ...prev, site: patch(prev.site) } : prev));
 }
 
-const RESULT_KEYS = (id: string) => [keys.overview(id), keys.issues(id), keys.recommendations(id)];
-
-function isFinished(a: AuditStatus | null | undefined) {
-  return !!a && (a.state === "done" || a.state === "failed" || a.state === "cancelled");
-}
+const RESULT_KEYS = (id: string) => [keys.overview(id), keys.issues(id), keys.recommendations(id), keys.failedPages(id)];
 
 export function invalidateSiteResults(siteId: string) {
   for (const k of RESULT_KEYS(siteId)) invalidate(k);
@@ -46,13 +49,21 @@ export function invalidateSiteResults(siteId: string) {
   invalidate(keys.competitors(siteId));
 }
 
+/** Les résultats affichés ont changé d'analyse, ou d'état : tout ce qui en dépend est relu. */
+function resultsChanged(before: SiteSummary | undefined, after: SiteSummary | undefined) {
+  const a = before ? resultsOf(before) : null;
+  const b = after ? resultsOf(after) : null;
+  return (a?.auditId ?? null) !== (b?.auditId ?? null) || (a?.state ?? null) !== (b?.state ?? null);
+}
+
 export function useSiteEvents(siteId: string | null) {
   useEffect(() => {
     if (!siteId) return;
-    let lastAudit: AuditStatus | null = getQueryData<SiteResponse>(keys.site(siteId))?.site.audit ?? null;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let connections = 0;
+    setStatus("connecting");
 
-    // Pendant l'analyse : au plus un rafraîchissement des écrans de résultats toutes les 2,5 s.
+    // Pendant une première analyse : au plus un rafraîchissement des écrans de résultats toutes les 2,5 s.
     const scheduleRefresh = () => {
       if (refreshTimer) return;
       refreshTimer = setTimeout(() => {
@@ -62,20 +73,11 @@ export function useSiteEvents(siteId: string | null) {
       }, 2500);
     };
 
-    const onAudit = (audit: AuditStatus | null, score: number | null | undefined, pagesAnalyzed?: number) => {
-      const newAudit = !!audit && !!lastAudit && audit.id !== lastAudit.id;
-      const justFinished = !!audit && !isFinished(lastAudit) && isFinished(audit) && lastAudit?.id === audit.id;
-      lastAudit = audit;
-      patchSite(siteId, (s) => ({
-        ...s,
-        audit,
-        score: score === undefined ? s.score : score,
-        pagesAnalyzed: pagesAnalyzed ?? (audit && audit.state === "running" ? audit.pagesDone : s.pagesAnalyzed),
-      }));
-      if (newAudit) {
-        setQueryData<AllPages>(keys.allPages(siteId), { pages: [], total: 0 });
-        invalidateSiteResults(siteId);
-      } else if (justFinished) {
+    const onChange = (before: SiteSummary | undefined) => {
+      const after = currentSite(siteId);
+      if (resultsChanged(before, after)) {
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = null;
         invalidateSiteResults(siteId);
         invalidate(keys.sites);
       }
@@ -92,17 +94,26 @@ export function useSiteEvents(siteId: string | null) {
         }
         switch (ev.type) {
           case "site": {
-            const prev = lastAudit;
-            const changed = !prev || !ev.site.audit || prev.id !== ev.site.audit.id || prev.state !== ev.site.audit.state;
+            const before = currentSite(siteId);
             patchSite(siteId, () => ev.site);
-            lastAudit = ev.site.audit;
-            if (changed && prev) invalidateSiteResults(siteId);
+            connections += 1;
+            // Après une coupure, les écrans relisent leurs données (ETag : rien n'est renvoyé si rien n'a changé).
+            if (connections > 1) invalidateSiteResults(siteId);
+            else onChange(before);
             break;
           }
-          case "audit":
-            onAudit(ev.audit, ev.score);
+          case "audit": {
+            const before = currentSite(siteId);
+            patchSite(siteId, (s) => applyAudit(s, ev.audit, ev.score));
+            onChange(before);
             break;
+          }
           case "page": {
+            // Une page de la nouvelle analyse ne s'ajoute à la liste que si c'est elle qui est affichée
+            // (première analyse). Pendant une relance, la liste garde les pages de l'analyse précédente.
+            const site = currentSite(siteId);
+            const r = site ? resultsOf(site) : null;
+            if (!site?.audit || !r || r.auditId !== site.audit.id) break;
             const page = ev.page;
             setQueryData<AllPages>(keys.allPages(siteId), (prev) => {
               if (!prev) return prev;
@@ -126,7 +137,11 @@ export function useSiteEvents(siteId: string | null) {
             break;
         }
       },
-      setStatus,
+      (s) => {
+        setStatus(s);
+        // Site supprimé ailleurs : la liste des sites est relue, l'écran le dira.
+        if (s === "gone") invalidate(keys.sites);
+      },
     );
     return () => {
       stop();

@@ -176,14 +176,27 @@ export function analysePage(html: string, url: string): PageAnalysis {
           ? "Pas de H2 : le contenu n'est pas découpé en sections."
           : `${heads.length} titres, emboîtés dans l'ordre.`,
   );
+  // Écart assumé avec le prototype : la canonique ne compte que si elle pointe, en http(s), vers le même site.
+  let canonicalOk = false;
+  if (canonical) {
+    try {
+      const cu = new URL(canonical, url);
+      const host = (h: string) => h.toLowerCase().replace(/^www\./, "");
+      canonicalOk = (cu.protocol === "http:" || cu.protocol === "https:") && host(cu.hostname) === host(new URL(url).hostname);
+    } catch {
+      canonicalOk = false;
+    }
+  }
   add(
     "canonical",
-    canonical ? 3 : 0,
-    canonical ? cut(canonical, 120) : "Aucune adresse canonique",
-    "Une balise canonical",
-    canonical
+    canonicalOk ? 3 : 0,
+    canonical ? (canonicalOk ? cut(canonical, 120) : `Adresse canonique invalide : ${cut(canonical, 100)}`) : "Aucune adresse canonique",
+    "Une balise canonical vers une adresse http(s) du même site",
+    canonicalOk
       ? `Adresse de référence déclarée : ${cut(canonical, 80)}`
-      : "Pas de balise canonical. Elle évite que des variantes d'adresse (paramètres, slash final) se fassent concurrence.",
+      : canonical
+        ? "La balise canonical pointe vers une adresse qui n'est pas une page web de ce site : Google l'ignorera ou, pire, suivra l'autre site."
+        : "Pas de balise canonical. Elle évite que des variantes d'adresse (paramètres, slash final) se fassent concurrence.",
   );
   add(
     "lang",

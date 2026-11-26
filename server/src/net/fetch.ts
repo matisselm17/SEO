@@ -167,7 +167,7 @@ export async function safeFetch(rawUrl: string, opts: FetchOptions = {}): Promis
     const declared = Number(headers["content-length"]);
     if (Number.isFinite(declared) && declared > maxBytes) {
       discard(res.body);
-      throw new FetchError("too_large", "Page trop lourde");
+      throw new FetchError("too_large", "Page trop lourde (plus de 5 Mo)");
     }
     const chunks: Buffer[] = [];
     let size = 0;
@@ -177,7 +177,7 @@ export async function safeFetch(rawUrl: string, opts: FetchOptions = {}): Promis
         size += buf.length;
         if (size > maxBytes) {
           discard(res.body);
-          throw new FetchError("too_large", "Page trop lourde");
+          throw new FetchError("too_large", "Page trop lourde (plus de 5 Mo)");
         }
         chunks.push(buf);
       }
@@ -192,14 +192,14 @@ export async function safeFetch(rawUrl: string, opts: FetchOptions = {}): Promis
 function translate(err: unknown, signal: AbortSignal, userSignal?: AbortSignal): FetchError {
   if (err instanceof FetchError) return err;
   if (userSignal?.aborted) return new FetchError("aborted", "Chargement annulé");
-  if (signal.aborted) return new FetchError("timeout", "Délai dépassé");
+  if (signal.aborted) return new FetchError("timeout", "Le site a mis trop de temps à répondre");
   const e = err as { code?: string; cause?: { code?: string } };
   const code = e?.code ?? e?.cause?.code;
   if (code === "EPRIVATEADDR") return new FetchError("blocked", "Adresse interne refusée");
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") return new FetchError("network", "Nom de domaine introuvable");
   if (code === "ECONNREFUSED") return new FetchError("network", "Connexion refusée");
   if (code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT" || code === "UND_ERR_BODY_TIMEOUT")
-    return new FetchError("timeout", "Délai dépassé");
+    return new FetchError("timeout", "Le site a mis trop de temps à répondre");
   if (code && /CERT/i.test(code)) return new FetchError("network", "Certificat de sécurité invalide");
   if (code && /SSL|TLS/i.test(code)) return new FetchError("network", "Connexion sécurisée impossible");
   return new FetchError("network", "Connexion impossible");

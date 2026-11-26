@@ -13,6 +13,30 @@ export class EventHub {
   private listeners = new Map<string, Set<Listener>>();
   private lastAudit = new Map<string, number>();
   private pendingAudit = new Map<string, { timer: NodeJS.Timeout; build: () => SiteEvent | null }>();
+  private closers = new Map<string, Set<() => void>>();
+
+  /** Enregistre de quoi fermer un flux ouvert sur ce site. Renvoie la fonction qui retire l'enregistrement. */
+  onClose(siteId: string, fn: () => void): () => void {
+    let set = this.closers.get(siteId);
+    if (!set) this.closers.set(siteId, (set = new Set()));
+    set.add(fn);
+    return () => {
+      set!.delete(fn);
+      if (!set!.size) this.closers.delete(siteId);
+    };
+  }
+
+  /** Ferme tous les flux ouverts sur ce site (site supprimé) : l'interface le découvre à sa reconnexion (404). */
+  close(siteId: string): void {
+    for (const fn of [...(this.closers.get(siteId) ?? [])]) {
+      try {
+        fn();
+      } catch {
+        /* un flux déjà fermé */
+      }
+    }
+    this.closers.delete(siteId);
+  }
 
   subscribe(siteId: string, fn: Listener): () => void {
     let set = this.listeners.get(siteId);

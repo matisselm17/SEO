@@ -1,4 +1,5 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { type KeyboardEvent, type ReactNode } from "react";
+import { useOverflowHint } from "./useVirtual";
 
 export interface TabItem<T extends string> {
   id: T;
@@ -8,7 +9,7 @@ export interface TabItem<T extends string> {
 
 /** Onglets segmentés, navigables aux flèches. */
 export function Tabs<T extends string>({ items, value, onChange, label }: { items: TabItem<T>[]; value: T; onChange: (v: T) => void; label: string }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const [ref, node] = useOverflowHint<HTMLDivElement>();
   const onKey = (e: KeyboardEvent) => {
     const i = items.findIndex((t) => t.id === value);
     let next = -1;
@@ -19,11 +20,13 @@ export function Tabs<T extends string>({ items, value, onChange, label }: { item
     if (next >= 0) {
       e.preventDefault();
       onChange(items[next].id);
-      ref.current?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
+      const b = node.current?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next];
+      b?.focus();
+      b?.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
   };
   return (
-    <div className="tabs" role="tablist" aria-label={label} ref={ref} onKeyDown={onKey}>
+    <div className="tabs scroll-hint" role="tablist" aria-label={label} ref={ref} onKeyDown={onKey}>
       {items.map((t) => (
         <button
           key={t.id}

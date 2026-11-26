@@ -127,12 +127,35 @@ test("regroupement : gravités, doublons, points positifs, recommandations", () 
   assert.equal(dupT.evidence.length, 2);
   assert.match(dupT.evidence[0].found!, /identique sur 2 pages/);
   assert.ok(byId.get("duplicate_description"));
-  // Tri par points perdus décroissants.
-  for (let i = 1; i < agg.issues.length; i++) assert.ok(agg.issues[i - 1].pointsLost >= agg.issues[i].pointsLost);
+  // Ordre : critiques (par points perdus), puis doublons, puis les autres (par points perdus).
+  const isDup = (id: string) => id.startsWith("duplicate_");
+  const grp = (i: { id: string; severity: string }) => (i.severity === "critical" ? 0 : isDup(i.id) ? 1 : 2);
+  for (let i = 1; i < agg.issues.length; i++) {
+    const a = agg.issues[i - 1];
+    const b = agg.issues[i];
+    assert.ok(grp(a) < grp(b) || (grp(a) === grp(b) && a.pointsLost >= b.pointsLost), `${a.id} avant ${b.id}`);
+  }
+  const firstNonCritical = agg.issues.findIndex((i) => i.severity !== "critical");
+  assert.ok(isDup(agg.issues[firstNonCritical].id), "les doublons suivent les critiques");
+  // Points sur 100 : somme ÷ nombre de pages, arrondie à 0,1.
+  for (const i of agg.issues) assert.equal(i.scoreImpact, Math.round((i.pointsLost / i.pagesTotal) * 10) / 10);
+  assert.equal(dupT.scoreImpact, 0);
   // Une recommandation par problème, rangs 1..n, la page masquée à Google en premier.
   assert.equal(agg.recommendations.length, agg.issues.length);
   assert.deepEqual(agg.recommendations.map((r) => r.rank), agg.recommendations.map((_, i) => i + 1));
   assert.equal(agg.recommendations[0].issueId, "indexable");
+  for (const r of agg.recommendations) {
+    assert.equal(r.scoreGain, Math.round((r.pointsToGain / pages.length) * 10) / 10);
+    for (const step of r.steps) assert.ok(!/ci-dessous|ce code/.test(step), `étape de recommandation sans code : ${step}`);
+  }
+  const recDup = agg.recommendations.find((r) => r.issueId === "duplicate_title")!;
+  assert.equal(recDup.impact, "medium");
+  const recGroups = agg.recommendations.map((r) => (r.issueId === "indexable" ? -1 : grp(agg.issues.find((i) => i.id === r.issueId)!)));
+  for (let i = 1; i < recGroups.length; i++) assert.ok(recGroups[i - 1] <= recGroups[i], "ordre des recommandations");
+  // Code construit pour une page : forPath ; code valable pour tout le site : null.
+  assert.equal(byId.get("meta_description")!.fix.snippet!.forPath, byId.get("meta_description")!.evidence[0].path);
+  const viewport = byId.get("viewport");
+  if (viewport) assert.equal(viewport.fix.snippet!.forPath, null);
   // Points positifs : critères validés sur au moins 90 % des pages.
   for (const s of agg.strengths) assert.ok(s.pagesPassing / s.pagesTotal >= 0.9);
   assert.ok(agg.strengths.some((s) => s.id === "https"));
@@ -144,4 +167,32 @@ test("regroupement : gravités, doublons, points positifs, recommandations", () 
   assert.ok(desc.fix.snippet && desc.fix.snippet.code.includes('<meta name="description"'));
   // Les catégories sont des moyennes à une décimale.
   for (const c of agg.categories) assert.equal(c.score, Math.round(c.score * 10) / 10);
+});
+
+test("points positifs : libellé nuancé quand le critère n'est pas validé partout", () => {
+  const ok = analysePage(extraPages.parfaite, "https://x.example/cours");
+  const mk = (i: number, html: string): PageRecord => {
+    const a = analysePage(html, `https://x.example/p${i}`);
+    return { id: `p${i}`, url: `https://x.example/p${i}`, path: `/p${i}`, score: a.score, checks: a.checks, facts: a.facts, categories: a.categories };
+  };
+  const noFav = extraPages.parfaite.replace('<link rel="icon" href="/f.ico">', "");
+  const pages = [...Array.from({ length: 9 }, (_, i) => mk(i, extraPages.parfaite)), mk(9, noFav)];
+  void ok;
+  const agg = aggregate(pages, "X");
+  const fav = agg.strengths.find((s) => s.id === "favicon")!;
+  assert.equal(fav.pagesPassing, 9);
+  assert.match(fav.title, /^L'icône du site est déclarée sur presque toutes les pages$/);
+  const vp = agg.strengths.find((s) => s.id === "viewport")!;
+  assert.equal(vp.title, "Le site s'affiche correctement sur mobile");
+});
+
+test("adresse canonique : seulement en http(s) vers le même site", () => {
+  const page = (href: string) =>
+    analysePage(`<html><head><link rel="canonical" href="${href}"></head><body></body></html>`, "https://www.x.example/a").checks.find((c) => c.id === "canonical")!;
+  assert.equal(page("https://x.example/a").points, 3);
+  assert.equal(page("/a").points, 3);
+  assert.equal(page("https://autre.example/a").points, 0);
+  assert.match(page("https://autre.example/a").found!, /invalide/);
+  assert.equal(page("javascript:alert(1)").points, 0);
+  assert.equal(page("ftp://x.example/a").points, 0);
 });

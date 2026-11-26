@@ -46,6 +46,24 @@ export function siteNameFrom(title: string, siteName: string, host: string): str
   return t.length <= 60 ? t : host;
 }
 
+/** Erreur d'une analyse interrompue par l'arrêt ou le redémarrage du serveur. */
+export const INTERRUPTED: ApiError["error"] = {
+  code: "internal",
+  message: "L'analyse a été interrompue par un redémarrage du serveur. Les pages déjà notées sont conservées.",
+  action: "Relancez l'analyse.",
+};
+
+/** Raison lisible d'un échec HTTP. */
+export function httpFailureReason(status: number): string {
+  if (status === 404 || status === 410) return `Page introuvable (${status})`;
+  if (status === 401 || status === 403) return `Accès refusé par le site (${status})`;
+  if (status === 429) return "Le site a refusé le chargement : trop de demandes (429)";
+  if (status >= 500) return `Erreur du serveur du site (${status})`;
+  return `Erreur HTTP (${status})`;
+}
+
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+
 interface QueueItem {
   url: URL;
   key: string;
@@ -55,57 +73,91 @@ interface QueueItem {
 export class Crawler {
   private running = new Map<string, AbortController>();
   private tasks = new Map<string, Promise<void>>();
+  private pending: Array<{ site: SiteRow; audit: AuditRow; resolve: () => void }> = [];
 
   constructor(
     private store: Store,
     private hub: EventHub,
     private options: CrawlOptions = DEFAULT_CRAWL,
+    private maxConcurrent = 2,
   ) {}
 
   isRunning(siteId: string): boolean {
-    return this.running.has(siteId);
+    return this.running.has(siteId) || this.pending.some((p) => p.site.id === siteId);
   }
 
-  /** Lance l'analyse en arrière-plan ; la promesse renvoyée se résout à la fin (utile aux tests). */
+  /**
+   * Lance l'analyse en arrière-plan, ou la met en attente (« queued ») si le plafond d'analyses
+   * simultanées est atteint. La promesse se résout à la fin de l'analyse (utile aux tests).
+   */
   start(site: SiteRow, audit: AuditRow): Promise<void> {
-    const controller = new AbortController();
-    this.running.set(site.id, controller);
-    const task = this.run(site, audit, controller.signal)
-      .catch((err) => {
-        console.error("[analyse] Erreur inattendue :", err instanceof Error ? err.message : "inconnue");
-        this.finish(site.id, audit.id, "failed", {
-          code: "internal",
-          message: "L'analyse s'est arrêtée sur une erreur inattendue.",
-          action: "Relancez l'analyse.",
-        });
-      })
-      .finally(() => {
-        if (this.running.get(site.id) === controller) this.running.delete(site.id);
-        if (this.tasks.get(site.id) === task) this.tasks.delete(site.id);
-      });
+    let resolve!: () => void;
+    const task = new Promise<void>((r) => (resolve = r));
     this.tasks.set(site.id, task);
+    this.pending.push({ site, audit, resolve });
+    this.pump();
     return task;
   }
 
-  /** Attend la fin de l'analyse en cours d'un site (après une annulation, par exemple). */
+  /** Démarre les analyses en attente tant qu'il reste des places. */
+  private pump(): void {
+    while (this.running.size < this.maxConcurrent && this.pending.length) {
+      const { site, audit, resolve } = this.pending.shift()!;
+      const controller = new AbortController();
+      this.running.set(site.id, controller);
+      this.run(site, audit, controller.signal)
+        .catch((err) => {
+          console.error("[analyse] Erreur inattendue :", err instanceof Error ? err.message : "inconnue");
+          this.finish(site.id, audit.id, "failed", {
+            code: "internal",
+            message: "L'analyse s'est arrêtée sur une erreur inattendue.",
+            action: "Relancez l'analyse.",
+          });
+        })
+        .finally(() => {
+          if (this.running.get(site.id) === controller) this.running.delete(site.id);
+          if (this.tasks.get(site.id)) this.tasks.delete(site.id);
+          resolve();
+          this.pump();
+        });
+    }
+  }
+
+  /** Attend la fin de l'analyse d'un site (après une annulation, par exemple). */
   async wait(siteId: string): Promise<void> {
     await this.tasks.get(siteId);
   }
 
   /** Attend la fin de toutes les analyses (arrêt du serveur, tests). */
   async waitAll(): Promise<void> {
-    await Promise.all([...this.tasks.values()]);
+    while (this.tasks.size) await Promise.all([...this.tasks.values()]);
   }
 
+  /** Arrêt demandé par l'utilisateur : « cancelled », pages notées conservées. */
   cancel(siteId: string): boolean {
+    return this.stop(siteId, "user");
+  }
+
+  private stop(siteId: string, reason: "user" | "shutdown"): boolean {
+    const idx = this.pending.findIndex((p) => p.site.id === siteId);
+    if (idx >= 0) {
+      const [p] = this.pending.splice(idx, 1);
+      if (reason === "user") this.finish(siteId, p.audit.id, "cancelled", null);
+      else this.finish(siteId, p.audit.id, "failed", INTERRUPTED);
+      this.tasks.delete(siteId);
+      p.resolve();
+      return true;
+    }
     const c = this.running.get(siteId);
     if (!c) return false;
-    c.abort();
+    c.abort(reason);
     return true;
   }
 
-  cancelAll(): void {
-    for (const c of this.running.values()) c.abort();
+  /** Arrêt du serveur : les analyses en cours ou en attente passent en échec, avec un message qui le dit. */
+  stopAllForShutdown(): void {
+    for (const p of [...this.pending]) this.stop(p.site.id, "shutdown");
+    for (const id of [...this.running.keys()]) this.stop(id, "shutdown");
   }
 
   private emitAudit(siteId: string, auditId: string): void {
@@ -129,6 +181,12 @@ export class Crawler {
     this.emitAudit(siteId, auditId);
   }
 
+  /** Fin après un arrêt : par l'utilisateur → « cancelled », même sans page notée ; par le serveur → « failed » avec un message. */
+  private finishAborted(siteId: string, auditId: string, signal: AbortSignal): void {
+    if (signal.reason === "shutdown") return this.finish(siteId, auditId, "failed", INTERRUPTED);
+    this.finish(siteId, auditId, "cancelled", null);
+  }
+
   private async run(site: SiteRow, audit: AuditRow, signal: AbortSignal): Promise<void> {
     const { store } = this;
     const opts = this.options;
@@ -150,7 +208,7 @@ export class Crawler {
     } catch {
       /* pas de robots.txt lisible : tout est permis */
     }
-    if (signal.aborted) return this.finish(site.id, audit.id, "cancelled", null);
+    if (signal.aborted) return this.finishAborted(site.id, audit.id, signal);
 
     const crawlDelayMs = robots.crawlDelay ? Math.min(robots.crawlDelay, 5) * 1000 : 0;
     const concurrency = crawlDelayMs ? 1 : opts.concurrency;
@@ -247,14 +305,14 @@ export class Crawler {
         const reason = err instanceof FetchError ? err.message : "Connexion impossible";
         failed++;
         store.insertFailure(audit.id, item.url.href, reason, null);
-        if (item.depth === 0) startFailure = reason;
+        if (item.depth === 0) startFailure = lowerFirst(reason);
         return;
       }
       const finalUrl = new URL(res.url);
       if (res.status >= 400) {
         failed++;
-        store.insertFailure(audit.id, finalUrl.href, `Erreur HTTP ${res.status}`, res.status);
-        if (item.depth === 0) startFailure = `erreur HTTP ${res.status}`;
+        store.insertFailure(audit.id, finalUrl.href, httpFailureReason(res.status), res.status);
+        if (item.depth === 0) startFailure = lowerFirst(httpFailureReason(res.status));
         return;
       }
       if (!res.body.length) {
@@ -262,7 +320,7 @@ export class Crawler {
         if (item.depth === 0) {
           failed++;
           startFailure = "la page d'accueil n'est pas une page HTML";
-          store.insertFailure(audit.id, finalUrl.href, "Pas une page HTML", res.status);
+          store.insertFailure(audit.id, finalUrl.href, "Ce n'est pas une page HTML", res.status);
         }
         return;
       }
@@ -359,7 +417,7 @@ export class Crawler {
     if (signal.aborted) {
       sitemapCtl.abort();
       sync();
-      return this.finish(site.id, audit.id, "cancelled", null);
+      return this.finishAborted(site.id, audit.id, signal);
     }
     // On n'attend pas les sitemaps restants si le plafond est atteint.
     sitemapCtl.abort();

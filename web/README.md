@@ -25,9 +25,19 @@ Scénarios, avec `?demo=…` dans l'adresse (mémorisé pour l'onglet) :
 | `sans-gsc` | Pas d'export Search Console, conversation vide |
 | `sans-config` | Assistant et concurrents non configurés côté serveur |
 | `analyse` | Une analyse qui progresse en direct (flux `/events`) |
-| `analyse-figee` | Une analyse arrêtée à 17 pages, pour les captures |
-| `erreurs` | Les lectures échouent pendant 2 s puis réussissent à la relance ; l'assistant s'interrompt sur une erreur |
+| `analyse-figee` | Une première analyse figée à 17 pages, pour les captures |
+| `relance` | Relance d'une analyse terminée : les résultats précédents restent affichés, puis basculent à la fin |
+| `relance-figee` | La même relance, figée à 9 pages |
+| `echec` | `boutique-sable.example` : première analyse en échec (aucune page) ; Atelier Lune : relance interrompue par un redémarrage du serveur ; Maison Orlux : 4 pages notées pour 9 non chargées (note peu fiable) |
+| `coupure` | Le flux en direct se coupe après 2,5 s et ne revient pas (indicateur de connexion perdue) |
+| `erreurs` | Les lectures échouent pendant 2 s puis réussissent à la relance ; l'assistant s'interrompt après un début de réponse ; le relevé des concurrents répond `competitors_unavailable` |
 | `lent` | Les écrans restent en chargement (skeletons) |
+
+Saisies spéciales, dans tous les scénarios :
+
+- ajout d'un site : une adresse contenant `injoignable` → `site_unreachable`, `plafond` → `limit_reached`, `rafale` → `rate_limited` (20 s) ;
+- assistant : une question contenant `clé` → clé refusée avant toute réponse (erreur définitive, champ désactivé), `panne` → échec avant toute réponse (la question n'est pas conservée), `limite` → `rate_limited` (45 s) ;
+- Search Console : un fichier nommé `pas-un-export…` est refusé (`invalid_file`).
 
 ## Captures
 

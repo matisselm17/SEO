@@ -13,7 +13,7 @@ import type {
   Severity,
   Strength,
 } from "../../../shared/api.ts";
-import { CATALOGUE, DUPLICATES, effortFor } from "./catalogue.ts";
+import { CATALOGUE, DUPLICATES, effortFor, issueSteps, recommendationSteps } from "./catalogue.ts";
 import { CATEGORIES, CRITERIA, type PageFacts } from "./grille.ts";
 
 export interface PageRecord {
@@ -82,7 +82,7 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       strengths.push({
         id: crit.id,
         category: crit.category,
-        title: entry.strength.title,
+        title: passing === total ? entry.strength.title : entry.strength.most,
         detail: entry.strength.detail(passing, total),
         pagesPassing: passing,
         pagesTotal: total,
@@ -106,7 +106,9 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       found: r.c.found,
       expected: r.c.expected,
     }));
-    const steps = entry.steps(ctx);
+    const built = entry.snippet ? entry.snippet(ctx) : null;
+    const snippet = built ? { language: built.language, code: built.code, forPath: entry.snippetFromPage ? sample.p.path : null } : null;
+    const rawSteps = entry.steps(ctx);
     issues.push({
       id: crit.id,
       category: crit.category,
@@ -115,14 +117,15 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       summary: entry.summary,
       pagesAffected: bad.length,
       pagesTotal: total,
+      scoreImpact: round1(pointsLost / total),
       pointsLost,
       why: entry.why,
-      fix: { steps, snippet: entry.snippet ? entry.snippet(ctx) : null },
+      fix: { steps: issueSteps(rawSteps, !!snippet), snippet },
       evidence,
     });
     effortById.set(crit.id, effortFor(entry.scope, bad.length));
     actionById.set(crit.id, entry.action(ctx));
-    stepsById.set(crit.id, steps);
+    stepsById.set(crit.id, recommendationSteps(rawSteps, !!snippet));
   }
 
   // Doublons à l'échelle du site : même titre ou même description sur plusieurs pages.
@@ -163,6 +166,7 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       summary: def.summary,
       pagesAffected: affected,
       pagesTotal: total,
+      scoreImpact: 0,
       pointsLost: 0,
       why: def.why,
       fix: { steps: def.steps, snippet: null },
@@ -170,10 +174,13 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
     });
     effortById.set(kind, effortFor("page", affected));
     actionById.set(kind, def.action(affected));
-    stepsById.set(kind, def.steps);
+    stepsById.set(kind, recommendationSteps(def.steps, false));
   }
 
-  issues.sort((a, b) => b.pointsLost - a.pointsLost || b.pagesAffected - a.pagesAffected || a.id.localeCompare(b.id));
+  // Ordre : problèmes critiques, puis doublons, puis les autres ; à l'intérieur, par points perdus.
+  const isDup = (id: string) => id === "duplicate_title" || id === "duplicate_description";
+  const group = (i: { id: string; severity: Severity }) => (i.severity === "critical" ? 0 : isDup(i.id) ? 1 : 2);
+  issues.sort((a, b) => group(a) - group(b) || b.pointsLost - a.pointsLost || b.pagesAffected - a.pagesAffected || a.id.localeCompare(b.id));
   strengths.sort((a, b) => maxOf(b.id) - maxOf(a.id) || b.pagesPassing - a.pagesPassing);
 
   const impactRank: Record<Impact, number> = { high: 0, medium: 1, low: 2 };
@@ -184,22 +191,19 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       id: `rec_${i.id}`,
       issueId: i.id,
       title: actionById.get(i.id) ?? i.title,
-      impact: impactFor(i.pointsLost, total),
+      impact: isDup(i.id) ? "medium" : impactFor(i.pointsLost, total),
       effort,
       pagesAffected: i.pagesAffected,
+      scoreGain: i.scoreImpact,
       pointsToGain: i.pointsLost,
       rank: 0,
       steps: stepsById.get(i.id) ?? i.fix.steps,
     };
   });
-  const sevOf = new Map(issues.map((i) => [i.id, i.severity]));
-  const weight = (r: Recommendation) => r.pointsToGain * effortWeight[r.effort] * (sevOf.get(r.issueId) === "critical" ? 2 : 1);
-  recs.sort((a, b) => {
-    // Une page masquée à Google passe avant tout le reste.
-    const ia = a.issueId === "indexable" ? -1 : impactRank[a.impact];
-    const ib = b.issueId === "indexable" ? -1 : impactRank[b.impact];
-    return ia - ib || weight(b) - weight(a) || b.pagesAffected - a.pagesAffected;
-  });
+  const byIssue = new Map(issues.map((i) => [i.id, i]));
+  const recGroup = (r: Recommendation) => (r.issueId === "indexable" ? -1 : group(byIssue.get(r.issueId)!));
+  const weight = (r: Recommendation) => r.pointsToGain * effortWeight[r.effort];
+  recs.sort((a, b) => recGroup(a) - recGroup(b) || impactRank[a.impact] - impactRank[b.impact] || weight(b) - weight(a) || b.pagesAffected - a.pagesAffected);
   recs.forEach((r, i) => (r.rank = i + 1));
 
   return { pagesTotal: total, score, categories, issues, strengths, recommendations: recs };

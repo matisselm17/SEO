@@ -24,12 +24,27 @@ export function useSearch(): URLSearchParams {
   return new URLSearchParams(s);
 }
 
+/** Chaque entrée d'historique retient l'adresse d'où l'on vient (pour refermer un détail sans empiler d'entrée). */
+interface NavState {
+  prev: string | null;
+}
+
 export function navigate(to: string, opts: { replace?: boolean } = {}) {
   const current = window.location.pathname + window.location.search;
   if (to === current) return;
-  if (opts.replace) window.history.replaceState(null, "", to);
-  else window.history.pushState(null, "", to);
+  if (opts.replace) window.history.replaceState({ prev: (window.history.state as NavState | null)?.prev ?? null } satisfies NavState, "", to);
+  else window.history.pushState({ prev: current } satisfies NavState, "", to);
   window.dispatchEvent(new Event(NAV_EVENT));
+}
+
+/**
+ * Referme un panneau de détail. S'il a été ouvert depuis la liste, on revient en arrière dans l'historique :
+ * « Précédent » ne le rouvre donc pas. Ouvert depuis un lien partagé, on remplace l'entrée par la liste.
+ */
+export function closeDetail(listPath: string) {
+  const prev = (window.history.state as NavState | null)?.prev ?? null;
+  if (prev === listPath) window.history.back();
+  else navigate(listPath, { replace: true });
 }
 
 /** Intercepte un clic sur un lien interne, en laissant passer Ctrl/Cmd+clic. */

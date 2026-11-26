@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { ArrowRight, Bot, Search } from "lucide-react";
 import type { CategoryId, Issue, IssueDetail, Severity, SiteSummary } from "../lib/types";
-import { useIssue, useIssues } from "../lib/queries";
-import { navigate, sitePath, useSearch } from "../lib/router";
-import { CATEGORY_LABEL, SEVERITY_LABEL, SEVERITY_ORDER, scoreBand } from "../lib/score";
-import { fmtDec, fmtInt, plural } from "../lib/format";
+import { useIssue, useIssues, useSettings } from "../lib/queries";
+import { closeDetail, navigate, sitePath, useSearch } from "../lib/router";
+import { CATEGORY_LABEL, DUPLICATE_NOTE, SEVERITY_LABEL, SEVERITY_ORDER, isDuplicateIssue, scoreBand } from "../lib/score";
+import { isRelaunching, noResultsReason, resultsOf } from "../lib/results";
+import { fmtDec, fmtScorePoints, pl, plural } from "../lib/format";
 import { setDraft } from "../lib/draft";
 import { PageHeader, Section } from "../ui/Section";
 import { SeverityBadge, Tag } from "../ui/Badge";
@@ -16,7 +17,8 @@ import { Button, Link } from "../ui/Button";
 import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { StrengthList } from "./Overview";
-import { QueryError, RelaunchButton, isRunning } from "./common";
+import { useOverflowHint } from "../ui/useVirtual";
+import { NoResults, QueryError, RelaunchButton, ReliabilityNote, isRunning } from "./common";
 
 type SevFilter = "all" | Severity;
 
@@ -31,13 +33,24 @@ function AuditRow({ issue, siteId, search }: { issue: Issue; siteId: string; sea
         </span>
         <span className="audit-row__cat">{CATEGORY_LABEL[issue.category]}</span>
         <span className="audit-row__pages">
-          <span className="tnum">{issue.pagesAffected} / {issue.pagesTotal}</span>
+          <span className="tnum">{issue.pagesAffected} / {issue.pagesTotal} {pl(issue.pagesTotal, "page", "pages")}</span>
           <Meter value={issue.pagesAffected} max={issue.pagesTotal} tone={issue.severity === "critical" ? "critical" : issue.severity === "warning" ? "warning" : "neutral"} />
         </span>
-        <span className="audit-row__pts tnum" title="Points de note perdus sur l'ensemble du site">−{fmtInt(issue.pointsLost)} pts</span>
+        <IssuePoints issue={issue} />
         <ArrowRight size={16} className="row-arrow" aria-hidden />
       </Link>
     </li>
+  );
+}
+
+/** Effet sur la note du site (sur 100). Les doublons ne la changent pas : aucun chiffre, une mention. */
+function IssuePoints({ issue }: { issue: Issue }) {
+  if (isDuplicateIssue(issue)) return <span className="audit-row__pts audit-row__pts--none" title={DUPLICATE_NOTE}>Sans effet sur la note</span>;
+  if (issue.scoreImpact <= 0) return <span className="audit-row__pts audit-row__pts--none">Moins de 0,1 point</span>;
+  return (
+    <span className="audit-row__pts tnum" title="Points que ce problème retire à la note du site, sur 100">
+      −{fmtScorePoints(issue.scoreImpact)}<span className="audit-row__pts-unit"> sur la note</span>
+    </span>
   );
 }
 
@@ -79,6 +92,8 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
 
 function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: string | null; onClose: () => void }) {
   const q = useIssue(site.id, issueId);
+  const settings = useSettings();
+  const chatReady = settings.data?.integrations.chat.configured === true;
   const issue = q.data?.issue && q.data.issue.id === issueId ? q.data.issue : null;
   const askAssistant = () => {
     if (!issue) return;
@@ -97,15 +112,15 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
             <Tag>{CATEGORY_LABEL[issue.category]}</Tag>
             <span>{plural(issue.pagesAffected, "page concernée", "pages concernées")} sur {issue.pagesTotal}</span>
             <span aria-hidden>·</span>
-            <span>−{fmtInt(issue.pointsLost)} points</span>
+            <span>{isDuplicateIssue(issue) ? "Sans effet sur la note" : issue.scoreImpact > 0 ? `−${fmtScorePoints(issue.scoreImpact)} sur la note` : "Moins de 0,1 point sur la note"}</span>
           </>
         )
       }
       footer={
         issue && (
           <>
-            <Button variant="ghost" onClick={() => navigate(`${sitePath(site.id, "recommendations")}#rec_${issue.id}`)}>Voir l'action</Button>
-            <Button variant="primary" icon={<Bot size={16} aria-hidden />} onClick={askAssistant}>Demander à l'assistant</Button>
+            <Button variant={chatReady ? "ghost" : "secondary"} onClick={() => navigate(`${sitePath(site.id, "recommendations")}#rec_${issue.id}`)}>Voir l'action</Button>
+            {chatReady && <Button variant="primary" icon={<Bot size={16} aria-hidden />} onClick={askAssistant}>Demander à l'assistant</Button>}
           </>
         )
       }
@@ -123,6 +138,11 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
       {issue && (
         <div className="detail-stack">
           <p className="detail-lead">{issue.summary}</p>
+          {isDuplicateIssue(issue) && (
+            <p className="detail-note">
+              <strong>Ce problème ne change pas la note sur 100</strong>, calculée page par page. Il compte quand même : des pages identiques dans Google se font concurrence, Google hésite sur celle à montrer et l'internaute ne sait pas laquelle choisir.
+            </p>
+          )}
           <section className="detail-block">
             <h3 className="detail-block__title">Pourquoi c'est important</h3>
             <p className="detail-block__text">{issue.why}</p>
@@ -132,7 +152,19 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
             <ol className="steps">
               {issue.fix.steps.map((s, i) => <li key={i}>{s}</li>)}
             </ol>
-            {issue.fix.snippet && <CodeBlock code={issue.fix.snippet.code} language={issue.fix.snippet.language} label={issue.fix.snippet.language === "html" ? "Code à coller" : undefined} />}
+            {issue.fix.snippet && (
+              <CodeBlock
+                code={issue.fix.snippet.code}
+                language={issue.fix.snippet.language}
+                label={
+                  issue.fix.snippet.forPath ? (
+                    <>Exemple pour la page <span className="mono">{issue.fix.snippet.forPath}</span> — à adapter pour chaque page</>
+                  ) : issue.fix.snippet.language === "html" ? (
+                    "Code à coller, valable pour tout le site"
+                  ) : undefined
+                }
+              />
+            )}
           </section>
           <section className="detail-block">
             <h3 className="detail-block__title">Pages concernées <span className="muted tnum">{issue.pagesAffected}</span></h3>
@@ -170,13 +202,26 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
   const visible = filteredByCat.filter((i) => sev === "all" || i.severity === sev);
   const groups = SEVERITY_ORDER.map((s) => ({ s, items: visible.filter((i) => i.severity === s) })).filter((g) => g.items.length);
 
+  const reason = noResultsReason(site);
+  const r = resultsOf(site);
+  const [famRef] = useOverflowHint<HTMLDivElement>();
+  const firstRun = isRunning(site) && !isRelaunching(site);
   return (
     <>
       <PageHeader
         title="Audit SEO"
-        description={q.data ? `Tous les problèmes détectés sur ${plural(q.data.issues[0]?.pagesTotal ?? site.pagesAnalyzed, "page analysée", "pages analysées")}, du plus coûteux au moins coûteux. Ouvrez-en un pour voir les preuves et la correction.` : "Tous les problèmes détectés, du plus coûteux au moins coûteux."}
+        description={
+          r
+            ? `Tous les problèmes détectés sur ${plural(r.pagesDone, "page analysée", "pages analysées")}${isRelaunching(site) ? " lors de l'analyse précédente" : ""}, du plus coûteux au moins coûteux. Ouvrez-en un pour voir les preuves et la correction.`
+            : "Tous les problèmes détectés, du plus coûteux au moins coûteux, avec leurs preuves et leur correction."
+        }
         actions={<RelaunchButton site={site} />}
       />
+      {reason !== null ? (
+        <NoResults site={site} running="Les problèmes apparaissent ici au fil des pages notées. Vous pouvez parcourir les autres sections en attendant." />
+      ) : (
+        <>
+      <ReliabilityNote site={site} compact />
       <QueryError q={q} />
       {!q.data && !q.error && (
         <>
@@ -188,7 +233,7 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
       {q.data && (
         <>
           {q.data.categories.length > 0 && (
-            <div className="famstrip" role="group" aria-label="Filtrer par famille de critères">
+            <div className="famstrip scroll-hint" role="group" aria-label="Filtrer par famille de critères" ref={famRef}>
               {q.data.categories.map((c) => {
                 const active = cat === c.id;
                 const band = scoreBand(Math.round((c.score / c.max) * 100));
@@ -223,8 +268,8 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
           </div>
 
           {q.data.issues.length === 0 ? (
-            <EmptyState title={isRunning(site) ? "Aucun problème pour l'instant" : "Aucun problème détecté"}>
-              {isRunning(site) ? "Les problèmes apparaissent ici au fil des pages notées." : "Toutes les pages analysées respectent les critères de la grille."}
+            <EmptyState title={firstRun ? "Aucun problème pour l'instant" : "Aucun problème détecté"}>
+              {firstRun ? "Les problèmes apparaissent ici au fil des pages notées." : `${r && r.pagesDone > 1 ? "Les pages analysées respectent" : "La page analysée respecte"} tous les critères de la grille.`}
             </EmptyState>
           ) : groups.length === 0 ? (
             <EmptyState title="Aucun problème avec ces filtres">
@@ -254,7 +299,9 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
           )}
         </>
       )}
-      <IssueSheet site={site} issueId={issueId} onClose={() => navigate(`${sitePath(site.id, "audit")}${currentQs}`)} />
+        </>
+      )}
+      <IssueSheet site={site} issueId={issueId} onClose={() => closeDetail(`${sitePath(site.id, "audit")}${currentQs}`)} />
     </>
   );
 }

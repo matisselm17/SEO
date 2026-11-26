@@ -141,12 +141,15 @@ export class Store {
       (this.db.prepare("SELECT * FROM audits WHERE site_id = ? AND pages_done > 0 ORDER BY seq DESC LIMIT 1").get(siteId) as unknown as AuditRow) ?? null
     );
   }
-  /** Analyse dont les données sont affichées : celle en cours (même vide), sinon la dernière qui a des pages. */
-  dataAudit(siteId: string): AuditRow | null {
-    const latest = this.latestAudit(siteId);
-    if (!latest) return null;
-    if (latest.state === "running" || latest.state === "queued" || latest.pages_done > 0) return latest;
-    return this.latestAuditWithPages(siteId);
+  /**
+   * Analyse dont les résultats sont affichés (SiteSummary.results) : la dernière terminée ;
+   * à défaut, la plus récente qui a au moins une page notée. null sans page notée.
+   */
+  resultsAudit(siteId: string): AuditRow | null {
+    const done = this.db
+      .prepare("SELECT * FROM audits WHERE site_id = ? AND state = 'done' AND pages_done > 0 ORDER BY seq DESC LIMIT 1")
+      .get(siteId) as unknown as AuditRow | undefined;
+    return done ?? this.latestAuditWithPages(siteId);
   }
   previousDoneAudit(siteId: string, beforeSeq: number): AuditRow | null {
     return (
@@ -187,11 +190,17 @@ export class Store {
   getPage(id: string): PageRow | null {
     return (this.db.prepare("SELECT * FROM pages WHERE id = ?").get(id) as unknown as PageRow) ?? null;
   }
+  countSites(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM sites").get() as Row).n as number;
+  }
+  deleteChatMessage(id: string): void {
+    this.db.prepare("DELETE FROM chat_messages WHERE id = ?").run(id);
+  }
   insertFailure(auditId: string, url: string, reason: string, status: number | null): void {
     this.db.prepare("INSERT INTO page_failures (audit_id, url, reason, http_status) VALUES (?, ?, ?, ?)").run(auditId, url, reason, status);
   }
   failures(auditId: string): Array<{ url: string; reason: string; http_status: number | null }> {
-    return this.db.prepare("SELECT url, reason, http_status FROM page_failures WHERE audit_id = ? LIMIT 200").all(auditId) as never;
+    return this.db.prepare("SELECT url, reason, http_status FROM page_failures WHERE audit_id = ? ORDER BY rowid LIMIT 500").all(auditId) as never;
   }
 
   private invalidate(auditId: string, drop = false): void {
@@ -334,7 +343,7 @@ export class Store {
 
   siteSummary(s: SiteRow): SiteSummary {
     const latest = this.latestAudit(s.id);
-    const withPages = this.latestAuditWithPages(s.id);
+    const results = this.resultsAudit(s.id);
     const gscAt = this.getGscMeta(s.id);
     return {
       id: s.id,
@@ -343,8 +352,11 @@ export class Store {
       name: s.name || s.host,
       createdAt: s.created_at,
       audit: latest ? this.auditStatus(latest) : null,
-      score: withPages ? this.auditScore(withPages.id) : null,
-      pagesAnalyzed: withPages ? withPages.pages_done : 0,
+      results: results
+        ? { auditId: results.id, state: results.state, finishedAt: results.finished_at, pagesDone: results.pages_done, pagesFailed: results.pages_failed }
+        : null,
+      score: results ? this.auditScore(results.id) : null,
+      pagesAnalyzed: results ? results.pages_done : 0,
       searchConsole: { available: !!gscAt, importedAt: gscAt },
     };
   }
@@ -387,7 +399,7 @@ export class Store {
   searchConsole(siteId: string): SearchConsoleData {
     const gsc = this.getGsc(siteId);
     if (!gsc) return { available: false };
-    const audit = this.dataAudit(siteId);
+    const audit = this.resultsAudit(siteId);
     const byKey = new Map<string, PageRow>();
     if (audit) for (const p of this.pageRows(audit.id)) byKey.set(p.url_key, p);
     const pages: OrganicPage[] | null = gsc.data.pages
@@ -409,6 +421,7 @@ export class Store {
     return {
       available: true,
       importedAt: gsc.importedAt,
+      matching: pages ? { matched: pages.filter((p) => p.pageId !== null).length, total: pages.length } : null,
       period: gsc.data.period,
       totals: totalsOf(gsc.data),
       series: gsc.data.series,

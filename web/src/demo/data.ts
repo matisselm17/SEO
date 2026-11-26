@@ -144,10 +144,34 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
     out.push({
       id: c.id, category: c.category, severity: severityOf(c.max, c.id, failing.length, total),
       title: c.issueTitle(failing.length), summary: c.summary, pagesAffected: failing.length, pagesTotal: total, pointsLost: lost,
+      scoreImpact: Math.round((lost / Math.max(1, total)) * 10) / 10,
       why: c.why, fix: c.fix(pages[0]?.summary.url.replace(/^https:\/\//, "").replace(/\/.*$/, "") ?? "exemple.fr"), evidence,
     });
   }
-  return out.sort((a, b) => b.pointsLost - a.pointsLost);
+  // Doublons : même titre sur plusieurs pages. Ils ne changent pas la note (scoreImpact 0).
+  const groups = new Map<string, DemoPage[]>();
+  for (const p of pages) {
+    const t = p.summary.title?.trim().toLowerCase();
+    if (!t) continue;
+    groups.set(t, [...(groups.get(t) ?? []), p]);
+  }
+  const dup = [...groups.values()].filter((g) => g.length > 1);
+  const dupIssues: IssueDetail[] = [];
+  if (dup.length) {
+    const affected = dup.reduce((a, g) => a + g.length, 0);
+    dupIssues.push({
+      id: "duplicate_title", category: "balises", severity: "warning",
+      title: `${affected} pages partagent le même titre${dup.length > 1 ? ` (${dup.length} groupes)` : ""}`,
+      summary: "Plusieurs pages portent exactement le même titre. Dans Google, elles se ressemblent et se font concurrence au lieu de se compléter.",
+      pagesAffected: affected, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
+      why: "Le titre doit dire ce qui distingue chaque page. Quand plusieurs pages ont le même, Google a du mal à choisir laquelle montrer et l'internaute ne sait pas sur laquelle cliquer.",
+      fix: { steps: ["Ouvrez chacune des pages concernées.", "Donnez-leur un titre propre qui dit ce qui les distingue (le produit, la catégorie, la ville…).", "Si deux pages présentent vraiment le même contenu, gardez-en une et redirigez l'autre vers elle."], snippet: null },
+      evidence: dup.flatMap((g) => g.map((p) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: `« ${p.summary.title} », identique sur ${g.length} pages`, expected: "Un titre propre à chaque page" }))),
+    });
+  }
+  // Ordre du serveur : critiques, puis doublons, puis les autres.
+  const sorted = out.sort((a, b) => b.pointsLost - a.pointsLost);
+  return [...sorted.filter((i) => i.severity === "critical"), ...dupIssues, ...sorted.filter((i) => i.severity !== "critical")];
 }
 
 export function toIssue(d: IssueDetail): Issue {
@@ -169,16 +193,24 @@ export function strengthsOf(pages: DemoPage[]): Strength[] {
 
 export function recommendationsOf(issues: IssueDetail[]): Recommendation[] {
   const recs = issues.map((i) => {
-    const c = CRITERIA.find((x) => x.id === i.id)!;
+    const c = CRITERIA.find((x) => x.id === i.id);
+    if (!c) {
+      return {
+        id: `rec_${i.id}`, issueId: i.id, title: `Donner un titre unique à ${i.pagesAffected} pages`, impact: "medium", effort: "medium",
+        pagesAffected: i.pagesAffected, scoreGain: 0, pointsToGain: 0, rank: 0, steps: i.fix.steps,
+      } as Recommendation;
+    }
     const perPage = i.pointsLost / Math.max(1, i.pagesTotal);
     const impact = perPage >= 2.5 ? "high" : perPage >= 0.8 ? "medium" : "low";
     return {
       id: `rec_${i.id}`, issueId: i.id, title: c.recTitle(i.pagesAffected), impact, effort: c.effort,
-      pagesAffected: i.pagesAffected, pointsToGain: i.pointsLost, rank: 0, steps: c.recSteps,
+      pagesAffected: i.pagesAffected, scoreGain: i.scoreImpact, pointsToGain: i.pointsLost, rank: 0, steps: c.recSteps,
     } as Recommendation;
   });
   const effortW = { quick: 1, medium: 2, heavy: 3 } as const;
-  recs.sort((a, b) => b.pointsToGain / effortW[b.effort] - a.pointsToGain / effortW[a.effort]);
+  // Les doublons (aucun point) sont placés juste après les actions des problèmes critiques.
+  const val = (r: Recommendation) => (r.pointsToGain === 0 ? 40 : r.pointsToGain) / effortW[r.effort];
+  recs.sort((a, b) => val(b) - val(a));
   recs.forEach((r, i) => (r.rank = i + 1));
   return recs;
 }
@@ -224,8 +256,10 @@ export function buildSearchConsole(pages: DemoPage[], seed: number, importedAt: 
   }
   gscPages.sort((a, b) => b.clicks - a.clicks);
 
+  const exportPages = gscPages.length;
   return {
     available: true, importedAt,
+    matching: { matched: gscPages.filter((g) => g.pageId !== null).length, total: exportPages },
     period: { start: series[0].date, end: series[series.length - 1].date },
     totals: { clicks, impressions, ctr: clicks / impressions, position: Math.round((queries.reduce((s, q) => s + q.position * q.impressions, 0) / Math.max(1, queries.reduce((s, q) => s + q.impressions, 0))) * 10) / 10 },
     series, queries, pages: gscPages,
@@ -278,9 +312,9 @@ const lunePaths: SiteProfile["paths"] = [
   { path: "/boutique/bols", title: "Bols en grès faits main | Atelier Lune", h1: "Bols", words: 160 },
   { path: "/boutique/assiettes", title: "Assiettes en grès émaillé, faites à Nantes", h1: "Assiettes", words: 150 },
   { path: "/boutique/tasses", title: "Tasses et mugs en céramique artisanale", h1: "Tasses et mugs", words: 120 },
-  { path: "/boutique/vases", title: "Vases", h1: "Vases", words: 80 },
+  { path: "/boutique/vases", title: "Produits", h1: "Vases", words: 80 },
   { path: "/boutique/plats", title: "Plats de service en grès | Atelier Lune", h1: "Plats", words: 110 },
-  { path: "/boutique/nouveautes", title: "Nouveautés de l'atelier", h1: "Nouveautés", words: 90 },
+  { path: "/boutique/nouveautes", title: "Produits", h1: "Nouveautés", words: 90 },
   { path: "/produits/bol-lune-bleu-nuit", title: "Bol Lune bleu nuit, grès émaillé tourné main", h1: "Bol Lune bleu nuit", words: 260 },
   { path: "/produits/bol-lune-sable", title: "Bol Lune sable, grès tourné à la main", h1: "Bol Lune sable", words: 240 },
   { path: "/produits/assiette-plate-ecume", title: "Assiette plate Écume — grès émaillé blanc", h1: "Assiette plate Écume", words: 230 },

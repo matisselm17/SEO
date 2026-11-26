@@ -13,6 +13,7 @@ import type {
   ChatState,
   CompetitorsData,
   CreateSiteRequest,
+  FailedPagesResponse,
   HealthResponse,
   IssueResponse,
   PageResponse,
@@ -38,6 +39,8 @@ import { errors, HttpError, toHttpError } from "./errors.ts";
 import type { EventHub } from "./events.ts";
 import { importFile, MAX_UPLOAD_BYTES } from "./gsc/import.ts";
 import { assertFetchable, FetchError, safeFetch } from "./net/fetch.ts";
+import { compress, guardMutations, JSON_LIMIT, limitBody, RateLimiter, securityHeaders, UPLOAD_LIMIT } from "./http.ts";
+import { displayPath } from "./crawl/url.ts";
 import type { PageFacts } from "./analyse/grille.ts";
 import type { SiteRow, Store } from "./store.ts";
 import { isPageSort, issues, listPages, overview, recommendations } from "./views.ts";
@@ -91,6 +94,16 @@ async function readJson<T>(c: Context, optional = false): Promise<Partial<T>> {
 export function createApp(deps: AppDeps): Hono {
   const { config, store, hub, crawler } = deps;
   const app = new Hono();
+  const chatLimiter = new RateLimiter(config.limits.chatPerMinute);
+  const competitorsLimiter = new RateLimiter(config.limits.competitorsPerMinute);
+  /** Une seule réponse de l'assistant en cours par site. */
+  const chatBusy = new Set<string>();
+  const isUpload = (p: string, method: string) => method === "POST" && /^\/api\/sites\/[^/]+\/search-console$/.test(p);
+
+  app.use("*", securityHeaders);
+  app.use("*", compress);
+  app.use("/api/*", guardMutations(isUpload));
+  app.use("/api/*", limitBody((p) => (isUpload(p, "POST") ? UPLOAD_LIMIT : JSON_LIMIT)));
 
   const settings = (): Settings => ({
     maxPagesDefault: Number(store.getSetting("maxPagesDefault") ?? DEFAULT_MAX_PAGES),
@@ -132,7 +145,11 @@ export function createApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     const e = toHttpError(err);
     if (!(err instanceof HttpError)) console.error(`[api] ${c.req.method} ${new URL(c.req.url).pathname} :`, err instanceof Error ? err.message : "erreur");
-    return json(e.toBody(), e.status);
+    const res = json(e.toBody(), e.status);
+    const retry = e.details?.retryAfterSeconds;
+    if (typeof retry === "number") res.headers.set("retry-after", String(retry));
+    if (e.status === 413) res.headers.set("connection", "close");
+    return res;
   });
 
   // ───────── Santé et paramètres
@@ -163,6 +180,11 @@ export function createApp(deps: AppDeps): Hono {
     const maxPages = maxPagesFrom(body.maxPages);
     const existing = store.siteByHost(bareHost(parsed.hostname));
     if (existing) throw errors.siteExists(existing.id);
+    if (store.countSites() >= config.limits.maxSites) {
+      throw new HttpError(409, "limit_reached", `Vous suivez déjà ${config.limits.maxSites} sites, le maximum.`, "Supprimez un site que vous ne suivez plus, puis réessayez.", {
+        limit: config.limits.maxSites,
+      });
+    }
 
     // Le site doit répondre avant d'être créé.
     let finalUrl: URL;
@@ -225,6 +247,7 @@ export function createApp(deps: AppDeps): Hono {
     if (crawler.cancel(s.id)) await crawler.wait(s.id);
     hub.forget(s.id);
     store.deleteSite(s.id);
+    hub.close(s.id);
     return new Response(null, { status: 204 });
   });
 
@@ -261,10 +284,13 @@ export function createApp(deps: AppDeps): Hono {
       const ping = setInterval(() => {
         chain = chain.then(() => stream.write(": ping\n\n")).then(() => undefined).catch(() => undefined);
       }, PING_MS);
+      let offClose = () => {};
       await new Promise<void>((resolve) => {
         stream.onAbort(() => resolve());
         c.req.raw.signal.addEventListener("abort", () => resolve(), { once: true });
+        offClose = hub.onClose(s.id, () => resolve());
       });
+      offClose();
       clearInterval(ping);
       unsubscribe();
     });
@@ -276,7 +302,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/api/sites/:siteId/issues", (c) => getJson(c, issues(store, site(c))));
   app.get("/api/sites/:siteId/issues/:issueId", (c) => {
     const s = site(c);
-    const audit = store.dataAudit(s.id);
+    const audit = store.resultsAudit(s.id);
     if (!audit) throw errors.noAudit();
     const issue = store.aggregate(audit.id, s.name || s.host).issues.find((i) => i.id === c.req.param("issueId"));
     if (!issue) throw errors.notFound("Ce problème");
@@ -297,6 +323,14 @@ export function createApp(deps: AppDeps): Hono {
     if (!row || row.site_id !== s.id) throw errors.notFound("Cette page");
     return getJson(c, { page: store.pageDetail(row, store.gscIndex(s.id)) } satisfies PageResponse);
   });
+  app.get("/api/sites/:siteId/failed-pages", (c) => {
+    const s = site(c);
+    const audit = store.resultsAudit(s.id);
+    const pages = audit
+      ? store.failures(audit.id).map((f) => ({ url: f.url, path: displayPath(f.url), httpStatus: f.http_status, reason: f.reason }))
+      : [];
+    return getJson(c, { pages } satisfies FailedPagesResponse);
+  });
   app.get("/api/sites/:siteId/recommendations", (c) => getJson(c, recommendations(store, site(c))));
 
   // ───────── Search Console
@@ -306,10 +340,6 @@ export function createApp(deps: AppDeps): Hono {
     const s = site(c);
     const tooLarge = () =>
       new HttpError(413, "file_too_large", "Ce fichier dépasse 20 Mo.", "Exportez une période plus courte, ou déposez seulement le .zip de l'onglet « Performances ».");
-    const declared = Number(c.req.header("content-length") ?? "0");
-    if (declared > MAX_UPLOAD_BYTES + 1024 * 1024) throw tooLarge();
-    if (!(c.req.header("content-type") ?? "").includes("multipart/form-data"))
-      throw errors.badRequest("Le fichier doit être envoyé dans un formulaire (champ « file »).");
     let form: FormData;
     try {
       form = await c.req.raw.formData();
@@ -320,7 +350,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!file || typeof file === "string") throw errors.badRequest("Aucun fichier reçu.", "Déposez le .zip ou le .csv exporté depuis la Search Console.");
     if (file.size > MAX_UPLOAD_BYTES) throw tooLarge();
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const data = importFile(file.name || "export.csv", bytes);
+    const data = importFile(file.name || "export.csv", bytes, s.host);
     store.setGsc(s.id, data);
     hub.emit(s.id, { type: "search_console", available: true });
     return json(store.searchConsole(s.id));
@@ -340,15 +370,16 @@ export function createApp(deps: AppDeps): Hono {
     let data: CompetitorsData;
     if (stored) data = stored;
     else if (!deps.searchProvider) data = { available: false, reason: "not_configured" };
-    else if (!store.latestAuditWithPages(s.id)) data = { available: false, reason: "no_audit" };
+    else if (!store.resultsAudit(s.id)) data = { available: false, reason: "no_audit" };
     else data = { available: false, reason: "not_run" };
     return getJson(c, data);
   });
   app.post("/api/sites/:siteId/competitors", async (c) => {
     const s = site(c);
     if (!deps.searchProvider) throw competitorsNotConfigured();
-    const audit = store.latestAuditWithPages(s.id);
+    const audit = store.resultsAudit(s.id);
     if (!audit) throw errors.noAudit();
+    competitorsLimiter.take("competitors", "de relevé des concurrents");
     const rows = store.pageRows(audit.id);
     const gsc = store.getGsc(s.id);
     const queries = pickQueries({
@@ -388,7 +419,12 @@ export function createApp(deps: AppDeps): Hono {
     const message = typeof body.message === "string" ? body.message.trim() : "";
     if (!message) throw errors.badRequest("Votre message est vide.", "Écrivez une question, puis envoyez-la.");
     if (message.length > 4000) throw errors.badRequest("Votre message est trop long (4 000 caractères au plus).", "Raccourcissez-le, puis réessayez.");
+    if (chatBusy.has(s.id)) {
+      throw new HttpError(409, "limit_reached", "L'assistant est déjà en train de répondre sur ce site.", "Attendez la fin de la réponse en cours, puis posez votre question.");
+    }
+    chatLimiter.take("chat", "à l'assistant");
     const client = deps.chatClient;
+    chatBusy.add(s.id);
     return streamSSE(c, async (stream) => {
       const controller = new AbortController();
       stream.onAbort(() => controller.abort());
@@ -398,8 +434,12 @@ export function createApp(deps: AppDeps): Hono {
       const send = (ev: ChatEvent) => {
         chain = chain.then(() => stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) })).catch(() => undefined);
       };
-      await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal });
-      await chain;
+      try {
+        await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal });
+        await chain;
+      } finally {
+        chatBusy.delete(s.id);
+      }
     });
   });
   app.delete("/api/sites/:siteId/chat", (c) => {

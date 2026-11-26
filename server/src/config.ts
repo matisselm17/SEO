@@ -65,8 +65,24 @@ function loadDotenv(): void {
   }
 }
 
+export interface Limits {
+  /** Nombre maximal de sites suivis. */
+  maxSites: number;
+  /** Analyses qui tournent en même temps ; les suivantes attendent en « queued ». */
+  maxConcurrentAudits: number;
+  /** Questions à l'assistant par minute (tout l'espace de travail). */
+  chatPerMinute: number;
+  /** Relevés de concurrents par minute. */
+  competitorsPerMinute: number;
+}
+
+export const DEFAULT_LIMITS: Limits = { maxSites: 50, maxConcurrentAudits: 2, chatPerMinute: 10, competitorsPerMinute: 3 };
+
 export interface Config {
   port: number;
+  /** Adresse d'écoute, 127.0.0.1 par défaut. */
+  host: string;
+  limits: Limits;
   dataDir: string;
   anthropicApiKey: string | null;
   anthropicModel: string;
@@ -94,6 +110,8 @@ export function loadConfig(): Config {
   const dataDirRaw = nonEmpty(env.DATA_DIR) ?? "./data";
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8787,
+    host: nonEmpty(env.HOST) ?? "127.0.0.1",
+    limits: DEFAULT_LIMITS,
     // Un chemin relatif est compris depuis la racine du dépôt, comme le .env qui le déclare.
     dataDir: path.isAbsolute(dataDirRaw) ? dataDirRaw : path.resolve(REPO_DIR, dataDirRaw),
     anthropicApiKey: nonEmpty(env.ANTHROPIC_API_KEY),
