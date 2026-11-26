@@ -1,0 +1,171 @@
+{
+  "_note": "Exemples pour un site fictif. Les clés sont les routes ; les valeurs suivent shared/api.ts. Réservé au développement de l'interface : jamais affiché en production.",
+
+  "GET /api/health": { "ok": true, "version": "0.1.0" },
+
+  "GET /api/settings": {
+    "maxPagesDefault": 100,
+    "maxPagesLimits": { "min": 1, "max": 500 },
+    "integrations": { "chat": { "configured": true, "model": "claude-sonnet-5-5" }, "competitors": { "configured": false } },
+    "version": "0.1.0"
+  },
+
+  "GET /api/sites": {
+    "sites": [
+      {
+        "id": "site_8fk2",
+        "url": "https://atelier-lune.example/",
+        "host": "atelier-lune.example",
+        "name": "Atelier Lune",
+        "createdAt": "2026-11-20T09:12:00.000Z",
+        "audit": {
+          "id": "aud_31", "state": "done", "startedAt": "2026-11-26T14:00:00.000Z", "finishedAt": "2026-11-26T14:01:42.000Z",
+          "maxPages": 100, "pagesDone": 42, "pagesFailed": 1, "pagesQueued": 0, "currentUrl": null, "error": null
+        },
+        "results": { "auditId": "aud_31", "state": "done", "finishedAt": "2026-11-26T14:01:42.000Z", "pagesDone": 42, "pagesFailed": 1 },
+        "score": 68,
+        "pagesAnalyzed": 42,
+        "searchConsole": { "available": true, "importedAt": "2026-11-26T14:05:00.000Z" }
+      }
+    ]
+  },
+
+  "SSE /api/sites/site_8fk2/events (analyse en cours)": [
+    { "type": "site", "site": { "id": "site_8fk2", "url": "https://atelier-lune.example/", "host": "atelier-lune.example", "name": "Atelier Lune", "createdAt": "2026-11-20T09:12:00.000Z", "audit": { "id": "aud_32", "state": "running", "startedAt": "2026-11-26T15:00:00.000Z", "finishedAt": null, "maxPages": 100, "pagesDone": 0, "pagesFailed": 0, "pagesQueued": 1, "currentUrl": "https://atelier-lune.example/", "error": null }, "results": null, "score": null, "pagesAnalyzed": 0, "searchConsole": { "available": false, "importedAt": null } } },
+    { "type": "page", "page": { "id": "pg_1", "url": "https://atelier-lune.example/", "path": "/", "title": "Atelier Lune | Poterie artisanale à Nantes", "httpStatus": 200, "score": 74, "issues": 6, "words": 412, "organic": null } },
+    { "type": "audit", "audit": { "id": "aud_32", "state": "running", "startedAt": "2026-11-26T15:00:00.000Z", "finishedAt": null, "maxPages": 100, "pagesDone": 1, "pagesFailed": 0, "pagesQueued": 17, "currentUrl": "https://atelier-lune.example/boutique", "error": null }, "score": 74 },
+    { "type": "audit", "audit": { "id": "aud_32", "state": "done", "startedAt": "2026-11-26T15:00:00.000Z", "finishedAt": "2026-11-26T15:01:40.000Z", "maxPages": 100, "pagesDone": 42, "pagesFailed": 1, "pagesQueued": 0, "currentUrl": null, "error": null }, "score": 68 }
+  ],
+
+  "GET /api/sites/site_8fk2/overview": {
+    "site": { "id": "site_8fk2", "url": "https://atelier-lune.example/", "host": "atelier-lune.example", "name": "Atelier Lune", "createdAt": "2026-11-20T09:12:00.000Z", "audit": { "id": "aud_31", "state": "done", "startedAt": "2026-11-26T14:00:00.000Z", "finishedAt": "2026-11-26T14:01:42.000Z", "maxPages": 100, "pagesDone": 42, "pagesFailed": 1, "pagesQueued": 0, "currentUrl": null, "error": null }, "results": { "auditId": "aud_31", "state": "done", "finishedAt": "2026-11-26T14:01:42.000Z", "pagesDone": 42, "pagesFailed": 1 }, "score": 68, "pagesAnalyzed": 42, "searchConsole": { "available": true, "importedAt": "2026-11-26T14:05:00.000Z" } },
+    "score": {
+      "value": 68,
+      "previous": 61,
+      "categories": [
+        { "id": "balises", "label": "Balises", "score": 19.4, "max": 30 },
+        { "id": "contenu", "label": "Contenu", "score": 12.1, "max": 20 },
+        { "id": "technique", "label": "Technique", "score": 20.8, "max": 25 },
+        { "id": "medias", "label": "Liens et images", "score": 9.9, "max": 15 },
+        { "id": "partage", "label": "Partage social", "score": 5.8, "max": 10 }
+      ]
+    },
+    "counts": { "pages": 42, "issues": { "critical": 2, "warning": 7, "info": 3 } },
+    "topIssues": [
+      { "id": "meta_description", "category": "balises", "severity": "critical", "title": "31 pages n'ont pas de description", "summary": "La description est le texte affiché sous le titre dans Google. Sans elle, Google choisit lui-même un extrait, rarement le plus vendeur.", "pagesAffected": 31, "pagesTotal": 42, "scoreImpact": 5.2, "pointsLost": 217 },
+      { "id": "h1", "category": "balises", "severity": "critical", "title": "Le titre principal est en double sur 28 pages", "summary": "Chaque page doit avoir un seul titre principal (H1) qui annonce son sujet. Plusieurs H1 brouillent ce signal.", "pagesAffected": 28, "pagesTotal": 42, "scoreImpact": 2.0, "pointsLost": 84 },
+      { "id": "image_alt", "category": "medias", "severity": "warning", "title": "Des images n'ont pas de texte alternatif sur 19 pages", "summary": "Le texte alternatif décrit une image à Google et aux lecteurs d'écran. Sans lui, l'image ne peut pas ressortir dans Google Images.", "pagesAffected": 19, "pagesTotal": 42, "scoreImpact": 1.5, "pointsLost": 61 }
+    ],
+    "strengths": [
+      { "id": "viewport", "category": "technique", "title": "Le site s'affiche correctement sur mobile", "detail": "Toutes les pages déclarent l'affichage adapté aux téléphones.", "pagesPassing": 42, "pagesTotal": 42 },
+      { "id": "https", "category": "technique", "title": "Toutes les pages sont sécurisées (HTTPS)", "detail": "Les 42 pages sont servies en HTTPS.", "pagesPassing": 42, "pagesTotal": 42 }
+    ],
+    "actions": [
+      { "id": "rec_meta_description", "issueId": "meta_description", "title": "Rédiger une description pour 31 pages", "impact": "high", "effort": "heavy", "pagesAffected": 31, "scoreGain": 5.2, "pointsToGain": 217, "rank": 1, "steps": ["Commencez par les pages qui reçoivent le plus de visites.", "Écrivez 120 à 155 caractères : ce que propose la page, un argument, une invitation à cliquer.", "Collez le texte dans le champ « Description » du réglage de référencement de la page."] },
+      { "id": "rec_h1", "issueId": "h1", "title": "Garder un seul titre principal par page", "impact": "high", "effort": "quick", "pagesAffected": 28, "scoreGain": 2.0, "pointsToGain": 84, "rank": 2, "steps": ["Le second H1 vient du bloc « FAQ » du thème.", "Dans le thème, passez ce titre de H1 à H2 : la correction s'applique d'un coup aux 28 pages."] }
+    ],
+    "organic": {
+      "period": { "start": "2026-08-27", "end": "2026-11-25" },
+      "totals": { "clicks": 1840, "impressions": 61200, "ctr": 0.0301, "position": 18.4 },
+      "series": [
+        { "date": "2026-11-23", "clicks": 22, "impressions": 701 },
+        { "date": "2026-11-24", "clicks": 31, "impressions": 812 },
+        { "date": "2026-11-25", "clicks": 27, "impressions": 764 }
+      ]
+    }
+  },
+
+  "GET /api/sites/site_8fk2/issues/meta_description": {
+    "issue": {
+      "id": "meta_description", "category": "balises", "severity": "critical",
+      "title": "31 pages n'ont pas de description",
+      "summary": "La description est le texte affiché sous le titre dans Google. Sans elle, Google choisit lui-même un extrait, rarement le plus vendeur.",
+      "pagesAffected": 31, "pagesTotal": 42, "scoreImpact": 5.2, "pointsLost": 217,
+      "why": "Une bonne description ne fait pas monter la page dans le classement, mais elle décide si l'internaute clique sur votre résultat plutôt que sur celui du dessus. C'est votre annonce gratuite dans Google.",
+      "fix": {
+        "steps": ["Ouvrez la page dans votre outil de gestion du site.", "Trouvez le réglage « Référencement » ou « SEO ».", "Écrivez une description de 120 à 155 caractères, propre à cette page."],
+        "snippet": { "language": "html", "forPath": "/boutique", "code": "<meta name=\"description\" content=\"Vaisselle en grès tournée à la main à Nantes : bols, assiettes et tasses. Livraison offerte dès 60 €.\">" }
+      },
+      "evidence": [
+        { "pageId": "pg_7", "url": "https://atelier-lune.example/boutique", "path": "/boutique", "found": "Aucune description", "expected": "Entre 70 et 160 caractères" },
+        { "pageId": "pg_12", "url": "https://atelier-lune.example/cours", "path": "/cours", "found": "Description de 312 caractères", "expected": "Entre 70 et 160 caractères" }
+      ]
+    }
+  },
+
+  "GET /api/sites/site_8fk2/pages": {
+    "pages": [
+      { "id": "pg_7", "url": "https://atelier-lune.example/boutique", "path": "/boutique", "title": "Produits", "httpStatus": 200, "score": 41, "issues": 11, "words": 96, "organic": { "clicks": 212, "impressions": 9040, "position": 14.2 } },
+      { "id": "pg_1", "url": "https://atelier-lune.example/", "path": "/", "title": "Atelier Lune | Poterie artisanale à Nantes", "httpStatus": 200, "score": 74, "issues": 6, "words": 412, "organic": { "clicks": 640, "impressions": 12800, "position": 6.1 } }
+    ],
+    "total": 42, "offset": 0, "limit": 50
+  },
+
+  "GET /api/sites/site_8fk2/pages/pg_7": {
+    "page": {
+      "id": "pg_7", "url": "https://atelier-lune.example/boutique", "path": "/boutique", "title": "Produits", "httpStatus": 200, "score": 41, "issues": 11, "words": 96,
+      "organic": { "clicks": 212, "impressions": 9040, "position": 14.2 },
+      "description": null, "h1": [], "canonical": "https://atelier-lune.example/boutique", "lang": "fr", "analyzedAt": "2026-11-26T14:00:21.000Z",
+      "checks": [
+        { "id": "title", "category": "balises", "label": "Titre de la page", "status": "warn", "points": 3, "max": 8, "found": "« Produits » (8 caractères)", "expected": "Entre 30 et 60 caractères", "message": "Le titre est trop court pour dire ce que vend la page." },
+        { "id": "meta_description", "category": "balises", "label": "Description", "status": "fail", "points": 0, "max": 7, "found": "Aucune description", "expected": "Entre 70 et 160 caractères", "message": "Google choisira lui-même un extrait de la page." },
+        { "id": "viewport", "category": "technique", "label": "Affichage mobile", "status": "pass", "points": 6, "max": 6, "found": "Balise viewport présente", "expected": "Balise viewport présente", "message": "La page s'adapte aux téléphones." }
+      ],
+      "serpPreview": { "url": "https://atelier-lune.example/boutique", "title": "Produits", "description": null },
+      "queries": [ { "query": "vaisselle grès nantes", "clicks": 88, "impressions": 2100, "ctr": 0.0419, "position": 9.3 } ]
+    }
+  },
+
+  "GET /api/sites/site_8fk2/search-console": {
+    "available": true,
+    "importedAt": "2026-11-26T14:05:00.000Z",
+    "matching": { "matched": 30, "total": 33 },
+    "period": { "start": "2026-08-27", "end": "2026-11-25" },
+    "totals": { "clicks": 1840, "impressions": 61200, "ctr": 0.0301, "position": 18.4 },
+    "series": [ { "date": "2026-11-24", "clicks": 31, "impressions": 812 }, { "date": "2026-11-25", "clicks": 27, "impressions": 764 } ],
+    "queries": [
+      { "query": "atelier lune", "clicks": 410, "impressions": 980, "ctr": 0.4184, "position": 1.2 },
+      { "query": "cours de poterie nantes", "clicks": 190, "impressions": 7400, "ctr": 0.0257, "position": 8.7 }
+    ],
+    "pages": [
+      { "url": "https://atelier-lune.example/", "path": "/", "pageId": "pg_1", "score": 74, "clicks": 640, "impressions": 12800, "ctr": 0.05, "position": 6.1 },
+      { "url": "https://atelier-lune.example/blog/emaillage", "path": "/blog/emaillage", "pageId": null, "score": null, "clicks": 12, "impressions": 900, "ctr": 0.0133, "position": 22.5 }
+    ]
+  },
+
+  "GET /api/sites/site_8fk2/failed-pages": { "pages": [ { "url": "https://atelier-lune.example/ancienne-page", "path": "/ancienne-page", "httpStatus": 404, "reason": "Page introuvable (404)" } ] },
+
+  "GET /api/sites/site_8fk2/search-console (sans import)": { "available": false },
+
+  "GET /api/sites/site_8fk2/competitors (non configuré)": { "available": false, "reason": "not_configured" },
+
+  "GET /api/sites/site_8fk2/competitors (relevé fait)": {
+    "available": true,
+    "checkedAt": "2026-11-26T14:10:00.000Z",
+    "queries": ["cours de poterie nantes", "vaisselle grès artisanale"],
+    "competitors": [
+      { "host": "terre-et-feu.example", "queriesMatched": 2, "bestPosition": 2, "example": { "query": "cours de poterie nantes", "position": 2, "title": "Cours de poterie à Nantes — Terre et Feu", "url": "https://terre-et-feu.example/cours" } }
+    ]
+  },
+
+  "GET /api/sites/site_8fk2/chat": {
+    "available": true,
+    "messages": [
+      { "id": "msg_1", "role": "user", "content": "Par quoi je commence ?", "createdAt": "2026-11-26T14:20:00.000Z", "sources": [] },
+      { "id": "msg_2", "role": "assistant", "content": "Commencez par le titre principal en double : c'est **un seul réglage dans le thème** et il corrige 28 pages d'un coup.\n\nEnsuite, rédigez les descriptions des pages les plus visitées :\n\n- `/boutique` (212 clics)\n- `/cours` (190 clics)", "createdAt": "2026-11-26T14:20:06.000Z", "sources": ["Problèmes du site", "Pages les plus visitées"] }
+    ],
+    "suggestions": ["Par quoi je commence ?", "Quelles pages rapportent le plus de visites ?", "Rédige une description pour ma page /boutique", "Explique-moi le problème des titres en double"]
+  },
+
+  "SSE POST /api/sites/site_8fk2/chat": [
+    { "type": "start", "userMessage": { "id": "msg_3", "role": "user", "content": "Quelle page corriger en premier ?", "createdAt": "2026-11-26T14:22:00.000Z", "sources": [] } },
+    { "type": "tool", "label": "Lecture des pages les moins bien notées" },
+    { "type": "delta", "text": "La page `/boutique` : " },
+    { "type": "delta", "text": "elle reçoit 212 clics mais n'a ni titre descriptif ni description." },
+    { "type": "done", "message": { "id": "msg_4", "role": "assistant", "content": "La page `/boutique` : elle reçoit 212 clics mais n'a ni titre descriptif ni description.", "createdAt": "2026-11-26T14:22:05.000Z", "sources": ["Pages analysées"] } }
+  ],
+
+  "Erreur (POST /api/sites, statut 422)": {
+    "error": { "code": "site_unreachable", "message": "Ce site ne répond pas.", "action": "Vérifiez l'adresse, puis réessayez.", "details": { "url": "https://atelier-lune.exemple/" } }
+  }
+}

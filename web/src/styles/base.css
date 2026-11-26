@@ -1,0 +1,70 @@
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  background: var(--bg);
+  font-feature-settings: "ss01" on;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, p, ul, ol, dl, dd, figure, blockquote { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+img, svg { display: block; }
+code, pre, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+::selection { background: var(--accent-soft); color: var(--text); }
+
+:focus { outline: none; }
+:focus-visible { box-shadow: var(--focus); border-radius: var(--radius-xs); }
+
+/* Les chiffres tabulaires de la police élargissent trop la virgule : chiffres proportionnels partout. */
+.tnum { font-variant-numeric: proportional-nums; }
+/* Grands chiffres : chiffres proportionnels, plus serrés et plus élégants */
+.gauge__num.tnum, .figure__value.tnum, .kpi__value.tnum, .cats__value.tnum, .stat__value.tnum { font-variant-numeric: proportional-nums; }
+.muted { color: var(--text-muted); }
+.subtle { color: var(--text-subtle); }
+
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0);
+  white-space: nowrap; border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--space-3);
+  top: -60px;
+  z-index: 100;
+  padding: var(--space-2) var(--space-3);
+  background: var(--text);
+  color: var(--text-inverse);
+  border-radius: var(--radius-sm);
+  transition: top var(--dur-fast);
+}
+.skip-link:focus { top: var(--space-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

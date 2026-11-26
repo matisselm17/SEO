@@ -1,0 +1,106 @@
+/**
+ * Configuration du serveur, lue depuis l'environnement et, s'il existe, depuis le fichier `.env`
+ * à la racine du dépôt. Les variables déjà présentes dans l'environnement gardent la priorité.
+ * Les clés d'API ne sont jamais journalisées ni renvoyées au navigateur.
+ */
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+/** Dossier `server/`, que le code tourne depuis `src/` (tsx) ou depuis `dist/server/src/` (compilé). */
+export const SERVER_DIR = findServerDir(here);
+export const REPO_DIR = path.resolve(SERVER_DIR, "..");
+
+function findServerDir(start: string): string {
+  let dir = start;
+  for (let i = 0; i < 6; i++) {
+    const pkg = path.join(dir, "package.json");
+    if (existsSync(pkg)) {
+      try {
+        const name = JSON.parse(readFileSync(pkg, "utf8")).name;
+        if (name === "chat-seo-server") return dir;
+      } catch {
+        /* on continue de remonter */
+      }
+    }
+    dir = path.dirname(dir);
+  }
+  return path.resolve(start, "..");
+}
+
+/** Lecture minimale d'un fichier .env : `CLE=valeur`, commentaires `#`, guillemets facultatifs. */
+export function parseDotenv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let value = m[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    } else {
+      const hash = value.indexOf(" #");
+      if (hash >= 0) value = value.slice(0, hash);
+      value = value.trim();
+    }
+    out[m[1]] = value;
+  }
+  return out;
+}
+
+function loadDotenv(): void {
+  const file = path.join(REPO_DIR, ".env");
+  if (!existsSync(file)) return;
+  try {
+    const vars = parseDotenv(readFileSync(file, "utf8"));
+    for (const [k, v] of Object.entries(vars)) {
+      if (process.env[k] === undefined) process.env[k] = v;
+    }
+  } catch {
+    // Un .env illisible n'empêche pas le démarrage ; on ne journalise pas son contenu.
+    console.warn("[config] Le fichier .env n'a pas pu être lu ; il est ignoré.");
+  }
+}
+
+export interface Config {
+  port: number;
+  dataDir: string;
+  anthropicApiKey: string | null;
+  anthropicModel: string;
+  firecrawlApiKey: string | null;
+  /** Réservé au développement et aux tests : autorise le chargement d'adresses privées (localhost…). */
+  allowPrivateHosts: boolean;
+  version: string;
+  webDist: string;
+}
+
+function readVersion(): string {
+  try {
+    return JSON.parse(readFileSync(path.join(SERVER_DIR, "package.json"), "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const nonEmpty = (v: string | undefined) => (v && v.trim() ? v.trim() : null);
+
+export function loadConfig(): Config {
+  loadDotenv();
+  const env = process.env;
+  const port = Number.parseInt(env.PORT ?? "", 10);
+  const dataDirRaw = nonEmpty(env.DATA_DIR) ?? "./data";
+  return {
+    port: Number.isFinite(port) && port > 0 ? port : 8787,
+    // Un chemin relatif est compris depuis la racine du dépôt, comme le .env qui le déclare.
+    dataDir: path.isAbsolute(dataDirRaw) ? dataDirRaw : path.resolve(REPO_DIR, dataDirRaw),
+    anthropicApiKey: nonEmpty(env.ANTHROPIC_API_KEY),
+    anthropicModel: nonEmpty(env.ANTHROPIC_MODEL) ?? "claude-sonnet-5-5",
+    firecrawlApiKey: nonEmpty(env.FIRECRAWL_API_KEY),
+    allowPrivateHosts: env.ALLOW_PRIVATE_HOSTS === "1",
+    version: readVersion(),
+    webDist: path.resolve(REPO_DIR, "web", "dist"),
+  };
+}

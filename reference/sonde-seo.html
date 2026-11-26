@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonde SEO</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Plan : une colonne de saisie étroite à gauche, le rapport à droite.
+   Le rapport ouvre sur la note et sa bande de 100 points découpée par famille de critères. */
+:root{
+  --bg:#F1F2F7; --surface:#FFFFFF; --sunk:#E7E9F2; --ink:#12162B; --muted:#5A6082; --line:#D6D9E6;
+  --accent:#2440D8; --on-accent:#FFFFFF;
+  --good:#1B7F45; --warn:#A86200; --crit:#BE3327;
+  --good-bg:#DFF3E7; --warn-bg:#FBEBCF; --crit-bg:#FADFDB;
+  --display:"Bricolage Grotesque","Arial Narrow",system-ui,sans-serif;
+  --body:"Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D0F1D; --surface:#161930; --sunk:#1F2340; --ink:#E9EBF8; --muted:#9AA0C4; --line:#2B3052;
+    --accent:#93A3FF; --on-accent:#0D0F1D;
+    --good:#56D391; --warn:#F1B551; --crit:#FF8275;
+    --good-bg:#12331F; --warn-bg:#3A2B0C; --crit-bg:#431A16;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0D0F1D; --surface:#161930; --sunk:#1F2340; --ink:#E9EBF8; --muted:#9AA0C4; --line:#2B3052;
+  --accent:#93A3FF; --on-accent:#0D0F1D;
+  --good:#56D391; --warn:#F1B551; --crit:#FF8275;
+  --good-bg:#12331F; --warn-bg:#3A2B0C; --crit-bg:#431A16;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:400 15px/1.55 var(--body);-webkit-font-smoothing:antialiased}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.1}
+p{margin:0}
+a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 64px;display:flex;flex-direction:column;gap:24px}
+.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px}
+.top h1{font-size:30px;font-weight:800;letter-spacing:-.02em}
+.top h1 span{color:var(--accent)}
+.top p{color:var(--muted);max-width:62ch}
+.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:24px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px;min-width:0}
+.form{display:flex;flex-direction:column;gap:14px;position:sticky;top:16px}
+@media (max-width:900px){.form{position:static}}
+label{display:flex;flex-direction:column;gap:5px;font-weight:600;font-size:13px}
+label small{font-weight:400;color:var(--muted)}
+#url,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 11px;width:100%}
+textarea{font:12px/1.5 var(--mono);height:190px;resize:vertical}
+.steps{margin:0;padding-left:18px;color:var(--muted);font-size:13px}
+.steps kbd{font:500 11px var(--mono);background:var(--sunk);border-radius:4px;padding:1px 5px;color:var(--ink)}
+.btn{background:var(--accent);color:var(--on-accent);border:0;border-radius:9px;padding:11px 16px;font-weight:600;cursor:pointer}
+.btn:hover{filter:brightness(1.08)}
+.btn[disabled]{opacity:.55;cursor:default}
+.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
+.btn.small{padding:5px 10px;font-size:12px;border-radius:7px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.err{color:var(--crit);font-size:13px}
+.report{display:flex;flex-direction:column;gap:24px;min-width:0}
+.tag{display:inline-block;font:500 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;background:var(--warn-bg);color:var(--warn);border-radius:5px;padding:2px 7px}
+/* Note */
+.score{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 28px;align-items:end}
+@media (max-width:560px){.score{grid-template-columns:minmax(0,1fr)}}
+.num{font:800 112px/0.82 var(--display);letter-spacing:-.05em;font-variant-numeric:tabular-nums}
+.num small{font-size:26px;font-weight:500;letter-spacing:0;color:var(--muted)}
+.verdict h2{font-size:24px;font-weight:700}
+.verdict p{color:var(--muted);overflow-wrap:anywhere}
+.band{grid-column:1/-1;display:flex;gap:3px;height:22px;margin-top:14px}
+.seg{background:var(--sunk);border-radius:4px;overflow:hidden;min-width:0}
+.seg i{display:block;height:100%;background:var(--accent);transition:width .6s ease}
+@media (prefers-reduced-motion:reduce){.seg i{transition:none}}
+.cats{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 18px;font-size:13px}
+.cats div{display:flex;justify-content:space-between;gap:8px;border-top:1px solid var(--line);padding-top:6px}
+.cats b{font-variant-numeric:tabular-nums}
+h2.sec{font-size:19px;font-weight:700;margin-bottom:12px}
+.sub{color:var(--muted);font-size:13px;margin:-6px 0 12px}
+/* Aperçu Google */
+.serp{background:var(--bg);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:3px;font-family:Arial,sans-serif}
+.serp .u{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.serp .t{font-size:19px;color:var(--accent);line-height:1.3}
+.serp .d{font-size:14px;color:var(--muted)}
+.serp .miss{font-style:italic}
+.counts{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted);margin-top:10px;font-variant-numeric:tabular-nums}
+/* Critères */
+.list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.item{display:grid;grid-template-columns:76px minmax(0,1fr) auto;gap:4px 12px;padding:11px 0;border-top:1px solid var(--line);align-items:start}
+.item:first-child{border-top:0}
+.pill{font:500 11px var(--mono);border-radius:999px;padding:3px 0;text-align:center}
+.ok .pill{background:var(--good-bg);color:var(--good)}
+.warn .pill{background:var(--warn-bg);color:var(--warn)}
+.fail .pill{background:var(--crit-bg);color:var(--crit)}
+.item b{font-weight:600}
+.item p{color:var(--muted);font-size:13.5px;overflow-wrap:anywhere}
+.pts{font:500 12px var(--mono);color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+details{border-top:1px solid var(--line)}
+details:first-of-type{border-top:0}
+summary{cursor:pointer;padding:11px 0;font-weight:600;display:flex;justify-content:space-between;gap:12px}
+summary span{font:500 12px var(--mono);color:var(--muted)}
+/* Correctifs */
+.fix{border-top:1px solid var(--line);padding:14px 0;display:flex;flex-direction:column;gap:8px}
+.fix:first-of-type{border-top:0;padding-top:0}
+.fix h3{font:600 15px var(--body)}
+.fix p{color:var(--muted);font-size:13.5px}
+.code{position:relative;background:var(--sunk);border-radius:8px}
+.code pre{margin:0;padding:12px 84px 12px 12px;font:12px/1.55 var(--mono);overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.code button{position:absolute;top:8px;right:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--sunk);border-radius:999px;padding:3px 10px;font-size:13px}
+.rivals{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.rival{background:var(--bg);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.rival b{font-weight:600}.rival p,.rival a{font-size:13px;overflow-wrap:anywhere}.rival p{color:var(--muted)}
+.link{background:none;border:0;padding:0;color:var(--accent);font-weight:600;cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.link:hover{text-decoration:underline}
+.item.on{background:var(--bg);margin:0 -10px;padding-left:10px;padding-right:10px;border-radius:8px}
+.hist{font-size:13px}
+.hist li{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+.hist li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.hist b{font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Sonde <span>SEO</span></h1>
+    <p>Indique l'adresse d'une page : note sur 100, priorités, correctifs prêts à coller dans ton CMS et concurrents à surveiller.</p>
+  </header>
+
+  <div class="grid">
+    <form class="panel form" id="form">
+      <label for="url">Adresse de la page
+        <input type="text" inputmode="url" id="url" placeholder="monsite.fr/page" autocomplete="off" spellcheck="false">
+      </label>
+      <label for="cms">Ton CMS
+        <select id="cms">
+          <option value="shopify">Shopify</option>
+          <option value="webflow">Webflow</option>
+          <option value="wix">Wix</option>
+          <option value="squarespace">Squarespace</option>
+          <option value="prestashop">PrestaShop</option>
+          <option value="wordpress">WordPress</option>
+          <option value="html">Site codé à la main ou autre</option>
+        </select>
+      </label>
+      <label for="scope">Portée
+        <select id="scope">
+          <option value="1">Cette page seulement</option>
+          <option value="10">Tout le site, 10 pages</option>
+          <option value="25">Tout le site, 25 pages</option>
+          <option value="50">Tout le site, 50 pages</option>
+        </select>
+        <small id="scopeNote">L'outil suit les liens internes à partir de l'adresse donnée. Chaque page chargée consomme un crédit Firecrawl.</small>
+      </label>
+      <div class="row">
+        <button class="btn" type="submit" id="go">Analyser</button>
+        <button class="btn ghost" type="button" id="haltBtn" hidden>Arrêter</button>
+        <span class="sub" id="busy" style="margin:0"></span>
+      </div>
+      <p class="sub" id="mode" style="margin:0">Vérification des connecteurs…</p>
+      <p class="err" id="formErr" hidden></p>
+      <details id="manual">
+        <summary>Coller le code source à la place</summary>
+        <div style="display:flex;flex-direction:column;gap:10px;padding-bottom:6px">
+          <label for="src">Code source de la page
+            <textarea id="src" spellcheck="false" placeholder="<!DOCTYPE html>…"></textarea>
+          </label>
+          <ol class="steps">
+            <li>Ouvre ta page dans le navigateur.</li>
+            <li>Fais <kbd>Ctrl</kbd>+<kbd>U</kbd> (Mac : <kbd>⌥</kbd><kbd>⌘</kbd><kbd>U</kbd>).</li>
+            <li>Tout sélectionner, copier, coller ici. Ou dépose un fichier .html.</li>
+          </ol>
+          <div class="row">
+            <label class="btn ghost small" for="file">Choisir un fichier .html</label>
+            <input type="file" id="file" accept=".html,.htm,text/html" hidden>
+          </div>
+        </div>
+      </details>
+      <div id="histBox" hidden>
+        <h2 class="sec" style="font-size:15px;margin:6px 0 4px">Dernières analyses</h2>
+        <ul class="list hist" id="hist"></ul>
+      </div>
+    </form>
+
+    <main class="report" id="report"></main>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const cut = (s, n) => s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
+
+const CMS = {
+  shopify:{nom:"Shopify", meta:"Dans l'admin, ouvre la page, le produit ou la collection, puis le bloc de référencement en bas de la fiche. Pour l'accueil : Boutique en ligne, Préférences.", head:"Boutique en ligne, Thèmes, Modifier le code, fichier theme.liquid : colle juste avant </head>.", img:"Contenu, Fichiers (ou la fiche produit) : clique sur l'image pour saisir le texte alternatif."},
+  webflow:{nom:"Webflow", meta:"Dans le Designer, ouvre les réglages de la page (roue dentée), section SEO.", head:"Réglages de la page, Custom Code, zone du head. Pour tout le site : réglages du site, Custom Code.", img:"Sélectionne l'image dans le Designer, réglages de l'image, champ Alt text."},
+  wix:{nom:"Wix", meta:"Dans l'éditeur, menu Pages, les trois points de la page, Paramètres SEO.", head:"Paramètres SEO de la page, onglet avancé, balises supplémentaires. Pour tout le site : Paramètres, Code personnalisé.", img:"Clique sur l'image, Paramètres, champ du texte alternatif."},
+  squarespace:{nom:"Squarespace", meta:"Panneau Pages, roue dentée de la page, onglet SEO.", head:"Réglages de la page, Avancé, injection de code dans l'en-tête. Pour tout le site : Injection de code.", img:"Modifie le bloc image, champ du texte alternatif."},
+  prestashop:{nom:"PrestaShop", meta:"Back-office : onglet SEO de la fiche produit ou catégorie. Pour les autres pages : Paramètres de la boutique, Trafic et SEO.", head:"Fichier head.tpl de ton thème, avant </head> (ou un module d'ajout de code dans l'en-tête).", img:"Fiche produit, images : champ de légende de chaque image."},
+  wordpress:{nom:"WordPress", meta:"Dans l'éditeur de la page, bloc de ton extension SEO (Yoast, Rank Math, SEOPress).", head:"Extension d'ajout de code dans l'en-tête, ou header.php d'un thème enfant, avant </head>.", img:"Médiathèque : clique sur l'image, champ Texte alternatif."},
+  html:{nom:"ton site", meta:"Dans le <head> du fichier HTML de la page.", head:"Dans le <head> du fichier HTML, avant </head>.", img:"Ajoute l'attribut alt sur chaque balise <img>."}
+};
+const CATS = [["balises","Balises"],["contenu","Contenu"],["technique","Technique"],["medias","Liens et images"],["partage","Partage social"]];
+const GENERIC = ["cliquez ici","cliquer ici","ici","lire la suite","en savoir plus","voir plus","click here","read more","learn more","here","more"];
+
+/* ---------- Analyse (aucun appel réseau) ---------- */
+function analyse(html, url){
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const q = s => doc.querySelector(s), qa = s => [...doc.querySelectorAll(s)];
+  const meta = n => (q('meta[name="'+n+'" i]')?.getAttribute("content") || "").trim();
+  const prop = n => (q('meta[property="'+n+'" i]')?.getAttribute("content") || "").trim();
+  const checks = [];
+  const add = (cat, id, label, max, got, msg) => checks.push({cat, id, label, max, got:Math.max(0, Math.min(max, Math.round(got))), msg});
+
+  const title = (q("title")?.textContent || "").trim().replace(/\s+/g, " ");
+  const desc = meta("description");
+  const heads = qa("h1,h2,h3,h4,h5,h6").map(h => ({l:+h.tagName[1], t:h.textContent.trim().replace(/\s+/g, " ")}));
+  const h1 = heads.filter(h => h.l === 1), h2 = heads.filter(h => h.l === 2);
+  const canonical = q('link[rel~="canonical" i]')?.getAttribute("href") || "";
+  const lang = doc.documentElement.getAttribute("lang") || "";
+  const body = doc.body ? doc.body.cloneNode(true) : doc.createElement("body");
+  body.querySelectorAll("script,style,noscript,svg,template").forEach(n => n.remove());
+  const text = body.textContent.replace(/\s+/g, " ").trim();
+  const words = text ? text.split(" ").filter(w => /[\p{L}\p{N}]/u.test(w)).length : 0;
+
+  // Balises
+  const tl = title.length;
+  add("balises","title","Balise title",8, !tl?0 : tl>=30&&tl<=60?8 : tl>=15&&tl<=70?5 : 3,
+    !tl ? "Aucun titre. C'est la ligne bleue affichée dans Google : la page part avec un handicap majeur."
+    : tl>60 ? "Le titre fait "+tl+" caractères. Google le coupe vers 60 : mets l'essentiel au début."
+    : tl<30 ? "Le titre fait "+tl+" caractères. Tu as de la place pour préciser l'offre et le lieu (vise 30 à 60)."
+    : "Le titre fait "+tl+" caractères, dans la bonne fourchette.");
+  const dl = desc.length;
+  add("balises","desc","Meta description",7, !dl?0 : dl>=70&&dl<=160?7 : 4,
+    !dl ? "Aucune description. Google choisira lui-même un extrait, rarement le plus vendeur."
+    : dl>160 ? "La description fait "+dl+" caractères. Au-delà de 160 environ, elle est tronquée."
+    : dl<70 ? "La description fait "+dl+" caractères. Développe-la (70 à 160) : bénéfice, preuve, appel à l'action."
+    : "La description fait "+dl+" caractères, dans la bonne fourchette.");
+  add("balises","h1","Titre principal H1",6, h1.length===1?6 : h1.length>1?3 : 0,
+    h1.length===1 ? "Un seul H1 : « "+cut(h1[0].t,70)+" »."
+    : h1.length>1 ? h1.length+" H1 sur la page. Garde-en un seul et passe les autres en H2."
+    : "Aucun H1. Ajoute un titre principal qui annonce le sujet de la page.");
+  let jump = false; for(let i=1;i<heads.length;i++) if(heads[i].l - heads[i-1].l > 1) jump = true;
+  add("balises","hier","Hiérarchie des titres",4, (h2.length?2:0) + (!jump&&heads.length?2:0),
+    !heads.length ? "Aucun titre H1 à H6 dans la page."
+    : jump ? "Des niveaux sont sautés (par exemple un H4 juste après un H2). Les titres doivent s'emboîter dans l'ordre."
+    : !h2.length ? "Pas de H2 : le contenu n'est pas découpé en sections."
+    : heads.length+" titres, emboîtés dans l'ordre.");
+  add("balises","canon","URL canonique",3, canonical?3:0, canonical ? "Canonique déclarée : "+cut(canonical,80) : "Pas de balise canonical. Elle évite que des variantes d'adresse (paramètres, slash final) se concurrencent.");
+  add("balises","lang","Langue déclarée",2, lang?2:0, lang ? "Langue : "+lang+"." : "L'attribut lang manque sur la balise html.");
+
+  // Contenu
+  add("contenu","words","Volume de texte",8, words>=300?8 : words>=150?5 : words>=50?2 : 0,
+    words+" mots lisibles. " + (words>=300 ? "Assez de matière pour se positionner." : "Vise au moins 300 mots utiles sur une page qui doit se classer."));
+  const sig = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").split(/[^a-z0-9]+/).filter(w => w.length > 3);
+  const common = title && h1.length ? sig(title).filter(w => sig(h1.map(h=>h.t).join(" ")).includes(w)) : [];
+  add("contenu","align","Titre et H1 alignés",4, common.length?4:0,
+    !title||!h1.length ? "Impossible à vérifier sans title et sans H1."
+    : common.length ? "Le title et le H1 partagent les mêmes termes ("+common.slice(0,3).join(", ")+")."
+    : "Le title et le H1 ne partagent aucun mot clé. Ils doivent annoncer le même sujet.");
+  add("contenu","h2","Sections H2",4, h2.length>=2?4 : h2.length===1?2 : 0,
+    h2.length>=2 ? h2.length+" sections H2." : "Découpe le texte en au moins deux sections H2 qui reprennent les questions de tes clients.");
+  const same = desc && title && desc.toLowerCase() === title.toLowerCase();
+  add("contenu","uniq","Description distincte du titre",4, desc&&!same?4:0,
+    !desc ? "Pas de description à comparer." : same ? "La description recopie le titre. Elle doit le compléter." : "La description complète le titre.");
+
+  // Technique
+  const viewport = meta("viewport");
+  add("technique","viewport","Affichage mobile",6, viewport?6:0, viewport ? "Balise viewport présente." : "Pas de balise viewport : la page s'affichera en version bureau réduite sur téléphone, ce que Google pénalise.");
+  const https = /^https:\/\//i.test(url);
+  add("technique","https","HTTPS",4, https?4 : url?0:2, https ? "Adresse en HTTPS." : url ? "L'adresse n'est pas en HTTPS. Active le certificat SSL chez ton hébergeur." : "Adresse non renseignée : indique-la pour vérifier le HTTPS.");
+  const robots = (meta("robots")+" "+meta("googlebot")).toLowerCase();
+  const noindex = robots.includes("noindex");
+  add("technique","index","Page indexable",6, noindex?0:6, noindex ? "La page contient noindex : elle demande à Google de ne pas l'afficher dans les résultats." : "Aucune consigne noindex.");
+  const charset = !!q("meta[charset]") || !!q('meta[http-equiv="content-type" i]');
+  add("technique","charset","Encodage",2, charset?2:0, charset ? "Encodage déclaré." : "Pas de meta charset : risque de caractères accentués cassés.");
+  const ld = qa('script[type="application/ld+json" i]'); let ldOk = 0, types = [];
+  ld.forEach(s => { try{ const j = JSON.parse(s.textContent); ldOk++; [].concat(j["@graph"]||j).forEach(o => o && o["@type"] && types.push([].concat(o["@type"]).join("/"))); }catch(e){} });
+  add("technique","ld","Données structurées",5, !ld.length?0 : ldOk===ld.length?5 : 2,
+    !ld.length ? "Aucun bloc JSON-LD. Les données structurées permettent les résultats enrichis (avis, prix, horaires)."
+    : ldOk<ld.length ? (ld.length-ldOk)+" bloc(s) JSON-LD illisible(s) : erreur de syntaxe."
+    : "JSON-LD valide" + (types.length ? " : "+[...new Set(types)].slice(0,5).join(", ")+"." : "."));
+  const blocking = qa("head script[src]").filter(s => !s.hasAttribute("async") && !s.hasAttribute("defer") && s.getAttribute("type") !== "module").length;
+  add("technique","js","Scripts bloquants",2, blocking<=2?2 : blocking<=4?1 : 0, blocking+" script(s) dans le head sans async ni defer." + (blocking>2 ? " Ils retardent l'affichage." : ""));
+
+  // Liens et images
+  const imgs = qa("img");
+  const noAlt = imgs.filter(i => !(i.getAttribute("alt")||"").trim());
+  add("medias","alt","Texte alternatif des images",6, imgs.length ? 6*(1-noAlt.length/imgs.length) : 6,
+    !imgs.length ? "Aucune image dans la page." : noAlt.length ? noAlt.length+" image(s) sur "+imgs.length+" sans texte alternatif." : "Les "+imgs.length+" images ont un texte alternatif.");
+  const sized = imgs.filter(i => (i.hasAttribute("width")&&i.hasAttribute("height")) || i.hasAttribute("loading")).length;
+  add("medias","imgperf","Images optimisées",3, imgs.length ? 3*sized/imgs.length : 3,
+    !imgs.length ? "Aucune image à vérifier." : sized+" image(s) sur "+imgs.length+" avec dimensions ou chargement différé.");
+  let base = null; try{ base = new URL(url); }catch(e){}
+  const links = qa("a[href]").filter(a => !/^(#|mailto:|tel:|javascript:)/i.test(a.getAttribute("href").trim()));
+  const inUrls = [];
+  links.forEach(a => { try{ const u = new URL(a.getAttribute("href"), base || "https://page.invalid/"); if(u.host === (base ? base.host : "page.invalid")){ u.hash = ""; inUrls.push(u.href); } }catch(e){} });
+  const internal = inUrls.length;
+  add("medias","inlinks","Liens internes",3, internal>=3?3 : internal>=1?1 : 0, internal+" lien(s) vers d'autres pages du site" + (internal<3 ? ". Ajoutes-en vers tes pages importantes." : ", "+(links.length-internal)+" vers l'extérieur."));
+  const vague = links.filter(a => { const t = (a.textContent.trim() || a.getAttribute("aria-label") || a.querySelector("img")?.getAttribute("alt") || "").trim().toLowerCase(); return !t || GENERIC.includes(t); }).length;
+  add("medias","anchors","Textes des liens",3, vague===0?3 : vague<=2?2 : 0, vague ? vague+" lien(s) vide(s) ou du type « cliquez ici ». Le texte d'un lien doit décrire la page visée." : "Tous les liens ont un texte descriptif.");
+
+  // Partage
+  const og = {title:prop("og:title"), description:prop("og:description"), image:prop("og:image")};
+  const ogMiss = Object.keys(og).filter(k => !og[k]);
+  add("partage","og","Balises Open Graph",6, 2*(3-ogMiss.length), ogMiss.length ? "Il manque : "+ogMiss.map(k=>"og:"+k).join(", ")+". Sans elles, le lien partagé s'affiche sans visuel soigné." : "og:title, og:description et og:image présentes.");
+  const tw = meta("twitter:card");
+  add("partage","tw","Carte X / Twitter",2, tw?2:0, tw ? "twitter:card : "+tw+"." : "Pas de balise twitter:card.");
+  const fav = !!q('link[rel~="icon" i]');
+  add("partage","fav","Favicon",2, fav?2:0, fav ? "Favicon déclaré." : "Pas de favicon déclaré : c'est la petite icône visible à côté du résultat sur mobile.");
+
+  checks.forEach(c => c.st = c.got===c.max ? "ok" : c.got===0 ? "fail" : "warn");
+  const cats = CATS.map(([id,nom]) => { const cs = checks.filter(c => c.cat===id); return {id, nom, max:cs.reduce((a,c)=>a+c.max,0), got:cs.reduce((a,c)=>a+c.got,0)}; });
+  return {url, title, desc, h1, h2, text, words, lang, canonical, og, inUrls:[...new Set(inUrls)], noAlt:noAlt.map(i => i.getAttribute("src")||"").filter(Boolean).slice(0,10),
+    checks, cats, score:cats.reduce((a,c)=>a+c.got,0), failed:id => checks.find(c=>c.id===id).st !== "ok"};
+}
+
+/* ---------- Correctifs calculés sur place ---------- */
+function localFixes(a, cms){
+  const c = CMS[cms], out = [], u = a.url || "https://ton-site.fr/page", A = s => esc(s);
+  const f = id => a.failed(id);
+  if(f("index")) out.push({t:"Retirer le noindex", w:"Tant que cette consigne est là, aucune autre amélioration ne sert.", where:c.head, code:'<!-- À supprimer du <head> -->\n<meta name="robots" content="noindex">'});
+  if(f("canon")) out.push({t:"Déclarer l'URL canonique", where:c.head, code:'<link rel="canonical" href="'+A(u)+'">'});
+  if(f("viewport")) out.push({t:"Activer l'affichage mobile", where:c.head, code:'<meta name="viewport" content="width=device-width, initial-scale=1">'});
+  if(f("charset")) out.push({t:"Déclarer l'encodage", where:c.head, code:'<meta charset="utf-8">'});
+  if(f("lang")) out.push({t:"Déclarer la langue", where:cms==="html" ? "Sur la balise html du fichier." : "Dans les réglages de langue du site ; le CMS l'ajoute à la balise html.", code:'<html lang="fr">'});
+  if(f("og")||f("tw")) out.push({t:"Soigner l'aperçu lors d'un partage", w:"Remplace l'adresse de l'image par un visuel de 1200 × 630 px hébergé sur ton site.", where:c.head,
+    code:'<meta property="og:type" content="website">\n<meta property="og:url" content="'+A(u)+'">\n<meta property="og:title" content="'+A(a.og.title||a.title||"Titre de la page")+'">\n<meta property="og:description" content="'+A(a.og.description||a.desc||"Description de la page")+'">\n<meta property="og:image" content="'+A(a.og.image||"https://ton-site.fr/visuel-1200x630.jpg")+'">\n<meta name="twitter:card" content="summary_large_image">'});
+  if(f("ld")){ let origin = u; try{ origin = new URL(u).origin; }catch(e){}
+    const j = {"@context":"https://schema.org","@type":"Organization","name":(a.h1[0]?.t || a.title || "Nom de ton entreprise").slice(0,80),"url":origin,"logo":origin+"/logo.png","sameAs":["https://www.instagram.com/toncompte"]};
+    out.push({t:"Ajouter des données structurées", w:"Modèle de base à compléter. Pour une boutique ou un commerce local, remplace Organization par le type adapté (Product, LocalBusiness).", where:c.head, code:'<script type="application/ld+json">\n'+JSON.stringify(j,null,2).replace(/</g,"\\u003c")+'\n<\/script>'}); }
+  if(f("fav")) out.push({t:"Déclarer un favicon", where:c.head, code:'<link rel="icon" href="/favicon.ico" sizes="any">'});
+  if(f("js")) out.push({t:"Différer les scripts", w:"Ajoute defer aux scripts du head qui ne sont pas indispensables au premier affichage.", where:c.head, code:'<script src="/chemin/script.js" defer><\/script>'});
+  return out;
+}
+
+/* ---------- Rendu ---------- */
+let cur = null, copies = [], isExample = true;
+const LBL = {ok:"OK", warn:"À revoir", fail:"Manque"};
+const codeBlock = code => { copies.push(code); return '<div class="code"><pre>'+esc(code)+'</pre><button class="btn ghost small" type="button" data-copy="'+(copies.length-1)+'">Copier</button></div>'; };
+const item = c => '<li class="item '+c.st+'"><span class="pill">'+LBL[c.st]+'</span><div><b>'+esc(c.label)+'</b><p>'+esc(c.msg)+'</p></div><span class="pts">'+c.got+' / '+c.max+'</span></li>';
+
+function render(){
+  const a = cur, cms = $("cms").value; copies = [];
+  const verdict = a.score>=85 ? "Très bon niveau" : a.score>=70 ? "Base correcte" : a.score>=50 ? "À renforcer" : "Fragile";
+  const todo = a.checks.filter(c => c.st!=="ok").sort((x,y) => (y.max-y.got)-(x.max-x.got));
+  const lost = todo.slice(0,3).reduce((s,c)=>s+c.max-c.got,0);
+  const fixes = localFixes(a, cms);
+  let host = ""; try{ host = new URL(a.url).host; }catch(e){}
+  let h = "";
+
+  if(site && !isExample) h += siteHtml();
+  h += '<section class="panel" id="pageDetail"><div class="score">'
+    + '<div class="num">'+a.score+'<small> / 100</small></div>'
+    + '<div class="verdict">'+(isExample?'<span class="tag">Exemple fictif</span>':'')+'<h2>'+verdict+'</h2><p>'
+    + (todo.length ? 'Les trois premières priorités valent '+lost+' points.' : 'Tous les critères sont validés.')
+    + (a.url ? ' '+esc(cut(a.url,90)) : '')+'</p></div>'
+    + '<div class="band" role="img" aria-label="Répartition de la note par famille">'+a.cats.map(c => '<div class="seg" style="flex:'+c.max+'" title="'+esc(c.nom)+'"><i style="width:'+(100*c.got/c.max)+'%"></i></div>').join("")+'</div>'
+    + '<div class="cats">'+a.cats.map(c => '<div><span>'+esc(c.nom)+'</span><b>'+c.got+' / '+c.max+'</b></div>').join("")+'</div>'
+    + '</div></section>';
+
+  h += '<section class="panel"><h2 class="sec">Ce que Google affichera</h2><div class="serp">'
+    + '<span class="u">'+esc(host || "ton-site.fr")+'</span>'
+    + '<span class="t'+(a.title?'':' miss')+'">'+esc(a.title ? cut(a.title,60) : "Titre absent")+'</span>'
+    + '<span class="d'+(a.desc?'':' miss')+'">'+esc(a.desc ? cut(a.desc,158) : "Pas de description : Google prendra un extrait du texte, par exemple « "+cut(a.text,110)+" »")+'</span></div>'
+    + '<div class="counts"><span>Titre : '+a.title.length+' car. (30 à 60)</span><span>Description : '+a.desc.length+' car. (70 à 160)</span><span>'+a.words+' mots</span></div></section>';
+
+  h += '<section class="panel"><h2 class="sec">Priorités</h2>'
+    + (todo.length ? '<p class="sub">Classées par nombre de points à regagner.</p><ul class="list">'+todo.slice(0,6).map(item).join("")+'</ul>' : '<p>Rien à corriger sur les critères mesurés.</p>')
+    + '</section>';
+
+  h += '<section class="panel"><h2 class="sec">Correctifs prêts à coller dans '+esc(CMS[cms].nom)+'</h2>'
+    + (fixes.length ? fixes.map(f => '<div class="fix"><h3>'+esc(f.t)+'</h3>'+(f.w?'<p>'+esc(f.w)+'</p>':'')+codeBlock(f.code)+'<p><b>Où :</b> '+esc(f.where)+'</p></div>').join("") : '<p>Aucun correctif technique à poser.</p>')
+    + '</section>';
+
+  h += '<section class="panel" id="ai"><h2 class="sec">Textes réécrits et concurrents</h2>'
+    + '<p class="sub">Claude lit le contenu de la page, réécrit le titre, la description et les textes alternatifs, propose des contenus à ajouter et repère les concurrents probables.</p>'
+    + '<div class="row"><button class="btn" type="button" id="aiGo">Demander à Claude</button><button class="btn ghost" type="button" id="aiStop" hidden>Arrêter</button><span id="aiState" class="sub" style="margin:0"></span></div>'
+    + '<div id="aiOut" style="margin-top:14px"></div>'
+    + '<div class="fix" id="serpBox"'+(fc?'':' hidden')+'><h3>Qui est classé sur Google</h3><p>Lance une vraie recherche sur tes requêtes (trois au plus) et classe les sites qui reviennent. Chaque recherche consomme des crédits Firecrawl.</p>'
+    + '<div class="row"><button class="btn ghost" type="button" id="serpGo">Relever les concurrents</button><span id="serpState" class="sub" style="margin:0"></span></div><div id="serpOut"></div></div></section>';
+
+  h += '<section class="panel"><h2 class="sec">Tous les critères</h2>'
+    + a.cats.map(c => '<details><summary>'+esc(c.nom)+'<span>'+c.got+' / '+c.max+'</span></summary><ul class="list">'+a.checks.filter(k=>k.cat===c.id).map(item).join("")+'</ul></details>').join("")
+    + '</section>';
+
+  $("report").innerHTML = h;
+  syncAi();
+}
+
+/* ---------- Claude ---------- */
+let sample = null, sampleKnown = false, ctl = null, aiOff = false;
+function syncAi(){
+  const b = $("aiGo"), s = $("aiState"); if(!b) return;
+  if(aiOff || (sampleKnown && !sample)){ b.hidden = true; s.textContent = "Cette partie fonctionne quand la page est ouverte dans Claude, une fois l'accès autorisé."; }
+  else { b.hidden = false; b.disabled = !sampleKnown; s.textContent = sampleKnown ? "" : "Connexion à Claude…"; }
+}
+if(window.claude && window.claude.use) window.claude.use("sample").then(s => { sample = s; sampleKnown = true; syncAi(); }, () => { sampleKnown = true; syncAi(); });
+else sampleKnown = true;
+
+const AI_ERR = {rate_limited:"Limite d'utilisation atteinte. Réessaie plus tard.", session_expired:"Session expirée : reconnecte-toi à Claude.", refused:"Claude n'a pas pu traiter cette page.", invalid_json:"Réponse illisible. Relance la demande.", empty_completion:"Claude n'a rien renvoyé. Relance avec une page plus courte.", prompt_too_large:"La page est trop longue pour être envoyée."};
+
+async function askClaude(){
+  if(!sample || !cur) return;
+  const a = cur, cms = CMS[$("cms").value];
+  const prompt = "Tu es consultant SEO francophone. Voici l'audit d'une page web. Réponds uniquement par un objet JSON, sans texte autour, de la forme :\n"
+    + '{"resume":"2 phrases","mots_cles":["5 à 8 requêtes visées"],"title":"30 à 60 caractères","meta_description":"120 à 155 caractères","h1":"un H1","alts":[{"src":"...","alt":"..."}],"contenus":[{"titre":"section ou page à ajouter","pourquoi":"1 phrase"}],"concurrents":[{"nom":"...","domaine":"exemple.fr ou chaîne vide","raison":"1 phrase"}]}\n'
+    + "Règles : écris dans la langue de la page. Respecte strictement les longueurs. 3 à 5 contenus. 3 à 5 concurrents : uniquement des sites dont tu es raisonnablement sûr de l'existence ; sinon décris le type de concurrent dans nom et laisse domaine vide. N'invente aucun domaine. alts : une entrée par image listée, déduite du nom de fichier et du contexte.\n\n"
+    + "URL : "+(a.url||"inconnue")+"\nCMS : "+cms.nom+"\nNote : "+a.score+"/100\nTitle actuel : "+(a.title||"(absent)")+"\nMeta description actuelle : "+(a.desc||"(absente)")
+    + "\nH1 : "+(a.h1.map(h=>h.t).join(" | ")||"(aucun)")+"\nH2 : "+(a.h2.slice(0,15).map(h=>h.t).join(" | ")||"(aucun)")
+    + "\nCritères non validés : "+a.checks.filter(c=>c.st!=="ok").map(c=>c.label).join(", ")
+    + "\nImages sans texte alternatif : "+(a.noAlt.join(", ")||"aucune")
+    + "\n\nTexte de la page (extrait) :\n"+a.text.slice(0,3500);
+  const go = $("aiGo"), stop = $("aiStop"), st = $("aiState");
+  ctl = new AbortController(); go.disabled = true; stop.hidden = false; st.textContent = "Claude réfléchit, cela peut prendre une minute…";
+  try{
+    const r = await sample.json(prompt, {signal:ctl.signal});
+    if(cur === a) renderAi(r && typeof r === "object" ? r : {});
+    if($("aiState")) $("aiState").textContent = "";
+  }catch(e){
+    const code = e && e.code;
+    if(["not_granted","sampling_disabled","not_declared","capability_disabled","capability_removed"].includes(code)){ aiOff = true; syncAi(); }
+    else if($("aiState")) $("aiState").textContent = code === "cancelled" ? "" : (AI_ERR[code] || "Connexion interrompue. Relance la demande.");
+  }finally{
+    if($("aiGo")){ $("aiGo").disabled = false; $("aiStop").hidden = true; }
+  }
+}
+const S = v => typeof v === "string" ? v.trim() : "";
+const L = v => Array.isArray(v) ? v : [];
+function renderAi(r){
+  const cms = CMS[$("cms").value]; let h = "";
+  if(S(r.resume)) h += '<p style="margin-bottom:14px">'+esc(S(r.resume))+'</p>';
+  const kw = L(r.mots_cles).map(S).filter(Boolean).slice(0,8);
+  lastKw = kw;
+  if(kw.length) h += '<div class="fix"><h3>Requêtes à viser</h3><p>Clique pour voir qui occupe la première page aujourd\'hui.</p><div class="chips">'+kw.map(k => '<a class="chip" href="https://www.google.com/search?q='+encodeURIComponent(k)+'">'+esc(k)+'</a>').join("")+'</div></div>';
+  const tags = [];
+  if(S(r.title)) tags.push("<title>"+S(r.title)+"</title>");
+  if(S(r.meta_description)) tags.push('<meta name="description" content="'+S(r.meta_description).replace(/"/g,"&quot;")+'">');
+  if(tags.length) h += '<div class="fix"><h3>Nouveau titre et nouvelle description</h3><p>Titre : '+S(r.title).length+' caractères. Description : '+S(r.meta_description).length+' caractères.</p>'+codeBlock(tags.join("\n"))+'<p><b>Où :</b> '+esc(cms.meta)+'</p></div>';
+  if(S(r.h1)) h += '<div class="fix"><h3>H1 proposé</h3>'+codeBlock("<h1>"+S(r.h1)+"</h1>")+'</div>';
+  const alts = L(r.alts).filter(x => x && S(x.src) && S(x.alt)).slice(0,10);
+  if(alts.length) h += '<div class="fix"><h3>Textes alternatifs</h3>'+codeBlock(alts.map(x => S(x.src)+"\n  alt=\""+S(x.alt)+"\"").join("\n"))+'<p><b>Où :</b> '+esc(cms.img)+'</p></div>';
+  const ct = L(r.contenus).filter(x => x && S(x.titre)).slice(0,5);
+  if(ct.length) h += '<div class="fix"><h3>Contenus à ajouter</h3><ul class="list">'+ct.map(x => '<li class="item" style="grid-template-columns:minmax(0,1fr)"><div><b>'+esc(S(x.titre))+'</b><p>'+esc(S(x.pourquoi))+'</p></div></li>').join("")+'</ul></div>';
+  const rv = L(r.concurrents).filter(x => x && S(x.nom)).slice(0,5);
+  if(rv.length) h += '<div class="fix"><h3>Concurrents probables</h3><p>Déduits du contenu de ta page, sans recherche en direct. Vérifie-les avec les requêtes ci-dessus avant de t\'y fier.</p><div class="rivals">'
+    + rv.map(x => { const d = S(x.domaine).replace(/^https?:\/\//i,"").replace(/\/.*$/,""); const okDom = /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
+        return '<div class="rival"><b>'+esc(S(x.nom))+'</b>'+(okDom?'<a href="https://'+esc(d)+'">'+esc(d)+'</a>':'')+'<p>'+esc(S(x.raison))+'</p></div>'; }).join("")+'</div></div>';
+  $("aiOut").innerHTML = h || '<p class="sub">Claude n\'a rien proposé d\'exploitable. Relance la demande.</p>';
+}
+
+/* ---------- Historique (confort, dans ce navigateur) ---------- */
+function hist(add){
+  let l = []; try{ l = JSON.parse(localStorage.getItem("sonde-seo-hist") || "[]"); }catch(e){}
+  if(!Array.isArray(l)) l = [];
+  if(add){ l = [add, ...l.filter(x => x.u !== add.u)].slice(0,6); try{ localStorage.setItem("sonde-seo-hist", JSON.stringify(l)); }catch(e){} }
+  $("histBox").hidden = !l.length;
+  $("hist").innerHTML = l.map(x => '<li><span>'+esc(x.u)+'</span><b>'+esc(x.s)+'</b></li>').join("");
+}
+
+/* ---------- Firecrawl : charger une page et interroger Google ---------- */
+const FC = "Firecrawl";
+const OBJ = "Auditer le référencement naturel d'une page web et repérer ses concurrents sur Google";
+/* Firecrawl charge la page depuis le pays du visiteur, sinon un site multilingue renvoie sa version anglaise. */
+const LOC = (() => { const m = /^([a-z]{2})(?:-([a-z]{2}))?/i.exec(navigator.language || "fr-FR") || []; const l = (m[1] || "fr").toLowerCase(); return {country:(m[2] || (l === "fr" ? "FR" : "US")).toUpperCase(), languages:[l]}; })();
+let mcp = null, fc = false, lastKw = [], working = false;
+function syncMode(){
+  $("mode").textContent = fc ? "Firecrawl est branché : l'adresse suffit, la page est chargée automatiquement."
+    : "Pour analyser un site à partir de son adresse, ajoute le connecteur Firecrawl dans claude.ai (Réglages, Connecteurs), puis rouvre cette page. Sans lui, colle le code source ci-dessous.";
+  if(!fc){ $("manual").open = true; $("scope").value = "1"; }
+  $("scope").disabled = !fc;
+  const box = $("serpBox"); if(box) box.hidden = !fc;
+}
+if(window.claude && window.claude.use) window.claude.use("mcp").then(async m => {
+  if(m){ mcp = m; try{ const r = await m.listTools(FC); fc = (r.servers || []).some(s => s.server === FC && s.authStatus !== "needs_reauth" && (s.tools || []).length > 0); }catch(e){ fc = false; } }
+  syncMode();
+}, syncMode); else syncMode();
+
+async function fcCall(tool, input){
+  try{ return await mcp.callTool(FC, tool, input); }
+  catch(e){
+    if(e && e.retryable){ await new Promise(r => setTimeout(r, Math.min(e.retryAfterMs || 1500, 8000) + Math.random()*500)); return mcp.callTool(FC, tool, input); }
+    throw e;
+  }
+}
+function fcMsg(e){
+  const c = e && e.code;
+  if(c === "server_not_connected" || c === "selection_required" || c === "server_not_found") return "Firecrawl n'est pas connecté à ton compte. Ajoute-le dans claude.ai (Réglages, Connecteurs), puis rouvre cette page.";
+  if(c === "needs_reauth") return "La connexion à Firecrawl a expiré. Reconnecte-le dans claude.ai (Réglages, Connecteurs).";
+  if(["not_in_manifest","not_granted","blocked_by_policy","approval_required","consent_required","capability_disabled","capability_removed"].includes(c)) return "Cette page n'a pas l'autorisation d'utiliser Firecrawl. Autorise-le quand Claude le demande, ou colle le code source.";
+  if(c === "tool_error") return "Firecrawl a refusé la demande : " + cut(String(e.message || "erreur inconnue"), 160) + " Vérifie l'adresse et tes crédits Firecrawl.";
+  if(c === "no_html") return "Firecrawl a répondu sans le code HTML de la page. Colle le code source à la place.";
+  if(c === "server_unavailable" || c === "rate_limited") return "Firecrawl ne répond pas pour l'instant. Réessaie dans une minute.";
+  return "Le chargement de la page a échoué. Réessaie, ou colle le code source.";
+}
+function walk(v, fn, d){
+  d = d || 0; if(d > 7 || v == null) return;
+  if(typeof v === "string"){ if(!fn(v) && v.length > 1 && (v[0] === "{" || v[0] === "[")){ try{ walk(JSON.parse(v), fn, d+1); }catch(e){} } }
+  else if(Array.isArray(v)) v.forEach(x => walk(x, fn, d+1));
+  else if(typeof v === "object"){ fn(v); Object.values(v).forEach(x => walk(x, fn, d+1)); }
+}
+function findHtml(v){ let best = ""; walk(v, x => { if(typeof x === "string" && /<(html|head|title|body)[\s>]/i.test(x)){ if(x.length > best.length) best = x; return true; } return false; }); return best; }
+async function loadPage(url){
+  let r;
+  const base = {url, objective:OBJ, onlyMainContent:false, domainTools:false, location:LOC};
+  try{ r = await fcCall("firecrawl_scrape", Object.assign({formats:["rawHtml"]}, base)); }
+  catch(e){ if(!e || e.code !== "tool_error") throw e; r = await fcCall("firecrawl_scrape", {url, objective:OBJ, formats:["rawHtml"]}); }
+  const html = findHtml([r.payload, r.content]);
+  if(!html) throw {code:"no_html"};
+  return html;
+}
+const hostOf = u => { try{ return new URL(u).host.replace(/^www\./i, "").toLowerCase(); }catch(e){ return ""; } };
+async function serp(){
+  if(!mcp || !cur || working) return;
+  const a = cur, own = hostOf(a.url), st = $("serpState"), go = $("serpGo");
+  let qs = lastKw.slice(0,3);
+  if(!qs.length){ const seg = a.title.split(/\s[|:•–—-]\s|[|:•]/).map(s => s.trim()).filter(s => s && !(own && s.toLowerCase().replace(/[^a-z0-9]/g,"").includes(own.split(".")[0]))).sort((x,y) => y.length-x.length)[0]; if(seg) qs = [seg]; }
+  if(!qs.length){ st.textContent = "Aucune requête à chercher : demande d'abord les textes à Claude."; return; }
+  working = true; go.disabled = true; const seen = new Map();
+  try{
+    for(let i = 0; i < qs.length; i++){
+      st.textContent = "Recherche " + (i+1) + " sur " + qs.length + " : " + qs[i];
+      const r = await fcCall("firecrawl_search", {query:qs[i], objective:OBJ, limit:8, sources:["web"], domainTools:false});
+      const urls = []; walk([r.payload, r.content], x => { if(x && typeof x === "object" && typeof x.url === "string" && /^https?:\/\//i.test(x.url)) urls.push({u:x.url, t:typeof x.title === "string" ? x.title : ""}); return false; });
+      const done = new Set(); let rank = 0;
+      urls.forEach(o => { const h = hostOf(o.u); if(!h || done.has(h)) return; done.add(h); rank++; if(h === own) return;
+        const e = seen.get(h) || {h, n:0, best:99, t:o.t, q:qs[i]}; e.n++; if(rank < e.best){ e.best = rank; e.t = o.t || e.t; e.q = qs[i]; } seen.set(h, e); });
+    }
+    const rows = [...seen.values()].sort((x,y) => y.n-x.n || x.best-y.best).slice(0,10);
+    if(cur !== a || !$("serpOut")) return;
+    $("serpOut").innerHTML = rows.length
+      ? '<p class="sub" style="margin:12px 0 0">Relevé à l\'instant sur : '+esc(qs.join(" · "))+'</p><ul class="list">'+rows.map(e => '<li class="item"><span class="pts">n° '+e.best+'</span><div><b><a href="https://'+esc(e.h)+'">'+esc(e.h)+'</a></b><p>'+esc(cut(e.t, 110))+'</p></div><span class="pts">'+e.n+' / '+qs.length+' requêtes</span></li>').join("")+'</ul>'
+      : '<p class="sub" style="margin:12px 0 0">La recherche n\'a renvoyé aucun site exploitable.</p>';
+    st.textContent = "";
+  }catch(e){ if($("serpState")) $("serpState").textContent = fcMsg(e); }
+  finally{ working = false; if($("serpGo")) $("serpGo").disabled = false; }
+}
+
+/* ---------- Analyse d'un site entier ---------- */
+let site = null, halt = false;
+const normUrl = u => { try{ const x = new URL(u); return x.host.replace(/^www\./i, "").toLowerCase() + (x.pathname.replace(/\/+$/, "") || "/"); }catch(e){ return ""; } };
+const pathOf = u => { try{ const x = new URL(u); return decodeURIComponent(x.pathname) || "/"; }catch(e){ return u; } };
+const skipUrl = u => { try{ const p = new URL(u).pathname; return /\.(jpe?g|png|gif|webp|avif|svg|pdf|zip|css|js|json|xml|ico|mp4|webm|woff2?)$/i.test(p) || /\/(cart|checkout|account|login|register|search|wp-admin|wp-login\.php|cdn-cgi)(\/|$)/i.test(p); }catch(e){ return true; } };
+const FATAL = ["server_not_connected","needs_reauth","not_in_manifest","not_granted","blocked_by_policy","approval_required","consent_required","selection_required","capability_disabled","capability_removed"];
+async function crawl(start, max){
+  const seen = new Set([normUrl(start)]), queue = [start], pages = [], fails = []; let streak = 0;
+  while(queue.length && pages.length < max && !halt){
+    const url = queue.shift();
+    $("busy").textContent = "Page " + (pages.length + 1) + " sur " + max + " : " + cut(pathOf(url), 40);
+    try{
+      const a = analyse(await loadPage(url), url); pages.push(a); streak = 0;
+      a.inUrls.forEach(u => { const k = normUrl(u); if(!k || seen.has(k) || skipUrl(u) || queue.length >= 500) return; seen.add(k); queue.push(u); });
+    }catch(e){
+      if(!pages.length) throw e;
+      fails.push(url); streak++;
+      if((e && FATAL.includes(e.code)) || streak >= 3){ fails.reason = fcMsg(e); break; }
+    }
+  }
+  return {pages, fails, max, stopped:halt, left:queue.length};
+}
+function siteHtml(){
+  const P = site.pages, avg = Math.round(P.reduce((s,a) => s + a.score, 0) / P.length);
+  const verdict = avg>=85 ? "Très bon niveau" : avg>=70 ? "Base correcte" : avg>=50 ? "À renforcer" : "Fragile";
+  const agg = {};
+  P.forEach(a => a.checks.forEach(c => { if(c.st !== "ok"){ const g = agg[c.id] || (agg[c.id] = {label:c.label, n:0, lost:0}); g.n++; g.lost += c.max - c.got; } }));
+  const top = Object.values(agg).sort((x,y) => y.lost - x.lost).slice(0,7);
+  const dup = (key, nom) => { const m = new Map(); P.forEach(a => { const v = (a[key] || "").trim().toLowerCase(); if(v) m.set(v, (m.get(v) || []).concat(a)); }); return [...m.values()].filter(l => l.length > 1).map(l => ({nom, n:l.length, v:l[0][key], ex:l.slice(0,3).map(a => pathOf(a.url)).join(", ")})); };
+  const dups = dup("title", "title").concat(dup("desc", "meta description")).sort((x,y) => y.n - x.n).slice(0,6);
+  const note = site.stopped ? "Analyse arrêtée avant la fin." : site.fails.reason ? "Analyse interrompue : " + site.fails.reason : P.length < site.max ? "Le site ne compte pas d'autre page accessible par ses liens internes." : site.left ? "D'autres pages existent : augmente la portée pour les inclure." : "";
+  let h = '<section class="panel"><div class="score">'
+    + '<div class="num">'+avg+'<small> / 100</small></div>'
+    + '<div class="verdict"><h2>'+verdict+' sur l\'ensemble du site</h2><p>Moyenne de '+P.length+' page'+(P.length>1?'s':'')+' analysée'+(P.length>1?'s':'')+(site.fails.length ? ', '+site.fails.length+' non chargée'+(site.fails.length>1?'s':'') : '')+'. '+esc(note)+'</p></div>'
+    + '</div></section>';
+  h += '<section class="panel"><h2 class="sec">Problèmes les plus répandus</h2>'
+    + (top.length ? '<p class="sub">Classés par nombre de points perdus sur tout le site.</p><ul class="list">'+top.map(g => '<li class="item '+(g.n > P.length/2 ? 'fail' : 'warn')+'"><span class="pill">'+g.n+' / '+P.length+'</span><div><b>'+esc(g.label)+'</b><p>'+g.n+' page'+(g.n>1?'s':'')+' concernée'+(g.n>1?'s':'')+'.</p></div><span class="pts">− '+g.lost+' pts</span></li>').join("")+'</ul>' : '<p>Aucun critère en défaut.</p>')
+    + (dups.length ? '<h3 style="font:600 15px var(--body);margin:16px 0 4px">Contenus dupliqués</h3><ul class="list">'+dups.map(d => '<li class="item fail"><span class="pill">'+d.n+' pages</span><div><b>Même '+esc(d.nom)+'</b><p>« '+esc(cut(d.v, 90))+' » sur '+esc(d.ex)+(d.n>3?'…':'')+'</p></div><span class="pts"></span></li>').join("")+'</ul>' : '')
+    + '</section>';
+  h += '<section class="panel"><h2 class="sec">Pages analysées</h2><p class="sub">Clique sur une page pour voir son détail et ses correctifs plus bas.</p><ul class="list">'
+    + P.map((a,i) => ({a,i})).sort((x,y) => x.a.score - y.a.score).map(o => { const a = o.a, bad = a.checks.filter(c => c.st !== "ok").sort((x,y) => (y.max-y.got)-(x.max-x.got));
+        return '<li class="item '+(a.score>=80?'ok':a.score>=60?'warn':'fail')+(a===cur?' on':'')+'"><span class="pill">'+a.score+' / 100</span><div><button class="link" type="button" data-page="'+o.i+'">'+esc(cut(pathOf(a.url), 70))+'</button><p>'+esc(bad.length ? "À revoir d'abord : "+bad.slice(0,2).map(c => c.label).join(", ") : "Tous les critères sont validés.")+'</p></div><span class="pts">'+bad.length+' à revoir</span></li>'; }).join("")
+    + '</ul>'+(site.fails.length ? '<p class="sub" style="margin:12px 0 0">Non chargées : '+esc(site.fails.slice(0,5).map(pathOf).join(", "))+'</p>' : '')+'</section>';
+  return h;
+}
+
+/* ---------- Événements ---------- */
+function showErr(m){ const e = $("formErr"); e.textContent = m; e.hidden = false; }
+function finish(html, url, example){
+  if(ctl) ctl.abort();
+  site = null; lastKw = []; isExample = !!example; cur = analyse(html, url); render();
+  if(!example){ hist({u:url || cut(cur.title || "Page sans titre", 50), s:cur.score}); $("report").scrollIntoView({behavior:"smooth", block:"start"}); }
+}
+async function start(){
+  if(working) return;
+  $("formErr").hidden = true;
+  let url = $("url").value.trim();
+  if(url && !/^https?:\/\//i.test(url)){ url = "https://" + url; $("url").value = url; }
+  const pasted = $("src").value.trim(), pastedOk = pasted.length >= 40 && /<[a-z!]/i.test(pasted);
+  const scope = +$("scope").value || 1;
+  if(scope > 1){
+    if(!fc) return showErr("L'analyse d'un site entier a besoin du connecteur Firecrawl pour charger les pages.");
+    if(!url) return showErr("Indique l'adresse du site à analyser.");
+    working = true; halt = false; $("go").disabled = true; $("haltBtn").hidden = false;
+    try{
+      const r = await crawl(url, scope);
+      if(ctl) ctl.abort();
+      site = r; lastKw = []; isExample = false; cur = r.pages[0]; render();
+      hist({u:hostOf(url) + " (site, " + r.pages.length + " p.)", s:Math.round(r.pages.reduce((s,a) => s + a.score, 0) / r.pages.length)});
+      $("report").scrollIntoView({behavior:"smooth", block:"start"});
+    }catch(e){ showErr(fcMsg(e)); }
+    finally{ working = false; $("go").disabled = false; $("haltBtn").hidden = true; $("busy").textContent = ""; }
+    return;
+  }
+  if(fc && url){
+    working = true; $("go").disabled = true; $("busy").textContent = "Chargement de la page…";
+    try{ const html = await loadPage(url); $("src").value = html; finish(html, url); }
+    catch(e){ if(pastedOk){ finish(pasted, url); showErr("Page non chargée, analyse faite sur le code collé. " + fcMsg(e)); } else showErr(fcMsg(e)); }
+    finally{ working = false; $("go").disabled = false; $("busy").textContent = ""; }
+    return;
+  }
+  if(pastedOk) return finish(pasted, url);
+  showErr(fc ? "Indique l'adresse de la page à analyser." : "Colle le code source HTML de la page (Ctrl+U dans le navigateur), ou ajoute le connecteur Firecrawl pour analyser à partir de l'adresse.");
+  if(!fc) $("manual").open = true;
+}
+$("form").addEventListener("submit", e => { e.preventDefault(); start(); });
+$("cms").addEventListener("change", () => { if(cur){ if(ctl) ctl.abort(); render(); } });
+const fromFile = f => f.text().then(t => { $("src").value = t; const u = $("url").value.trim(); finish(t, /^https?:\/\//i.test(u) ? u : ""); });
+$("file").addEventListener("change", e => { const f = e.target.files[0]; if(f) fromFile(f); });
+$("src").addEventListener("dragover", e => e.preventDefault());
+$("src").addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if(!f) return; e.preventDefault(); fromFile(f); });
+document.addEventListener("click", e => {
+  const b = e.target.closest("button"); if(!b) return;
+  if(b.dataset.page !== undefined && site){
+    const a = site.pages[+b.dataset.page]; if(!a) return;
+    if(ctl) ctl.abort(); cur = a; lastKw = []; render();
+    const d = $("pageDetail"); if(d) d.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+  else if(b.id === "haltBtn"){ halt = true; $("busy").textContent = "Arrêt après la page en cours…"; }
+  else if(b.id === "aiGo") askClaude();
+  else if(b.id === "serpGo") serp();
+  else if(b.id === "aiStop" && ctl) ctl.abort();
+  else if(b.dataset.copy !== undefined){
+    const done = ok => { b.textContent = ok ? "Copié" : "Sélectionne le texte"; setTimeout(() => b.textContent = "Copier", 1600); };
+    try{ navigator.clipboard.writeText(copies[+b.dataset.copy]).then(() => done(true), () => done(false)); }catch(x){ done(false); }
+  }
+});
+
+/* Exemple affiché à l'ouverture */
+const EXAMPLE = '<!DOCTYPE html>\n<html lang="fr">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Atelier Lune | Poterie artisanale, vaisselle en grès, cours de tournage et ateliers céramique à Nantes</title>\n<script src="/js/slider.js"><\/script>\n<script src="/js/tracking.js"><\/script>\n<script src="/js/chat.js"><\/script>\n</head>\n<body>\n<h1>Bienvenue</h1>\n<img src="/img/bols-gres-bleu.jpg">\n<img src="/img/atelier-tournage.jpg">\n<img src="/img/logo.png" alt="Atelier Lune">\n<h1>Nos créations</h1>\n<p>Atelier Lune façonne à la main de la vaisselle en grès dans un atelier du quartier de Chantenay, à Nantes. Bols, assiettes, tasses et pichets sont tournés un par un puis émaillés avec des recettes maison.</p>\n<h4>Cours de tournage</h4>\n<p>Chaque samedi, nous accueillons six personnes pour une initiation de trois heures. Vous repartez avec deux pièces cuites et émaillées, expédiées sous trois semaines.</p>\n<a href="/boutique">Cliquez ici</a>\n<a href="/cours">En savoir plus</a>\n<a href="https://www.instagram.com/">Instagram</a>\n</body>\n</html>';
+hist(); finish(EXAMPLE, "https://atelier-lune.example/", true);
+</script>
+</body>
+</html>

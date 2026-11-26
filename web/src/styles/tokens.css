@@ -1,0 +1,180 @@
+/*
+ * Tokens du design system. Aucun écran n'emploie une valeur en dur :
+ * couleurs, tailles de texte, espacements, rayons, ombres et durées viennent d'ici.
+ * Voir web/DESIGN.md.
+ */
+:root {
+  /* Typographie */
+  --font-sans: "Schibsted Grotesk Variable", "Schibsted Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --text-xs: 0.75rem;    /* 12 — mentions, axes */
+  --text-sm: 0.8125rem;  /* 13 — tableaux, libellés */
+  --text-md: 0.875rem;   /* 14 — texte courant */
+  --text-lg: 1rem;       /* 16 — texte mis en avant */
+  --text-xl: 1.25rem;    /* 20 — titres de section */
+  --text-2xl: 1.625rem;  /* 26 — titre d'écran */
+  --text-3xl: 2.25rem;   /* 36 — chiffres clés */
+  --text-4xl: 3.5rem;    /* 56 — la note */
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.55;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Espacements (base 4) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Rayons : petits pour les contrôles, un peu plus grands pour les surfaces */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* Durées */
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 250ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* Mise en page */
+  --sidebar-w: 256px;
+  --sidebar-w-collapsed: 64px;
+  --content-max: 1180px;
+  --sheet-w: 620px;
+  --topbar-h: 56px;
+
+  --z-sidebar: 30;
+  --z-sheet: 40;
+  --z-toast: 50;
+}
+
+/* ───────── Thème clair ───────── */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-subtle: #f6f6f4;      /* navigation, bandeaux */
+  --bg-muted: #efefec;       /* survol, pistes de jauges */
+  --bg-inset: #f8f8f6;       /* blocs de code, champs désactivés */
+  --surface: #ffffff;        /* panneaux posés au-dessus du fond */
+  --surface-raised: #ffffff; /* panneau latéral, menus */
+
+  --line: #e5e5e1;
+  --line-strong: #d3d3cd;
+
+  --text: #16181d;
+  --text-muted: #5a5e67;
+  --text-subtle: #80848c;
+  --text-inverse: #ffffff;
+
+  --accent: #2337c6;
+  --accent-hover: #1b2ba8;
+  --accent-soft: #eceffd;
+  --accent-text: #2337c6;
+  --on-accent: #ffffff;
+
+  --critical: #c42f27;
+  --critical-soft: #fcefed;
+  --critical-line: #f1c9c4;
+  --warning: #9a5b00;
+  --warning-mark: #d98a12;
+  --warning-soft: #fdf4e4;
+  --warning-line: #f0d9ad;
+  --good: #1b7547;
+  --good-mark: #23905a;
+  --good-soft: #eaf6ef;
+  --good-line: #c3e3d0;
+  --info: #555d6b;
+  --info-soft: #f0f1f3;
+  --info-line: #d9dce1;
+
+  /* Graphiques */
+  --chart-1: #2337c6;   /* clics */
+  --chart-2: #6f7a8c;   /* impressions */
+  --chart-grid: #ececE8;
+  --chart-axis: #80848c;
+
+  --shadow-sm: 0 1px 2px rgba(22, 24, 29, 0.06);
+  --shadow-md: 0 4px 16px -4px rgba(22, 24, 29, 0.10), 0 1px 3px rgba(22, 24, 29, 0.06);
+  --shadow-lg: 0 16px 48px -12px rgba(22, 24, 29, 0.22), 0 2px 6px rgba(22, 24, 29, 0.06);
+  --overlay: rgba(22, 24, 29, 0.32);
+
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px #4d61e6;
+}
+
+/* ───────── Thème sombre ───────── */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #141518;
+  --bg-subtle: #191a1e;
+  --bg-muted: #23252a;
+  --bg-inset: #1c1d21;
+  --surface: #191a1e;
+  --surface-raised: #1e2024;
+
+  --line: #2a2c32;
+  --line-strong: #3a3d44;
+
+  --text: #ececee;
+  --text-muted: #a4a7af;
+  --text-subtle: #7d8089;
+  --text-inverse: #141518;
+
+  --accent: #7f8fff;
+  --accent-hover: #9aa7ff;
+  --accent-soft: #232845;
+  --accent-text: #9aa7ff;
+  --on-accent: #10132b;
+
+  --critical: #ff7a6e;
+  --critical-soft: #36201f;
+  --critical-line: #5c2d29;
+  --warning: #f0b250;
+  --warning-mark: #e8a33a;
+  --warning-soft: #33291a;
+  --warning-line: #594523;
+  --good: #5cc98f;
+  --good-mark: #4dbb82;
+  --good-soft: #1a2e24;
+  --good-line: #284c39;
+  --info: #a9b0bd;
+  --info-soft: #24262b;
+  --info-line: #393c43;
+
+  --chart-1: #7f8fff;
+  --chart-2: #8b93a3;
+  --chart-grid: #26282d;
+  --chart-axis: #7d8089;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 20px -6px rgba(0, 0, 0, 0.6), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 20px 56px -12px rgba(0, 0, 0, 0.7), 0 2px 6px rgba(0, 0, 0, 0.5);
+  --overlay: rgba(0, 0, 0, 0.55);
+
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px #8f9cff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}
