@@ -37,6 +37,12 @@ export type ErrorCode =
   | "search_console_not_configured" // pas de compte de service Google côté serveur
   | "search_console_no_access" // le compte de service n'a accès à aucune propriété de ce site ; details.account = son adresse e-mail
   | "search_console_unavailable" // Google est injoignable ou a refusé ; details.retryable
+  | "analytics_not_configured" // pas de compte de service Google ou pas de GA4_PROPERTY_ID côté serveur
+  | "analytics_no_access" // le compte de service n'a pas accès à cette propriété Google Analytics ; details.account
+  | "analytics_other_site" // la propriété Google Analytics ne reçoit aucune visite sur l'hôte de ce site
+  | "analytics_unavailable" // Google Analytics est injoignable ou a refusé ; details.retryable
+  | "pagespeed_not_configured" // pas de clé GOOGLE_PAGESPEED_API_KEY côté serveur
+  | "pagespeed_unavailable" // PageSpeed Insights est injoignable, a refusé ou n'a pas pu charger la page ; details.retryable
   | "automation_off" // l'automatisation est sur « arrêtée » pour ce site
   | "automation_not_allowed" // la règle d'autorisation refuse cette correction ; le message dit laquelle
   | "budget_exceeded" // plafond du jour atteint (modifications ou jetons d'IA) ; details.resetsAt
@@ -280,6 +286,10 @@ export interface PageDetail extends PageSummary {
   serpPreview: { url: string; title: string | null; description: string | null };
   /** Requêtes Search Console qui mènent à cette page ; null si l'export ne les relie pas à une page. */
   queries: OrganicQuery[] | null;
+  /** Visites de cette page d'après Google Analytics ; null sans lecture ou si la page n'y figure pas. */
+  visits: PageVisits | null;
+  /** Dernières mesures de vitesse de cette page ; null si elle n'a jamais été mesurée. */
+  speed: { mobile: SpeedMeasure | null; desktop: SpeedMeasure | null } | null;
   /** Élément de la boutique Shopify qui correspond à cette page ; null sans boutique lue ou sans correspondance. */
   shopifyResourceId: string | null;
 }
@@ -348,6 +358,136 @@ export type SearchConsoleData =
       /** Pages, triées par clics décroissants. null si le fichier des pages manque. */
       pages: OrganicPage[] | null;
     };
+
+// ───────────────────────── Google Analytics ─────────────────────────
+
+/** Ce que font les visiteurs une fois arrivés. Tous les nombres viennent de Google Analytics, sans estimation. */
+export interface VisitTotals {
+  /** Visites (sessions). */
+  sessions: number;
+  /** Visiteurs distincts. */
+  users: number;
+  /** Part des visites où le visiteur est resté actif, entre 0 et 1 (taux d'engagement). */
+  engagementRate: number;
+  /** Événements clés (achats, ajouts au panier… selon ce que le propriétaire a défini dans Google Analytics). */
+  keyEvents: number;
+  /** Chiffre d'affaires mesuré ; null si le suivi des ventes n'est pas en place dans Google Analytics. */
+  revenue: number | null;
+}
+
+/** Visites dont cette page était la page d'arrivée. */
+export interface PageVisits extends VisitTotals {
+  /** Dont visites venues d'une recherche Google ou d'un autre moteur (canal « Organic Search »). */
+  organicSessions: number;
+}
+
+export interface LandingPage extends PageVisits {
+  path: string;
+  /** Page correspondante dans l'analyse, null si elle n'a pas été analysée. */
+  pageId: string | null;
+  score: number | null;
+}
+
+export type AnalyticsData =
+  | { available: false; reason: "not_configured" | "not_run" }
+  | {
+      available: true;
+      syncedAt: string;
+      period: { start: string; end: string };
+      /** Code de devise de la propriété, ex. "EUR" ; null si inconnu. */
+      currency: string | null;
+      /** Toutes les visites du site. */
+      totals: VisitTotals;
+      /** Les seules visites venues des moteurs de recherche. */
+      organic: VisitTotals;
+      /** Par origine des visites, la plus importante d'abord. `channel` est le libellé de Google, ex. "Organic Search". */
+      channels: Array<VisitTotals & { channel: string }>;
+      /** Série quotidienne. */
+      series: Array<{ date: string; sessions: number; organicSessions: number }>;
+      /** Pages d'arrivée, triées par visites venues des moteurs de recherche. Au plus 200. */
+      landingPages: LandingPage[];
+      /** true si le site a plus de pages d'arrivée que la liste : une page absente n'est alors pas forcément sans visite. */
+      landingPagesTruncated: boolean;
+      /**
+       * Pourquoi `revenue` vaut null, le cas échéant. "measured" : un chiffre d'affaires est mesuré.
+       * "not_measured" : aucune vente mesurée sur la période. "restricted" : le compte de service n'a pas le
+       * droit de voir le chiffre d'affaires dans Google Analytics.
+       */
+      revenueStatus: "measured" | "not_measured" | "restricted";
+    };
+
+// ───────────────────────── Vitesse des pages ─────────────────────────
+
+/** Verdict de Google sur une mesure : "good" bon, "average" à améliorer, "poor" lent. */
+export type SpeedRating = "good" | "average" | "poor";
+
+export interface SpeedMetric {
+  /** Valeur dans l'unité de la mesure : millisecondes, sauf `cls` (sans unité). */
+  value: number;
+  rating: SpeedRating;
+}
+
+/** Une mesure PageSpeed Insights d'une page, pour un type d'appareil. */
+export interface SpeedMeasure {
+  measuredAt: string;
+  /** Note de performance de 0 à 100, mesurée en laboratoire par Google (Lighthouse). */
+  score: number;
+  /** Mesures de laboratoire : un chargement simulé, reproductible. */
+  lab: {
+    /** Affichage du plus grand élément visible (LCP), en ms. */
+    lcp: SpeedMetric;
+    /** Stabilité de la mise en page (CLS), sans unité. */
+    cls: SpeedMetric;
+    /** Temps de blocage pendant le chargement (TBT), en ms. */
+    tbt: SpeedMetric;
+    /** Premier affichage (FCP), en ms. */
+    fcp: SpeedMetric;
+  };
+  /**
+   * Mesures de terrain : ce que les vrais visiteurs ont vécu sur 28 jours (Chrome). null quand Google n'a pas
+   * assez de visites pour cette page. `scope` dit si elles portent sur cette page ou sur tout le site.
+   */
+  field: {
+    scope: "page" | "site";
+    lcp: SpeedMetric | null;
+    /** Réactivité aux interactions (INP), en ms. */
+    inp: SpeedMetric | null;
+    cls: SpeedMetric | null;
+  } | null;
+  /** Les améliorations les plus payantes d'après Google, au plus 5. Textes de Google, en français, texte brut. */
+  opportunities: Array<{ title: string; detail: string | null; savingsMs: number | null }>;
+}
+
+export interface SpeedPage {
+  pageId: string | null;
+  url: string;
+  path: string;
+  pageType: PageType | null;
+  mobile: SpeedMeasure | null;
+  desktop: SpeedMeasure | null;
+}
+
+/** GET /api/sites/:siteId/pagespeed */
+export interface PageSpeedState {
+  configured: boolean;
+  /** Mesure en cours ; null sinon. `done` et `total` comptent des pages. */
+  running: { done: number; total: number; currentUrl: string | null } | null;
+  /** Pages mesurées, la plus lente sur mobile d'abord. */
+  pages: SpeedPage[];
+  /** Erreur qui a empêché ou interrompu la dernière demande de mesure (clé refusée, quota…) ; null sinon. */
+  lastError: ApiError["error"] | null;
+  /**
+   * Mesures de la dernière demande qui n'ont pas abouti, page par page et appareil par appareil.
+   * Remis à zéro au début de chaque demande, jamais par une réussite.
+   */
+  failures: Array<{ path: string; device: "mobile" | "desktop"; message: string }>;
+}
+/**
+ * POST /api/sites/:siteId/pagespeed — lance une mesure (mobile et ordinateur) et répond tout de suite (202).
+ * `pageIds` : les pages à mesurer (10 au plus). Sans lui : l'accueil et, pour chaque type de page, la page qui
+ * reçoit le plus de visites (à défaut, la première analysée).
+ */
+export interface MeasureSpeedRequest { pageIds?: string[] }
 
 // ───────────────────────── Concurrents ─────────────────────────
 
@@ -803,6 +943,10 @@ export interface Settings {
     searchConsole: { configured: boolean };
     /** Identifiants DataForSEO présents côté serveur. Aucune fonctionnalité ne s'en sert encore. */
     dataForSeo: { configured: boolean };
+    /** Compte de service Google et identifiant de propriété GA4 présents : les visites peuvent être lues. */
+    analytics: { configured: boolean };
+    /** Clé PageSpeed Insights présente : la vitesse des pages peut être mesurée. */
+    pageSpeed: { configured: boolean };
   };
   version: string;
 }
@@ -854,7 +998,11 @@ export type SiteEvent =
   /** L'import Search Console a changé (ajout ou suppression). */
   | { type: "search_console"; available: boolean }
   /** La boutique Shopify a été relue ou modifiée : l'interface recharge ce qu'elle affiche de la boutique. */
-  | { type: "shopify" };
+  | { type: "shopify" }
+  /** Les visites Google Analytics ont été relues. */
+  | { type: "analytics" }
+  /** Une mesure de vitesse a avancé ou s'est terminée. */
+  | { type: "pagespeed" };
 
 /**
  * POST /api/sites/:siteId/chat — la réponse est un flux SSE.

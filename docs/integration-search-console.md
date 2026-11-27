@@ -1,8 +1,8 @@
 # Connexion directe à Google Search Console : préparation
 
-État au 27 novembre 2026 (soir) : **la lecture directe est codée (`server/src/gsc/google.ts`) et testée contre un faux Google ; elle n'a jamais été essayée chez Google**, faute de compte de service. Le dépôt manuel de l'export reste disponible. La description du contrat est dans `docs/format-echange.md`, section « Search Console ».
+État au 27 novembre 2026 (soir) : **la lecture directe fonctionne en réel** (`server/src/gsc/google.ts`) : première lecture le 27 novembre, propriété de type domaine, 28 jours, 340 clics, 17 664 impressions, 1 287 requêtes, 466 pages dont 82 rapprochées des pages analysées. Le dépôt manuel de l'export reste disponible. La description du contrat est dans `docs/format-echange.md`, section « Search Console ».
 
-**Où placer le fichier du compte de service :** `secrets/google-service-account.json` à la racine du dépôt (le dossier `secrets/` existe, il est ignoré par git et lisible par le seul propriétaire de la machine). Aucun autre réglage n'est nécessaire ; `GOOGLE_SERVICE_ACCOUNT_FILE` ne sert que pour un autre emplacement.
+**Où placer le fichier du compte de service :** dans le dossier `secrets/` à la racine du dépôt (ignoré par git, lisible par le seul propriétaire de la machine), avec son chemin dans `GOOGLE_APPLICATION_CREDENTIALS`. Le même fichier sert à Google Analytics.
 
 Cela revient sur une décision du client notée dans `docs/etat-du-projet.md` (« pas de connexion automatique »). Le dépôt manuel reste disponible : la connexion directe s'y ajoute, elle ne le remplace pas.
 

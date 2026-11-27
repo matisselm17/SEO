@@ -53,6 +53,11 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 | `GET /api/sites/:siteId/shopify/changes` | | `ShopifyChangesResponse` | Historique du site, le plus récent d'abord. `offset`, `limit` (défaut 50, max 200) |
 | `POST /api/sites/:siteId/shopify/changes/:changeId/restore` | | `201 ShopifyChangeResponse` | **Écrit dans la boutique** : remet la valeur d'avant. Voir « Boutique Shopify » |
 | `POST /api/sites/:siteId/search-console/sync` | `{ "days": 28 }` (28, 90 ou 480) | `SearchConsoleData` | Lit la Search Console chez Google par le compte de service. Remplace l'import précédent (`source: "google"`). `search_console_not_configured`, `search_console_no_access`, `search_console_unavailable` |
+| `GET /api/sites/:siteId/analytics` | | `AnalyticsData` | Dernière lecture de Google Analytics |
+| `POST /api/sites/:siteId/analytics/sync` | `{ "days": 28 }` (28 ou 90) | `AnalyticsData` | Lit Google Analytics (lecture seule). `analytics_not_configured`, `analytics_no_access`, `analytics_other_site`, `analytics_unavailable` |
+| `GET /api/sites/:siteId/pagespeed` | | `PageSpeedState` | |
+| `POST /api/sites/:siteId/pagespeed` | `MeasureSpeedRequest` | `202 PageSpeedState` | Lance une mesure de vitesse. `pagespeed_not_configured` ; `limit_reached` si une mesure tourne déjà |
+| `POST /api/sites/:siteId/pagespeed/cancel` | | `PageSpeedState` | Arrête la mesure en cours ; les pages déjà mesurées sont gardées |
 | `GET /api/sites/:siteId/shopify/batches` | | `ShopifyBatchesResponse` | Lots de corrections, le plus récent d'abord |
 | `POST /api/sites/:siteId/shopify/batches` | `CreateBatchRequest` | `201 ShopifyBatchResponse` | Crée un brouillon. N'écrit rien dans la boutique |
 | `GET /api/sites/:siteId/shopify/batches/:batchId` | | `ShopifyBatchResponse` | |
@@ -158,6 +163,30 @@ Par défaut : `mode: "propose"`, champs `seo_description` seulement, types `prod
 
 Deux sources, la plus récente remplace l'autre : l'export déposé (`source: "file"`) ou la lecture directe (`source: "google"`). La lecture directe utilise un compte de service Google dont le fichier JSON est sur le serveur (`GOOGLE_SERVICE_ACCOUNT_FILE`, par défaut `secrets/google-service-account.json` à la racine du dépôt, dossier ignoré par git). Accès en lecture seule (`webmasters.readonly`). La propriété lue est celle de `GSC_PROPERTY`, sinon celle du compte de service qui correspond à l'hôte du site (`sc-domain:hôte`, puis `https://hôte/`). La lecture directe relie les requêtes aux pages : `PageDetail.queries` est alors renseigné. Une lecture par minute au plus.
 
+## Google Analytics
+
+Lecture seule de la propriété Google Analytics 4 désignée par `GA4_PROPERTY_ID`, avec le même compte de service que la Search Console (`GOOGLE_APPLICATION_CREDENTIALS`, portée `analytics.readonly`). Le propriétaire doit avoir ajouté l'adresse du compte de service comme **Lecteur** de la propriété ; sinon `analytics_no_access` (statut 403) avec `details.account`. La Search Console dit ce qui se passe dans Google (impressions, clics) ; Google Analytics dit ce qui se passe après le clic (visites, engagement, événements clés, chiffre d'affaires).
+
+- Une lecture couvre 28 ou 90 jours et se termine la veille. Elle remplace la précédente.
+- Seules les visites sur l'hôte du site sont lues (`hostName`). Si la propriété a des visites mais aucune sur cet hôte : `analytics_other_site` (statut 409), rien n'est enregistré. Si la propriété n'a aucune visite du tout sur la période (site neuf), la lecture réussit avec des zéros.
+- La série quotidienne contient tous les jours de la période, à 0 les jours sans visite.
+- Les pages d'arrivée de même chemin (casse, slash final, paramètres) sont additionnées. Au-delà de 200 pages, `landingPagesTruncated` vaut `true` et une page absente de la liste n'est pas déclarée sans visite.
+- Les pages d'arrivée sont rapprochées des pages analysées par leur chemin (`LandingPage.pageId`, `PageDetail.visits`).
+- `revenue` vaut `null`, jamais 0, quand aucune vente n'est mesurée ou quand le compte de service n'a pas le droit de la voir ; `revenueStatus` dit lequel des deux.
+- Statuts : `analytics_not_configured` 503, `analytics_unavailable` 502 avec `details.retryable`. Une lecture par minute.
+
+## Vitesse des pages
+
+Mesures de PageSpeed Insights (Google), avec la clé `GOOGLE_PAGESPEED_API_KEY`. Chaque page est mesurée pour un téléphone et pour un ordinateur ; une mesure prend 10 à 40 secondes, d'où un travail en tâche de fond : `POST` répond tout de suite, l'événement `pagespeed` signale chaque page terminée, `running` donne l'avancement réel.
+
+- 10 pages au plus par demande, une page à la fois, une seule mesure en cours par site, 30 pages mesurées par heure et par site. Seules des pages de l'analyse affichée, sur l'hôte du site, peuvent être mesurées.
+- Deux natures de chiffres, à ne jamais confondre : **laboratoire** (`score`, `lab` : un chargement simulé par Google) et **terrain** (`field` : ce que les vrais visiteurs ont vécu sur 28 jours ; `null` quand Google n'a pas assez de données, `scope: "site"` quand elles portent sur tout le site et non sur la page).
+- Les verdicts (`SpeedRating`) sont ceux de Google, pas recalculés.
+- La clé n'apparaît jamais dans une erreur, un journal ni une réponse. Une page que Google n'a pas pu mesurer est listée dans `failures` (page, appareil, raison) et la mesure continue ; `failures` repart de zéro à chaque demande, jamais à une réussite. `lastError` est réservé à ce qui arrête toute la demande (clé refusée, quota épuisé).
+- La note de vitesse n'entre pas dans la note SEO du site : la grille de notation ne change pas.
+- Précisions : la clé est envoyée à Google dans un en-tête, jamais dans l'adresse ; sans lecture de Google Analytics, les pages mesurées par défaut sont choisies d'après les clics de la Search Console, à défaut la première analysée ; une mesure interrompue par un redémarrage du serveur n'est pas reprise ; `403` « API non activée » chez Google donne `…_unavailable` avec `details.retryable: false`, pas `…_no_access`.
+- `revenue` (Google Analytics) vaut `null` dès que le chiffre d'affaires d'achat est nul sur tout le site pour la période : un site qui mesure ses ventes mais n'en a eu aucune affiche donc aussi « non mesuré ».
+
 ## Flux en direct
 
 ### `GET /api/sites/:siteId/events`
@@ -175,6 +204,8 @@ data: {"type":"audit","audit":{…AuditStatus},"score":71}
 - `page` : une page vient d'être notée (`PageSummary`).
 - `search_console` : un import a été ajouté ou supprimé.
 - `shopify` : la boutique a été relue ou modifiée, ou un lot de corrections a avancé.
+- `analytics` : les visites Google Analytics ont été relues.
+- `pagespeed` : une mesure de vitesse a avancé ou s'est terminée.
 - Un commentaire `: ping` toutes les 20 secondes pour garder la connexion.
 
 **Progression réelle.** L'interface affiche `pagesDone`, `pagesQueued`, `pagesFailed` et `currentUrl`. Le total final n'est pas connu d'avance : aucun pourcentage n'est calculé tant que `state` n'est pas `done`.
@@ -220,6 +251,8 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 | `SHOPIFY_WRITES_ENABLED` | `1` pour autoriser le serveur à écrire dans la boutique | non — sans elle, la boutique est en lecture seule |
 | `ALLOWED_HOSTS` | Hôtes publics acceptés dans l'en-tête `Host`, séparés par des virgules (ex. `seo.exemple.fr`) | non — à renseigner chez un hébergeur |
 | `SHOPIFY_AUTO_APPLY` | `1` pour autoriser le mode d'automatisation « auto » (écritures sans validation humaine) | non — sans elle, l'IA propose, un humain valide |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | Chemin du fichier JSON du compte de service Google | non — par défaut `secrets/google-service-account.json` s'il existe |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Chemin du fichier JSON du compte de service Google (Search Console et Google Analytics) ; `GOOGLE_SERVICE_ACCOUNT_FILE` est accepté aussi | non — par défaut `secrets/google-service-account.json` s'il existe |
+| `GA4_PROPERTY_ID` | Identifiant numérique de la propriété Google Analytics 4 | non — sans lui, pas de lecture des visites |
+| `GOOGLE_PAGESPEED_API_KEY` | Clé d'API Google pour PageSpeed Insights | non — sans elle, pas de mesure de vitesse |
 | `GSC_PROPERTY` | Propriété Search Console à lire, ex. `sc-domain:exemple.fr` | non — déduite de l'hôte du site |
 | `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD` | Identifiants de l'API DataForSEO | non — aucune fonctionnalité ne s'en sert encore |
