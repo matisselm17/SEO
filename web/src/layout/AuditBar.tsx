@@ -10,10 +10,20 @@ import { fmtDateTime, fmtInt, pl, plural } from "../lib/format";
 import { startAudit } from "../lib/actions";
 import { applyAudit, isNewerAudit, resultsOf } from "../lib/results";
 
-function pathOf(url: string) {
+/** Adresse d'inventaire : un plan du site (sitemap) ou le catalogue d'une boutique. */
+function isInventoryUrl(url: string) {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    return /sitemap[^/]*\.xml$/.test(p) || p.endsWith("/products.json");
+  } catch {
+    return false;
+  }
+}
+
+function pathOf(url: string, withoutQuery = false) {
   try {
     const u = new URL(url);
-    return decodeURIComponent(u.pathname + u.search) || "/";
+    return decodeURIComponent(u.pathname + (withoutQuery ? "" : u.search)) || "/";
   } catch {
     return url;
   }
@@ -92,7 +102,13 @@ export function AuditBar({ site }: { site: SiteSummary }) {
     }
   };
 
-  const title = a.state === "queued" ? (older ? "Nouvelle analyse en file d'attente" : "Analyse en file d'attente") : older ? "Nouvelle analyse en cours" : "Analyse en cours";
+  // Avant la première page, le serveur lit le plan du site (sitemap) ou le catalogue de la boutique.
+  const inventorying = a.state === "running" && a.pagesDone === 0 && !!lastUrl && isInventoryUrl(lastUrl);
+  const title = a.state === "queued"
+    ? (older ? "Nouvelle analyse en file d'attente" : "Analyse en file d'attente")
+    : inventorying
+    ? "Inventaire du site en cours"
+    : older ? "Nouvelle analyse en cours" : "Analyse en cours";
 
   return (
     <div className="auditbar" role="status" aria-live="off">
@@ -100,18 +116,22 @@ export function AuditBar({ site }: { site: SiteSummary }) {
       <div className="auditbar__main">
         <p className="auditbar__title">
           {title}
-          <span className="auditbar__counts">
+          {!inventorying && <span className="auditbar__counts">
             <span><strong className="tnum">{fmtInt(a.pagesDone)}</strong> {pl(a.pagesDone, "page notée", "pages notées")}</span>
             <span><strong className="tnum">{fmtInt(a.pagesQueued)}</strong> en attente</span>
             {a.pagesFailed > 0 && <span className="auditbar__failed"><strong className="tnum">{fmtInt(a.pagesFailed)}</strong> en échec</span>}
             <span className="auditbar__muted">plafond {fmtInt(a.maxPages)}</span>
-          </span>
+          </span>}
         </p>
         {olderLine ? (
           <p className="auditbar__url auditbar__url--wrap">{olderLine} Ils seront remplacés à la fin.</p>
         ) : (
-          <p className="auditbar__url" title={lastUrl ?? undefined}>
-            {lastUrl ? <>Lecture de <span className="mono">{pathOf(lastUrl)}</span></> : a.state === "queued" ? "Elle démarre dès qu'une autre analyse se termine." : "Démarrage…"}
+          <p className={`auditbar__url ${inventorying ? "auditbar__url--wrap" : ""}`} title={lastUrl ?? undefined}>
+            {inventorying && lastUrl ? (
+              <>Lecture de <span className="mono">{pathOf(lastUrl, true)}</span> pour recenser les pages. La première page peut mettre un moment à arriver.</>
+            ) : lastUrl ? (
+              <>Lecture de <span className="mono">{pathOf(lastUrl)}</span></>
+            ) : a.state === "queued" ? "Elle démarre dès qu'une autre analyse se termine." : "Démarrage…"}
           </p>
         )}
       </div>

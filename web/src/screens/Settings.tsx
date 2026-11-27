@@ -113,7 +113,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
         <h2 id="set-analysis" className="settings-group__title">Analyse</h2>
         <Row
           title="Plafond de pages par analyse"
-          hint={s ? <>Nombre de pages lues au plus à chaque analyse, entre {fmtInt(s.maxPagesLimits.min)} et {fmtInt(s.maxPagesLimits.max)}. S'applique aux prochaines analyses de tous les sites. Plus il est haut, plus l'analyse est longue.</> : "Nombre de pages lues au plus à chaque analyse."}
+          hint={s ? <>Nombre de pages ouvertes en entier à chaque analyse, entre {fmtInt(s.maxPagesLimits.min)} et {fmtInt(s.maxPagesLimits.max)} au plus. S'applique aux prochaines analyses de tous les sites. Quand le site compte plus de pages, elles sont choisies type par type pour que chacun soit représenté, et les autres produits d'une boutique Shopify sont lus dans son catalogue (hors note). Un plafond plus bas donne une analyse plus rapide mais une note fondée sur moins de pages.</> : "Nombre de pages ouvertes en entier à chaque analyse."}
         >
           {s ? <MaxPagesForm s={s} /> : <Skeleton w={260} h={36} r={6} />}
         </Row>

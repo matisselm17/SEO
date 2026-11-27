@@ -62,6 +62,19 @@ SCREENS = [
     ("48-audit-doublon", "/sites/site_8fk2/audit/duplicate_title", "complet", ["wait:800"]),
     ("49-trafic-import", "/sites/site_8fk2/trafic", "complet", []),
     ("50-assistant-sans-config-vue", "/sites/site_8fk2", "sans-config", []),
+    # Couverture de l'analyse
+    ("60-couverture-partielle", "/sites/site_8fk2", "complet", ["scrollto:#coverage-t"]),
+    ("61-couverture-grand-site", "/sites/site_orlx", "complet", ["scrollto:#coverage-t"]),
+    ("69-couverture-complete-echec", "/sites/site_8fk2", "couverture-complete", []),
+    ("70-catalogue-indispo", "/sites/site_8fk2", "catalogue-indispo", []),
+    ("71-inventaire", "/sites/site_8fk2", "inventaire", []),
+    ("62-couverture-liens", "/sites/site_8fk2", "liens", ["scrollto:#coverage-t"]),
+    ("63-audit-catalogue", "/sites/site_8fk2/audit?gravite=warning", "complet", []),
+    ("64-audit-catalogue-detail", "/sites/site_8fk2/audit/catalogue_description", "complet", ["wait:800"]),
+    ("65-pages-types", "/sites/site_8fk2/pages", "complet", ["wait:600"]),
+    ("66-pages-filtre-produits", "/sites/site_8fk2/pages", "complet", ["select:select[aria-label='Filtrer par type de page']=product", "wait:400"]),
+    ("67-analyse-complete-lancee", "/sites/site_8fk2", "complet", ["click:.cov__full button", "wait:2500", "scrollto:#coverage-t"]),
+    ("68-recommandations-catalogue", "/sites/site_8fk2/recommandations", "complet", ["scrollto:#rec_catalogue_description"]),
 ]
 WIDTHS = [1440, 834, 390]
 THEMES = ["light", "dark"]
@@ -83,11 +96,16 @@ with sync_playwright() as pw:
                 page = ctx.new_page()
                 page.on("console", lambda m, n=name, w=w, t=theme: m.type in ("error", "warning") and errors.append(f"{n} [{w}/{t}] {m.type}: {m.text}"))
                 page.on("pageerror", lambda e, n=name, w=w, t=theme: errors.append(f"{n} [{w}/{t}] pageerror: {e}"))
-                page.goto(f"{BASE}{path}?demo={demo}", wait_until="load")
+                page.goto(f"{BASE}{path}{'&' if '?' in path else '?'}demo={demo}", wait_until="load")
                 page.wait_for_timeout(900 if demo != "lent" else 700)
                 for a in acts:
                     if a.startswith("wait:"):
                         page.wait_for_timeout(int(a[5:]))
+                    elif a.startswith("scrollto:"):
+                        loc = page.locator(a[9:]).first
+                        if loc.count(): loc.scroll_into_view_if_needed(); page.wait_for_timeout(300)
+                    elif a.startswith("select:"):
+                        sel, v = a[7:].rsplit("=", 1); page.select_option(sel, v)
                     elif a.startswith("press:"):
                         page.keyboard.press(a[6:])
                     elif a.startswith("upload:"):

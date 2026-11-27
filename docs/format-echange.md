@@ -34,6 +34,7 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 | `GET /api/sites/:siteId/issues/:issueId` | | `IssueResponse` | Explication, solution, preuves page par page |
 | `GET /api/sites/:siteId/pages` | | `PagesResponse` | Paramètres : `sort` (`PageSort`, défaut `score_asc`), `q` (filtre sur le chemin ou le titre), `offset` (défaut 0), `limit` (défaut 50, max 200) |
 | `GET /api/sites/:siteId/pages/:pageId` | | `PageResponse` | |
+| `GET /api/sites/:siteId/coverage` | | `CoverageResponse` | Inventaire du site par type de page et part réellement analysée |
 | `GET /api/sites/:siteId/failed-pages` | | `FailedPagesResponse` | Pages non chargées de l'analyse affichée, avec leur raison |
 | `GET /api/sites/:siteId/recommendations` | | `RecommendationsResponse` | Triées par `rank` |
 | `GET /api/sites/:siteId/search-console` | | `SearchConsoleData` | |
@@ -46,6 +47,8 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 | `DELETE /api/sites/:siteId/chat` | | `204` | Efface la conversation |
 
 **Quelle analyse est affichée.** `overview`, `issues`, `pages`, `failed-pages` et `recommendations` portent toujours sur l'analyse désignée par `SiteSummary.results` : la dernière analyse terminée ; à défaut (première analyse en cours, ou jamais terminée), la plus récente qui a au moins une page notée. Une analyse en cours, arrêtée ou en échec ne remplace jamais une analyse terminée : pendant une relance, les résultats précédents restent affichés et `SiteSummary.audit` décrit la nouvelle analyse. Avant la première page notée, `results` et `overview.score` valent `null` et les listes sont vides — l'interface dit alors « aucune page analysée », jamais « aucun problème ».
+
+**Couverture d'une analyse.** Avant de charger les pages, le serveur dresse l'inventaire du site à partir de son sitemap et classe chaque adresse par type (`PageType`). Seule la langue principale est analysée ; les autres versions de langue sont signalées dans `otherLocales`, ni analysées ni comptées. Quand le plafond est inférieur à l'inventaire, le parcours est équilibré : l'accueil d'abord, puis les types à tour de rôle, pour que chaque type soit représenté. Sur une boutique Shopify, les produits dont la page n'a pas été ouverte sont lus dans le catalogue public (`/products.json`) : titre, description, images, doublons. Ces constats portent `basis: "catalogue"`, n'entrent jamais dans la note et le disent. La note du site est la moyenne des pages ouvertes en entier ; `Coverage` dit toujours sur combien de pages elle repose, et `fullAuditMaxPages` donne le plafond à demander pour tout ouvrir. Une analyse ouvre au plus 100 pages (plafond par défaut et maximum) ; au-delà, `fullAuditMaxPages` vaut `null` et les produits restants sont lus dans le catalogue.
 
 **Fin d'une analyse.** Arrêt demandé par l'utilisateur : `cancelled`, même avant la première page. Aucune page notée sans arrêt demandé : `failed`. Arrêt ou redémarrage du serveur : `failed` avec un message qui le dit. Sinon `done`, même avec des pages en échec ; l'interface signale une note peu fiable quand `pagesFailed > pagesDone`.
 
@@ -80,6 +83,7 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 - **La note.** Une page est notée sur 100 par la grille de `reference/sonde-seo.html` (fonction `analyse` : cinq familles, 30 + 20 + 25 + 15 + 10 points). La note du site est la moyenne des notes des pages, arrondie à l'entier.
 - **La gravité d'un problème.** `critical` : le critère vaut 6 points ou plus et plus de la moitié des pages sont en défaut, ou il empêche l'indexation (`noindex`). `warning` : les autres critères en défaut. `info` : défaut sur un critère de 2 points ou moins.
 - **Un point positif.** Un critère validé sur au moins 90 % des pages.
+- **Les constats du catalogue** (`basis: "catalogue"`) : `scoreImpact` 0, gravité `warning` ou `info`, classés après les problèmes fondés sur les pages de même gravité. Leurs preuves ont `pageId` null. Un produit dont la page a été ouverte n'est jamais compté dans le catalogue.
 - **Les doublons** (même titre ou même description sur plusieurs pages) ne changent pas la note (`scoreImpact` 0) mais sont de gravité `warning`, leur recommandation a un `impact` `medium`, et ils sont classés juste après les problèmes `critical`.
 - **Une recommandation.** Une par problème. `impact` découle des points à regagner, `effort` de la nature du correctif (un réglage unique dans le thème est `quick` même s'il touche 200 pages ; rédiger 50 descriptions est `heavy`).
 - **Les concurrents.** Uniquement des résultats de recherche réellement relevés, chacun avec sa preuve (requête, position, titre, adresse). Sans fournisseur de recherche configuré, la section répond `available: false`.

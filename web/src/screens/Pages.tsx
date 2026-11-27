@@ -1,7 +1,8 @@
 import { useDeferredValue, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ExternalLink, Search } from "lucide-react";
-import type { CategoryId, PageCheck, PageDetail, PageSummary, SiteSummary } from "../lib/types";
-import { useAllPages, usePage } from "../lib/queries";
+import type { CategoryId, PageCheck, PageDetail, PageSummary, PageType, SiteSummary } from "../lib/types";
+import { PAGE_TYPE_LABEL, PAGE_TYPE_ORDER } from "../lib/pagetype";
+import { useAllPages, useOverview, usePage } from "../lib/queries";
 import { closeDetail, sitePath } from "../lib/router";
 import { isRelaunching, noResultsReason, resultsOf } from "../lib/results";
 import { CATEGORY_LABEL, scoreBand } from "../lib/score";
@@ -17,7 +18,7 @@ import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skelet
 import { useMedia, useWindowVirtual } from "../ui/useVirtual";
 import { FailedPagesToggle, NoResults, QueryError, ReliabilityNote, isRunning } from "./common";
 
-type SortKey = "path" | "score" | "issues" | "words" | "clicks" | "position";
+type SortKey = "path" | "type" | "score" | "issues" | "words" | "clicks" | "position";
 type Band = "all" | "critical" | "warning" | "good";
 
 const CAT_ORDER: CategoryId[] = ["balises", "contenu", "technique", "medias", "partage"];
@@ -27,6 +28,7 @@ function comparator(key: SortKey, dir: 1 | -1) {
     let r = 0;
     switch (key) {
       case "path": r = a.path.localeCompare(b.path, "fr"); break;
+      case "type": r = PAGE_TYPE_ORDER.indexOf(a.pageType) - PAGE_TYPE_ORDER.indexOf(b.pageType); break;
       case "score": r = a.score - b.score; break;
       case "issues": r = a.issues - b.issues; break;
       case "words": r = a.words - b.words; break;
@@ -51,6 +53,8 @@ function SortHeader({ k, label, sort, onSort, align = "left", className }: { k: 
   );
 }
 
+const typeLabel = (t: PageType | undefined) => (t ? PAGE_TYPE_LABEL[t]?.one ?? "Autre" : "—");
+
 function PageRow({ p, siteId, hasOrganic }: { p: PageSummary; siteId: string; hasOrganic: boolean }) {
   return (
     <Link to={sitePath(siteId, "pages", p.id)} className="ptable__row" role="row">
@@ -58,8 +62,9 @@ function PageRow({ p, siteId, hasOrganic }: { p: PageSummary; siteId: string; ha
         <span className="ptable__path mono">{p.path}</span>
         <span className={`ptable__title ${p.title ? "" : "is-missing"}`}>{p.title ?? "Sans titre"}</span>
       </span>
+      <span role="cell" className="ptable__type">{typeLabel(p.pageType)}</span>
       <span role="cell" className="ptable__score"><ScorePill score={p.score} /></span>
-      <span role="cell" className="ptable__num tnum">{p.issues}<span className="ptable__unit"> {p.issues > 1 ? "problèmes" : "problème"}</span></span>
+      <span role="cell" className="ptable__num tnum"><span className="ptable__typeinline">{typeLabel(p.pageType)} · </span>{p.issues}<span className="ptable__unit"> {p.issues > 1 ? "problèmes" : "problème"}</span></span>
       <span role="cell" className="ptable__num tnum ptable__words">{fmtInt(p.words)}<span className="ptable__unit"> mots</span></span>
       {hasOrganic && <span role="cell" className="ptable__num tnum">{p.organic ? fmtInt(p.organic.clicks) : <span className="subtle">—</span>}<span className="ptable__unit"> clics</span></span>}
       {hasOrganic && <span role="cell" className="ptable__num tnum ptable__pos">{p.organic ? fmtPosition(p.organic.position) : <span className="subtle">—</span>}</span>}
@@ -166,6 +171,7 @@ function PageSheet({ site, pageId, onClose }: { site: SiteSummary; pageId: strin
         page && (
           <>
             <ScorePill score={page.score} />
+            <Tag>{typeLabel(page.pageType)}</Tag>
             <span>{plural(page.issues, "critère à revoir", "critères à revoir")}</span>
             <span aria-hidden>·</span>
             <span>{plural(page.words, "mot", "mots")}</span>
@@ -190,24 +196,33 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
   const q = useAllPages(site.id);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "score", dir: 1 });
   const [band, setBand] = useState<Band>("all");
+  const [ptype, setPtype] = useState<PageType | "all">("all");
   const [text, setText] = useState("");
   const search = useDeferredValue(text.trim().toLowerCase());
   const mobile = useMedia("(max-width: 767px)");
   const all = q.data?.pages;
   const hasOrganic = !!all?.some((p) => p.organic);
 
+  // Les compteurs par note suivent le type choisi.
   const bandCounts = useMemo(() => {
     const c = { all: 0, critical: 0, warning: 0, good: 0 };
-    (all ?? []).forEach((p) => { c.all++; c[scoreBand(p.score)]++; });
+    (all ?? []).forEach((p) => { if (ptype !== "all" && p.pageType !== ptype) return; c.all++; c[scoreBand(p.score)]++; });
     return c;
+  }, [all, ptype]);
+
+  const typeCounts = useMemo(() => {
+    const m = new Map<PageType, number>();
+    (all ?? []).forEach((p) => m.set(p.pageType, (m.get(p.pageType) ?? 0) + 1));
+    return PAGE_TYPE_ORDER.filter((t) => m.has(t)).map((t) => ({ t, n: m.get(t)! }));
   }, [all]);
 
   const rows = useMemo(() => {
     let list = all ?? [];
+    if (ptype !== "all") list = list.filter((p) => p.pageType === ptype);
     if (band !== "all") list = list.filter((p) => scoreBand(p.score) === band);
     if (search) list = list.filter((p) => p.path.toLowerCase().includes(search) || (p.title ?? "").toLowerCase().includes(search));
     return [...list].sort(comparator(sort.key, sort.dir));
-  }, [all, band, search, sort]);
+  }, [all, band, ptype, search, sort]);
 
   const rowH = mobile ? 76 : 60;
   const v = useWindowVirtual(rows.length, rowH);
@@ -216,6 +231,7 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
   const reason = noResultsReason(site);
   const r = resultsOf(site);
   const firstRun = isRunning(site) && !isRelaunching(site);
+  const viaCatalogue = useOverview(site.id).data?.coverage?.totals.viaCatalogue ?? 0;
   return (
     <>
       <PageHeader
@@ -254,6 +270,14 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
                 { id: "good", label: "Bonnes", count: bandCounts.good },
               ]}
             />
+            {typeCounts.length > 1 && (
+              <select className="select" aria-label="Filtrer par type de page" value={ptype} onChange={(e) => setPtype(e.target.value as PageType | "all")}>
+                <option value="all">Tous les types ({fmtInt(all.length)})</option>
+                {typeCounts.map(({ t, n }) => (
+                  <option key={t} value={t}>{PAGE_TYPE_LABEL[t].many} ({fmtInt(n)})</option>
+                ))}
+              </select>
+            )}
             {mobile && (
               <select className="select" aria-label="Trier par" value={`${sort.key}:${sort.dir}`} onChange={(e) => { const [k, d] = e.target.value.split(":"); setSort({ key: k as SortKey, dir: Number(d) as 1 | -1 }); }}>
                 <option value="score:1">Note la plus basse</option>
@@ -261,6 +285,7 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
                 <option value="issues:-1">Plus de problèmes</option>
                 {hasOrganic && <option value="clicks:-1">Plus de clics</option>}
                 <option value="path:1">Adresse (A à Z)</option>
+                <option value="type:1">Type de page</option>
               </select>
             )}
           </div>
@@ -269,12 +294,18 @@ export function PagesScreen({ site, pageId }: { site: SiteSummary; pageId: strin
               {rows.length === all.length ? plural(all.length, "page", "pages") : `${fmtInt(rows.length)} sur ${plural(all.length, "page", "pages")}`}
               {firstRun && " — la liste s'allonge au fil de l'analyse"}
             </p>
+            {viaCatalogue > 0 && (
+              <p className="pages__catalogue">
+                {viaCatalogue > 1 ? `Les ${fmtInt(viaCatalogue)} produits lus dans le catalogue ne figurent pas ici : leur page n'a pas été ouverte, leurs problèmes sont dans l'audit.` : "Le produit lu dans le catalogue ne figure pas ici : sa page n'a pas été ouverte, ses problèmes sont dans l'audit."}
+              </p>
+            )}
             {r && r.pagesFailed > 0 && <FailedPagesToggle site={site} count={r.pagesFailed} label={`${plural(r.pagesFailed, "page non chargée", "pages non chargées")}, absente${r.pagesFailed > 1 ? "s" : ""} de la liste`} />}
           </div>
 
           <div className={`ptable ${hasOrganic ? "ptable--organic" : ""}`} role="table" aria-label="Pages analysées" aria-rowcount={rows.length + 1}>
             <div className="ptable__head" role="row">
               <SortHeader k="path" label="Page" sort={sort} onSort={onSort} />
+              <SortHeader k="type" label="Type" sort={sort} onSort={onSort} className="ptable__type" />
               <SortHeader k="score" label="Note" sort={sort} onSort={onSort} />
               <SortHeader k="issues" label="Problèmes" sort={sort} onSort={onSort} align="right" />
               <SortHeader k="words" label="Mots" sort={sort} onSort={onSort} align="right" className="ptable__words" />

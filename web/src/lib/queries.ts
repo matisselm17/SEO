@@ -39,7 +39,7 @@ function allPagesFetcher(siteId: string) {
     const pages: PageSummary[] = [];
     let total = 0;
     let offset = 0;
-    // Au plus 500 pages par analyse (plafond du serveur) : trois requêtes au plus.
+    // Une analyse ouvre peu de pages (plafond du serveur) : une ou deux requêtes suffisent.
     for (let guard = 0; guard < 20; guard++) {
       const { data } = await getJSON<PagesResponse>(`${s(siteId)}/pages?sort=score_asc&offset=${offset}&limit=${PAGE_CHUNK}`, undefined, signal);
       if (!data) break;

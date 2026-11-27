@@ -1,9 +1,7 @@
 /**
- * Lecture des sitemaps XML (simples ou index, éventuellement compressés en .gz).
- * Le XML est lu par expressions régulières : seules les balises <loc> sont extraites.
+ * Analyse des sitemaps XML (simples ou index). Le XML est lu par expressions régulières :
+ * seules les balises <loc> et les alternatives hreflang sont extraites. Le chargement est dans inventory.ts.
  */
-import { gunzipSync } from "node:zlib";
-import { safeFetch } from "../net/fetch.ts";
 
 const decodeEntities = (s: string) =>
   s
@@ -16,7 +14,16 @@ const decodeEntities = (s: string) =>
     .trim();
 
 export function parseSitemap(xml: string): { pages: string[]; sitemaps: string[] } {
-  const pages: string[] = [];
+  const full = parseSitemapFull(xml);
+  return { pages: full.pages.map((p) => p.loc), sitemaps: full.sitemaps };
+}
+
+/**
+ * Adresses d'un sitemap, avec pour chaque page ses alternatives de langue (<xhtml:link hreflang>),
+ * et les sous-sitemaps d'un index.
+ */
+export function parseSitemapFull(xml: string): { pages: Array<{ loc: string; alternates: string[] }>; sitemaps: string[] } {
+  const pages: Array<{ loc: string; alternates: string[] }> = [];
   const sitemaps: string[] = [];
   const blockRe = /<(sitemap|url)\b[^>]*>([\s\S]*?)<\/\1>/gi;
   let m: RegExpExecArray | null;
@@ -25,44 +32,18 @@ export function parseSitemap(xml: string): { pages: string[]; sitemaps: string[]
     if (!loc) continue;
     const value = decodeEntities(loc[1]);
     if (!value) continue;
-    (m[1].toLowerCase() === "sitemap" ? sitemaps : pages).push(value);
+    if (m[1].toLowerCase() === "sitemap") {
+      sitemaps.push(value);
+      continue;
+    }
+    const alternates: string[] = [];
+    const altRe = /<(?:xhtml:)?link\b[^>]*\bhreflang=["'][^"']+["'][^>]*>/gi;
+    let a: RegExpExecArray | null;
+    while ((a = altRe.exec(m[2])) && alternates.length < 50) {
+      const href = /\bhref=["']([^"']+)["']/i.exec(a[0]);
+      if (href) alternates.push(decodeEntities(href[1]));
+    }
+    pages.push({ loc: value, alternates });
   }
   return { pages, sitemaps };
-}
-
-/** Parcourt les sitemaps donnés (index compris) et renvoie au plus `limit` adresses de pages. */
-export async function collectSitemapUrls(starts: string[], opts: { signal: AbortSignal; limit: number; maxFiles?: number }): Promise<string[]> {
-  const queue = [...new Set(starts)];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  const maxFiles = opts.maxFiles ?? 10;
-  while (queue.length && seen.size < maxFiles && out.length < opts.limit && !opts.signal.aborted) {
-    const url = queue.shift()!;
-    if (seen.has(url)) continue;
-    seen.add(url);
-    try {
-      const res = await safeFetch(url, {
-        signal: opts.signal,
-        timeoutMs: 15_000,
-        maxBytes: 15 * 1024 * 1024,
-        accept: "application/xml,text/xml;q=0.9,*/*;q=0.5",
-      });
-      if (res.status >= 400) continue;
-      let body = res.body;
-      if (body[0] === 0x1f && body[1] === 0x8b) {
-        body = gunzipSync(body, { maxOutputLength: 50 * 1024 * 1024 });
-      }
-      const text = body.toString("utf8");
-      if (!/<(urlset|sitemapindex)\b/i.test(text)) continue;
-      const { pages, sitemaps } = parseSitemap(text);
-      for (const p of pages) {
-        if (out.length >= opts.limit) break;
-        out.push(p);
-      }
-      queue.push(...sitemaps);
-    } catch {
-      /* sitemap illisible : on continue sans lui */
-    }
-  }
-  return out;
 }

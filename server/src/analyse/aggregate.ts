@@ -13,8 +13,9 @@ import type {
   Severity,
   Strength,
 } from "../../../shared/api.ts";
-import { CATALOGUE, DUPLICATES, effortFor, issueSteps, recommendationSteps } from "./catalogue.ts";
-import { CATEGORIES, CRITERIA, type PageFacts } from "./grille.ts";
+import type { CatalogueProduct } from "../crawl/shopify.ts";
+import { CATALOGUE, CATALOGUE_ISSUES, CATALOGUE_THRESHOLDS, DUPLICATES, effortFor, issueSteps, recommendationSteps } from "./catalogue.ts";
+import { CATEGORIES, CRITERIA, cut, type PageFacts } from "./grille.ts";
 
 export interface PageRecord {
   id: string;
@@ -53,7 +54,11 @@ export function impactFor(pointsToGain: number, total: number): Impact {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
-export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate {
+/**
+ * `catalogue` : produits lus dans le catalogue de la boutique sans que leur page soit ouverte (null s'il n'a pas été lu).
+ * Leurs constats (basis « catalogue ») ne changent jamais la note.
+ */
+export function aggregate(pages: PageRecord[], siteName: string, catalogue: CatalogueProduct[] | null = null): SiteAggregate {
   const total = pages.length;
   if (!total) return { pagesTotal: 0, score: null, categories: [], issues: [], strengths: [], recommendations: [] };
 
@@ -115,6 +120,7 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       severity: severityFor(crit.id, crit.max, bad.length, total),
       title: entry.title(ctx),
       summary: entry.summary,
+      basis: "pages",
       pagesAffected: bad.length,
       pagesTotal: total,
       scoreImpact: round1(pointsLost / total),
@@ -164,6 +170,7 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       severity: "warning",
       title: def.title(affected, dup.length),
       summary: def.summary,
+      basis: "pages",
       pagesAffected: affected,
       pagesTotal: total,
       scoreImpact: 0,
@@ -177,9 +184,19 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
     stepsById.set(kind, recommendationSteps(def.steps, false));
   }
 
+  const fromCatalogue = catalogue?.length ? catalogueIssues(catalogue) : [];
+  for (const c of fromCatalogue) {
+    issues.push(c.issue);
+    effortById.set(c.issue.id, effortFor("page", c.issue.pagesAffected));
+    actionById.set(c.issue.id, c.action);
+    stepsById.set(c.issue.id, recommendationSteps(c.issue.fix.steps, false));
+  }
+
   // Ordre : problèmes critiques, puis doublons, puis les autres ; à l'intérieur, par points perdus.
-  const isDup = (id: string) => id === "duplicate_title" || id === "duplicate_description";
-  const group = (i: { id: string; severity: Severity }) => (i.severity === "critical" ? 0 : isDup(i.id) ? 1 : 2);
+  // Les constats du catalogue viennent après tous ceux des pages (« warning » puis « info »).
+  const isDup = (id: string) => id === "duplicate_title" || id === "duplicate_description" || id === "catalogue_duplicate_title" || id === "catalogue_duplicate_description";
+  const group = (i: { id: string; severity: Severity; basis: Issue["basis"] }) =>
+    i.basis === "catalogue" ? (i.severity === "info" ? 4 : 3) : i.severity === "critical" ? 0 : isDup(i.id) ? 1 : 2;
   issues.sort((a, b) => group(a) - group(b) || b.pointsLost - a.pointsLost || b.pagesAffected - a.pagesAffected || a.id.localeCompare(b.id));
   strengths.sort((a, b) => maxOf(b.id) - maxOf(a.id) || b.pagesPassing - a.pagesPassing);
 
@@ -191,7 +208,7 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
       id: `rec_${i.id}`,
       issueId: i.id,
       title: actionById.get(i.id) ?? i.title,
-      impact: isDup(i.id) ? "medium" : impactFor(i.pointsLost, total),
+      impact: isDup(i.id) ? "medium" : i.basis === "catalogue" ? "low" : impactFor(i.pointsLost, total),
       effort,
       pagesAffected: i.pagesAffected,
       scoreGain: i.scoreImpact,
@@ -207,6 +224,101 @@ export function aggregate(pages: PageRecord[], siteName: string): SiteAggregate 
   recs.forEach((r, i) => (r.rank = i + 1));
 
   return { pagesTotal: total, score, categories, issues, strengths, recommendations: recs };
+}
+
+/** Constats sur les produits lus dans le catalogue : preuves sans page analysée (pageId null). */
+function catalogueIssues(products: CatalogueProduct[]): Array<{ issue: IssueDetail; action: string }> {
+  const total = products.length;
+  const out: Array<{ issue: IssueDetail; action: string }> = [];
+  const T = CATALOGUE_THRESHOLDS;
+  const push = (id: keyof typeof CATALOGUE_ISSUES, evidence: Evidence[], affected: number, groups?: number) => {
+    if (!affected) return;
+    const def = CATALOGUE_ISSUES[id];
+    out.push({
+      issue: {
+        id,
+        category: def.category,
+        severity: def.severity,
+        title: def.title(affected, groups),
+        summary: def.summary,
+        basis: "catalogue",
+        pagesAffected: affected,
+        pagesTotal: total,
+        scoreImpact: 0,
+        pointsLost: 0,
+        why: def.why,
+        fix: { steps: def.steps, snippet: null },
+        evidence: evidence.slice(0, MAX_EVIDENCE),
+      },
+      action: def.action(affected),
+    });
+  };
+  const ev = (p: CatalogueProduct, found: string, expected: string): Evidence => ({ pageId: null, url: p.url, path: p.path, found, expected });
+
+  // Nom (titre par défaut dans Google) : les plus éloignés de la fourchette d'abord.
+  const titleBad = products
+    .filter((p) => p.title.length < T.titleMin || p.title.length > T.titleMax)
+    .sort((a, b) => distance(b.title.length) - distance(a.title.length) || a.path.localeCompare(b.path));
+  push(
+    "catalogue_title",
+    titleBad.map((p) =>
+      ev(p, p.title ? `Nom « ${cut(p.title, 80)} » (${p.title.length} caractères)` : "Aucun nom", `Entre ${T.titleMin} et ${T.titleMax} caractères (idéalement 30 à 60)`),
+    ),
+    titleBad.length,
+  );
+
+  // Description : absente d'abord, puis la plus courte.
+  const descBad = products.filter((p) => p.descWords < T.descMinWords).sort((a, b) => a.descWords - b.descWords || a.path.localeCompare(b.path));
+  push(
+    "catalogue_description",
+    descBad.map((p) =>
+      ev(p, p.descWords ? `Description de ${p.descWords} ${p.descWords > 1 ? "mots" : "mot"} : « ${cut(p.descExcerpt, 90)} »` : "Aucune description", `Au moins ${T.descMinWords} mots qui décrivent le produit`),
+    ),
+    descBad.length,
+  );
+
+  // Images sans texte alternatif.
+  const altBad = products.filter((p) => p.imagesNoAltCount > 0).sort((a, b) => b.imagesNoAltCount - a.imagesNoAltCount || a.path.localeCompare(b.path));
+  push(
+    "catalogue_image_alt",
+    altBad.map((p) =>
+      ev(p, `${p.imagesNoAltCount} ${p.imagesNoAltCount > 1 ? "images" : "image"} sur ${p.images} sans texte alternatif`, "Un texte alternatif pour chaque image"),
+    ),
+    altBad.length,
+  );
+
+  // Doublons de nom et de description, entre produits lus dans le catalogue.
+  const dupes = (pick: (p: CatalogueProduct) => string | null) => {
+    const groups = new Map<string, CatalogueProduct[]>();
+    for (const p of products) {
+      const k = pick(p);
+      if (!k) continue;
+      const list = groups.get(k) ?? [];
+      list.push(p);
+      groups.set(k, list);
+    }
+    return [...groups.values()].filter((g) => g.length > 1).sort((a, b) => b.length - a.length || a[0].path.localeCompare(b[0].path));
+  };
+  const sameTitle = dupes((p) => p.title.trim().replace(/\s+/g, " ").toLowerCase() || null);
+  push(
+    "catalogue_duplicate_title",
+    sameTitle.flatMap((g) => g.map((p) => ev(p, `« ${cut(p.title, 90)} », identique sur ${g.length} produits`, "Un nom propre à chaque produit"))),
+    sameTitle.reduce((a, g) => a + g.length, 0),
+    sameTitle.length,
+  );
+  const sameDesc = dupes((p) => p.descHash);
+  push(
+    "catalogue_duplicate_description",
+    sameDesc.flatMap((g) => g.map((p) => ev(p, `« ${cut(p.descExcerpt, 90)} », identique sur ${g.length} produits`, "Une description propre à chaque produit"))),
+    sameDesc.reduce((a, g) => a + g.length, 0),
+    sameDesc.length,
+  );
+  return out;
+}
+
+function distance(len: number): number {
+  const T = CATALOGUE_THRESHOLDS;
+  return len < T.titleMin ? T.titleMin - len : len > T.titleMax ? len - T.titleMax : 0;
 }
 
 function maxOf(id: string): number {

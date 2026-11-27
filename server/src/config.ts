@@ -65,6 +65,10 @@ function loadDotenv(): void {
   }
 }
 
+/** Bornes du plafond de pages d'une analyse, et plafond par défaut d'une nouvelle analyse. */
+export const MAX_PAGES_LIMITS = { min: 1, max: 100 };
+export const DEFAULT_MAX_PAGES = 100;
+
 export interface Limits {
   /** Nombre maximal de sites suivis. */
   maxSites: number;

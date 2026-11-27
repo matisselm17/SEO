@@ -162,7 +162,7 @@
 .auditbar__url { color: var(--text-muted); min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .auditbar__url .mono { color: var(--text); font-size: 12px; }
 .auditbar__text { flex: 1; min-width: 0; }
-.auditbar__url--wrap { white-space: normal; }
+.auditbar__url--wrap { white-space: normal; overflow-wrap: anywhere; }
 .auditbar__note { margin-top: 2px; color: var(--text-muted); }
 
 .live-chip { display: inline-flex; align-items: center; gap: 8px; height: 24px; padding: 0 10px; border-radius: var(--radius-full); background: var(--accent-soft); color: var(--accent-text); font-size: var(--text-xs); font-weight: var(--weight-semibold); }

@@ -506,3 +506,103 @@ export function effortFor(scope: Entry["scope"] | "page", affected: number): Eff
   if (affected <= 15) return "medium";
   return "heavy";
 }
+
+// ───────── Constats du catalogue (produits lus dans /products.json, pages non ouvertes)
+
+const products = (k: number) => n(k, "produit", "produits");
+const productsRead = (k: number) => n(k, "produit lu", "produits lus");
+const shopifyProduct = "Dans l'administration Shopify, ouvrez « Produits », puis chacun des produits listés dans le détail du problème.";
+const catalogueNote =
+  "Ces produits ont été lus dans le catalogue de la boutique : leur page n'a pas été ouverte, et ce constat ne change pas la note sur 100.";
+
+/** Seuils appliqués aux produits du catalogue. */
+export const CATALOGUE_THRESHOLDS = {
+  titleMin: 15,
+  titleMax: 70,
+  descMinWords: 50,
+};
+
+export interface CatalogueEntry {
+  severity: "warning" | "info";
+  category: "balises" | "contenu" | "medias";
+  title(affected: number, groups?: number): string;
+  summary: string;
+  why: string;
+  steps: string[];
+  action(affected: number): string;
+  /** Les doublons ont une recommandation d'impact « medium », comme ceux des pages. */
+  duplicate?: true;
+}
+
+export const CATALOGUE_ISSUES: Record<
+  "catalogue_title" | "catalogue_description" | "catalogue_image_alt" | "catalogue_duplicate_title" | "catalogue_duplicate_description",
+  CatalogueEntry
+> = {
+  catalogue_title: {
+    severity: "warning",
+    category: "balises",
+    title: (k) => `Le nom est trop court ou trop long sur ${productsRead(k)} dans le catalogue`,
+    summary: `Sauf si un titre de référencement a été saisi pour le produit, Shopify se sert de son nom comme titre dans Google. Trop court, il ne dit pas ce qui est vendu ; trop long, il est coupé. ${catalogueNote}`,
+    why: "Le titre est la ligne bleue cliquable dans Google : c'est le premier texte que l'internaute lit. Un nom de produit très court (« Bague Luna ») ne dit ni la matière ni la catégorie ; au-delà de 70 caractères, Google le coupe. Le thème ajoute souvent le nom de la boutique à la fin, ce qui laisse moins de place.",
+    steps: [
+      shopifyProduct,
+      "En bas de la fiche, dans « Référencement naturel » (ou « Aperçu des résultats sur les moteurs de recherche »), cliquez sur « Modifier ».",
+      "Écrivez un titre de 30 à 60 caractères : le type de produit, sa particularité (matière, couleur), puis la marque si la place le permet.",
+      "Vous pouvez aussi allonger ou raccourcir le nom du produit lui-même s'il est affiché tel quel sur la boutique.",
+    ],
+    action: (k) => `Revoir le titre de ${products(k)}`,
+  },
+  catalogue_description: {
+    severity: "warning",
+    category: "contenu",
+    title: (k) => `${n(k, "produit lu", "produits lus")} dans le catalogue ${k > 1 ? "ont" : "a"} une description absente ou trop courte`,
+    summary: `La description est le texte qui présente le produit sur sa page. Absente ou de quelques mots, elle ne donne à Google presque rien à comprendre ni à montrer. ${catalogueNote}`,
+    why: "Google classe une page d'après son texte. Une fiche produit sans description, ou avec une seule phrase, a peu de chances d'apparaître sur les recherches précises de vos clients (matière, usage, taille). Sans description de référencement saisie, Shopify reprend aussi le début de ce texte sous le titre dans Google.",
+    steps: [
+      shopifyProduct,
+      "Dans le champ « Description », écrivez au moins 50 mots propres au produit : ce que c'est, la matière, les dimensions, l'usage, l'entretien.",
+      "Évitez de recopier le même texte d'un produit à l'autre : chaque fiche doit dire ce qui la distingue.",
+    ],
+    action: (k) => `Rédiger une description pour ${products(k)}`,
+  },
+  catalogue_image_alt: {
+    severity: "info",
+    category: "medias",
+    title: (k) => `Des images n'ont pas de texte alternatif sur ${productsRead(k)} dans le catalogue`,
+    summary: `Le texte alternatif décrit une image à Google et aux personnes malvoyantes. Il n'est pas renseigné sur ces images dans les fiches produits ; certains thèmes affichent alors le nom du produit à la place. ${catalogueNote}`,
+    why: "Google ne « voit » pas les images : il lit leur texte alternatif. Bien rempli, il permet aux photos de vos produits de ressortir dans Google Images, et il est lu à voix haute par les lecteurs d'écran.",
+    steps: [
+      shopifyProduct,
+      "Cliquez sur chaque image du produit, puis sur « Ajouter un texte alternatif ».",
+      "Décrivez en quelques mots ce que montre la photo (ex. « Bague en argent avec pierre de lune, vue de profil »).",
+    ],
+    action: (k) => `Décrire les images de ${products(k)}`,
+  },
+  catalogue_duplicate_title: {
+    severity: "warning",
+    category: "balises",
+    duplicate: true,
+    title: (k, g = 1) => `${n(k, "produit lu", "produits lus")} dans le catalogue ${k > 1 ? "portent" : "porte"} le même nom${g > 1 ? ` (${g} groupes)` : ""}`,
+    summary: `Plusieurs produits ont exactement le même nom. Dans Google, leurs pages se ressemblent et se font concurrence. ${catalogueNote}`,
+    why: "Quand plusieurs fiches portent le même nom, Google a du mal à choisir laquelle montrer, et l'internaute ne sait pas sur laquelle cliquer. Précisez ce qui les distingue : la couleur, la taille, la matière.",
+    steps: [
+      shopifyProduct,
+      "Ajoutez au nom (ou au titre de référencement) ce qui distingue chaque produit : couleur, taille, matière, modèle.",
+      "Si ce sont des déclinaisons d'un même article, regroupez-les en un seul produit avec des variantes.",
+    ],
+    action: (k) => `Donner un nom unique à ${products(k)}`,
+  },
+  catalogue_duplicate_description: {
+    severity: "warning",
+    category: "contenu",
+    duplicate: true,
+    title: (k, g = 1) => `${n(k, "produit lu", "produits lus")} dans le catalogue ${k > 1 ? "partagent" : "partage"} la même description${g > 1 ? ` (${g} groupes)` : ""}`,
+    summary: `Plusieurs produits ont exactement le même texte de description. Google voit alors des pages presque identiques et n'en met souvent qu'une en avant. ${catalogueNote}`,
+    why: "Un texte recopié d'une fiche à l'autre n'apporte rien de nouveau à Google : il risque de n'afficher qu'une de ces pages. Une description propre à chaque produit aide aussi le client à choisir.",
+    steps: [
+      shopifyProduct,
+      "Réécrivez la description de chacun : gardez au besoin un paragraphe commun (entretien, livraison), mais ajoutez ce qui est propre au produit.",
+    ],
+    action: (k) => `Écrire une description unique pour ${products(k)}`,
+  },
+};

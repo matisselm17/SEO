@@ -59,7 +59,7 @@ export interface AuditStatus {
   pagesFailed: number;
   /** Pages découvertes qui attendent encore d'être chargées (dans la limite de maxPages). */
   pagesQueued: number;
-  /** Page en cours de chargement, null si aucune. */
+  /** Adresse en cours de lecture : une page, ou pendant l'inventaire un sitemap ou le catalogue. null si aucune. */
   currentUrl: string | null;
   /** Renseigné quand state vaut "failed". */
   error: ApiError["error"] | null;
@@ -138,6 +138,13 @@ export interface Issue {
   pagesAffected: number;
   pagesTotal: number;
   /**
+   * Sur quoi repose le constat. "pages" : des pages ouvertes en entier et notées.
+   * "catalogue" : des produits lus dans le catalogue de la boutique sans que leur page soit ouverte
+   * (titre, description, images) ; ces constats ne changent jamais la note, et pagesTotal est alors
+   * le nombre de produits lus dans le catalogue.
+   */
+  basis: "pages" | "catalogue";
+  /**
    * Points perdus sur la note du site (sur 100) à cause de ce problème :
    * somme des points perdus par page ÷ nombre de pages, arrondie à une décimale.
    * C'est la seule valeur de points à afficher. 0 pour les doublons, qui ne changent pas la note.
@@ -148,7 +155,8 @@ export interface Issue {
 }
 
 export interface Evidence {
-  pageId: string;
+  /** Page analysée correspondante ; null pour un produit lu dans le catalogue sans que sa page soit ouverte. */
+  pageId: string | null;
   url: string;
   path: string;
   /** Valeur relevée sur cette page. */
@@ -211,9 +219,13 @@ export interface Recommendation {
 
 // ───────────────────────── Pages ─────────────────────────
 
+/** Type d'une page, déduit de son adresse et du sitemap. */
+export type PageType = "home" | "product" | "collection" | "article" | "blog" | "page" | "policy" | "other";
+
 export interface PageSummary {
   id: string;
   url: string;
+  pageType: PageType;
   /** Chemin décodé, ex. "/collections/piercing-nombril". */
   path: string;
   title: string | null;
@@ -324,6 +336,55 @@ export type CompetitorsData =
       competitors: Competitor[];
     };
 
+// ───────────────────────── Couverture ─────────────────────────
+
+/** Une ligne par type de page présent sur le site ou dans l'analyse. */
+export interface CoverageRow {
+  type: PageType;
+  /** Libellé au pluriel, ex. "Produits", "Collections", "Articles de blog". */
+  label: string;
+  /** Nombre de pages de ce type sur le site d'après l'inventaire ; null si l'inventaire ne permet pas de le dire. */
+  onSite: number | null;
+  /** Pages ouvertes en entier et notées. */
+  analyzed: number;
+  /** Produits lus dans le catalogue sans que leur page soit ouverte. 0 hors produits. */
+  viaCatalogue: number;
+  /** Pages qui n'ont pas pu être chargées. */
+  failed: number;
+  /** Note moyenne des pages notées de ce type, arrondie à l'entier ; null si aucune. */
+  score: number | null;
+}
+
+/** Ce que l'analyse affichée couvre réellement, par rapport à ce que le site contient. */
+export interface Coverage {
+  /** Plateforme reconnue. Seule "shopify" donne accès au catalogue. */
+  platform: "shopify" | null;
+  /**
+   * Lecture du catalogue de la boutique. "read" : lu, des produits non ouverts en viennent.
+   * "not_needed" : tous les produits inventoriés ont été ouverts en entier. "unavailable" : la boutique
+   * ne le rend pas accessible, les produits non ouverts ne sont donc pas couverts. null hors Shopify.
+   */
+  catalogue: "read" | "not_needed" | "unavailable" | null;
+  /** D'où vient l'inventaire : le sitemap du site, ou à défaut les seuls liens suivis (alors onSite vaut null). */
+  inventory: "sitemap" | "links";
+  rows: CoverageRow[];
+  totals: { onSite: number | null; analyzed: number; viaCatalogue: number; failed: number };
+  /**
+   * true quand toutes les pages inventoriées de la langue principale ont été traitées (ouvertes, ou tentées
+   * et en échec : voir `failed`). Les pages trouvées seulement par des liens ne font pas partie de l'inventaire.
+   */
+  complete: boolean;
+  /** Langue principale analysée, ex. "fr" ; null si inconnue. */
+  mainLocale: string | null;
+  /** Autres versions de langue détectées, par code (ex. ["en", "de"]). Elles ne sont ni analysées ni comptées. */
+  otherLocales: string[];
+  /**
+   * Plafond à demander pour ouvrir toutes les pages inventoriées en entier ;
+   * null si c'est déjà fait, si l'inventaire est inconnu ou s'il dépasse la limite autorisée.
+   */
+  fullAuditMaxPages: number | null;
+}
+
 // ───────────────────────── Vue d'ensemble ─────────────────────────
 
 export interface Overview {
@@ -345,6 +406,8 @@ export interface Overview {
   strengths: Strength[];
   /** Les premières actions à mener, au plus 5. */
   actions: Recommendation[];
+  /** Ce que l'analyse couvre. null tant qu'aucune page n'a été notée. */
+  coverage: Coverage | null;
   /** null sans import Search Console. */
   organic: {
     period: { start: string; end: string } | null;
@@ -407,6 +470,8 @@ export interface IssueResponse { issue: IssueDetail }
 /** GET /api/sites/:siteId/pages?sort=&q=&offset=&limit= */
 export interface PagesResponse { pages: PageSummary[]; total: number; offset: number; limit: number }
 export interface PageResponse { page: PageDetail }
+/** GET /api/sites/:siteId/coverage */
+export interface CoverageResponse { coverage: Coverage | null }
 /** GET /api/sites/:siteId/failed-pages */
 export interface FailedPagesResponse { pages: FailedPage[] }
 

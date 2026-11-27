@@ -11,6 +11,7 @@ import type {
   PageCheck,
   PageDetail,
   PageSummary,
+  PageType,
   SearchConsoleData,
   SiteSummary,
 } from "../../shared/api.ts";
@@ -20,6 +21,9 @@ import { cut } from "./analyse/grille.ts";
 import { newId, type DB, type Row } from "./db.ts";
 import { totalsOf, type GscImport } from "./gsc/import.ts";
 import { displayPath, urlKey } from "./crawl/url.ts";
+import { classifyPath, PAGE_TYPES } from "./crawl/inventory.ts";
+import type { CatalogueProduct } from "./crawl/shopify.ts";
+import { legacyState, type CoverageState, type TypeStats } from "./coverage.ts";
 
 export interface SiteRow {
   id: string;
@@ -42,6 +46,8 @@ export interface AuditRow {
   pages_queued: number;
   current_url: string | null;
   error_json: string | null;
+  /** État de l'inventaire écrit par le parcours ; NULL pour une analyse antérieure à l'inventaire. */
+  coverage_json?: string | null;
 }
 
 export interface PageRow {
@@ -61,6 +67,14 @@ export interface PageRow {
   checks_json: string;
   facts_json: string;
   categories_json: string;
+  /** NULL pour une page d'une analyse antérieure aux types : le type est alors déduit du chemin. */
+  page_type: PageType | null;
+}
+
+const isPageType = (v: unknown): v is PageType => typeof v === "string" && (PAGE_TYPES as string[]).includes(v);
+/** Type d'une page enregistrée ; pour les anciennes lignes (sans type), déduit de son chemin. */
+export function pageTypeOf(r: { page_type: string | null; path: string }): PageType {
+  return isPageType(r.page_type) ? r.page_type : classifyPath(r.path.split("?")[0]);
 }
 
 const now = () => new Date().toISOString();
@@ -174,10 +188,10 @@ export class Store {
     const row: PageRow = { ...p, id: newId("pg"), seq };
     this.db
       .prepare(
-        `INSERT INTO pages (id, audit_id, site_id, seq, url, url_key, path, title, http_status, score, issues, words, analyzed_at, checks_json, facts_json, categories_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO pages (id, audit_id, site_id, seq, url, url_key, path, title, http_status, score, issues, words, analyzed_at, checks_json, facts_json, categories_json, page_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.audit_id, row.site_id, row.seq, row.url, row.url_key, row.path, row.title, row.http_status, row.score, row.issues, row.words, row.analyzed_at, row.checks_json, row.facts_json, row.categories_json);
+      .run(row.id, row.audit_id, row.site_id, row.seq, row.url, row.url_key, row.path, row.title, row.http_status, row.score, row.issues, row.words, row.analyzed_at, row.checks_json, row.facts_json, row.categories_json, row.page_type);
     this.invalidate(p.audit_id);
     return row;
   }
@@ -196,11 +210,60 @@ export class Store {
   deleteChatMessage(id: string): void {
     this.db.prepare("DELETE FROM chat_messages WHERE id = ?").run(id);
   }
-  insertFailure(auditId: string, url: string, reason: string, status: number | null): void {
-    this.db.prepare("INSERT INTO page_failures (audit_id, url, reason, http_status) VALUES (?, ?, ?, ?)").run(auditId, url, reason, status);
+  insertFailure(auditId: string, url: string, reason: string, status: number | null, pageType: PageType | null = null): void {
+    this.db.prepare("INSERT INTO page_failures (audit_id, url, reason, http_status, page_type) VALUES (?, ?, ?, ?, ?)").run(auditId, url, reason, status, pageType);
   }
   failures(auditId: string): Array<{ url: string; reason: string; http_status: number | null }> {
     return this.db.prepare("SELECT url, reason, http_status FROM page_failures WHERE audit_id = ? ORDER BY rowid LIMIT 500").all(auditId) as never;
+  }
+
+  // ───────── Couverture et catalogue
+
+  setCoverageState(auditId: string, state: CoverageState): void {
+    this.db.prepare("UPDATE audits SET coverage_json = ? WHERE id = ?").run(JSON.stringify(state), auditId);
+  }
+  /** État de l'inventaire d'une analyse ; valeurs par défaut pour une analyse antérieure à l'inventaire. */
+  coverageState(audit: AuditRow): CoverageState {
+    const raw = (this.db.prepare("SELECT coverage_json FROM audits WHERE id = ?").get(audit.id) as Row | undefined)?.coverage_json;
+    if (typeof raw === "string" && raw) {
+      try {
+        return JSON.parse(raw) as CoverageState;
+      } catch {
+        /* état illisible : valeurs par défaut */
+      }
+    }
+    const home = this.db.prepare("SELECT facts_json FROM pages WHERE audit_id = ? AND path = '/' LIMIT 1").get(audit.id) as Row | undefined;
+    const lang = home ? ((JSON.parse(home.facts_json as string) as PageFacts).lang ?? "") : "";
+    const primary = /^([a-z]{2,3})\b/i.exec(lang)?.[1]?.toLowerCase() ?? null;
+    return legacyState(primary);
+  }
+  /** Pages notées (nombre, somme des notes) et pages en échec, par type. */
+  typeStats(auditId: string): TypeStats {
+    const analyzed = new Map<PageType, { count: number; scoreSum: number }>();
+    for (const r of this.db.prepare("SELECT page_type, path, score FROM pages WHERE audit_id = ?").all(auditId) as Array<{ page_type: string | null; path: string; score: number }>) {
+      const t = pageTypeOf(r);
+      const cur = analyzed.get(t) ?? { count: 0, scoreSum: 0 };
+      cur.count++;
+      cur.scoreSum += r.score;
+      analyzed.set(t, cur);
+    }
+    const failed = new Map<PageType, number>();
+    for (const r of this.db.prepare("SELECT page_type, url FROM page_failures WHERE audit_id = ?").all(auditId) as Array<{ page_type: string | null; url: string }>) {
+      const t = pageTypeOf({ page_type: r.page_type, path: displayPath(r.url) });
+      failed.set(t, (failed.get(t) ?? 0) + 1);
+    }
+    return { analyzed, failed };
+  }
+  setCatalogue(auditId: string, products: CatalogueProduct[]): void {
+    this.db
+      .prepare("INSERT INTO audit_catalogue (audit_id, read_at, data_json) VALUES (?, ?, ?) ON CONFLICT(audit_id) DO UPDATE SET read_at = excluded.read_at, data_json = excluded.data_json")
+      .run(auditId, now(), JSON.stringify(products));
+    this.invalidate(auditId);
+  }
+  /** Produits lus dans le catalogue sans que leur page soit ouverte ; null si le catalogue n'a pas été lu. */
+  catalogue(auditId: string): CatalogueProduct[] | null {
+    const r = this.db.prepare("SELECT data_json FROM audit_catalogue WHERE audit_id = ?").get(auditId) as Row | undefined;
+    return r ? (JSON.parse(r.data_json as string) as CatalogueProduct[]) : null;
   }
 
   private invalidate(auditId: string, drop = false): void {
@@ -224,7 +287,7 @@ export class Store {
     const version = this.versions.get(auditId) ?? 0;
     const cached = this.aggCache.get(auditId);
     if (cached && cached.version === version) return cached.agg;
-    const agg = aggregate(this.records(auditId), siteName);
+    const agg = aggregate(this.records(auditId), siteName, this.catalogue(auditId));
     this.aggCache.set(auditId, { version, agg });
     return agg;
   }
@@ -365,6 +428,7 @@ export class Store {
     return {
       id: r.id,
       url: r.url,
+      pageType: pageTypeOf(r),
       path: r.path,
       title: r.title,
       httpStatus: r.http_status,

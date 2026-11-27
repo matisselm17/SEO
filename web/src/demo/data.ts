@@ -6,7 +6,7 @@
  */
 import type {
   CategoryId, CategoryScore, Competitor, CompetitorsData, Evidence, Issue, IssueDetail, OrganicPage, OrganicPoint, OrganicQuery,
-  PageCheck, PageDetail, PageSummary, Recommendation, SearchConsoleData, Severity, Strength,
+  PageCheck, PageDetail, PageSummary, PageType, Recommendation, SearchConsoleData, Severity, Strength,
 } from "../lib/types";
 import { CATEGORY_LABELS, CRITERIA, type PageFacts } from "./criteria";
 
@@ -35,6 +35,18 @@ export interface SiteProfile {
 }
 
 const CAT_ORDER: CategoryId[] = ["balises", "contenu", "technique", "medias", "partage"];
+
+/** Type d'une page, déduit de son adresse (comme le serveur). */
+export function pageTypeOf(path: string): PageType {
+  if (path === "/") return "home";
+  if (/^\/(produits|products)\//.test(path)) return "product";
+  if (/^\/(collections|boutique)(\/|$)/.test(path)) return "collection";
+  if (/^\/(blog|blogs)\/[^/]+/.test(path)) return "article";
+  if (/^\/(blog|blogs)$/.test(path)) return "blog";
+  if (/^\/(livraison|cgv|mentions-legales|confidentialite|pages\/livraison|policies)/.test(path)) return "policy";
+  if (/^\/(en|de|es)\//.test(path)) return "other";
+  return "page";
+}
 
 export function buildPages(profile: SiteProfile, analyzedAt: string): DemoPage[] {
   const r = rng(profile.seed);
@@ -84,7 +96,7 @@ export function buildPages(profile: SiteProfile, analyzedAt: string): DemoPage[]
       ? `${p.h1} : ${["pièces tournées à la main dans notre atelier", "créations uniques en grès et porcelaine", "conseils, horaires et réservation en ligne"][idx % 3]}. Livraison soignée partout en France, retrait possible à l'atelier.`.slice(0, descLen > 160 ? 400 : 155)
       : null;
     const summary: PageSummary = {
-      id: `pg_${idx + 1}`, url, path: p.path, title: p.title, httpStatus: 200, score,
+      id: `pg_${idx + 1}`, url, pageType: pageTypeOf(p.path), path: p.path, title: p.title, httpStatus: 200, score,
       issues: checks.filter((c) => c.status !== "pass").length, words: p.words, organic: null,
     };
     const detail: PageDetail = {
@@ -143,7 +155,7 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
       .map(({ p, k }) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected }));
     out.push({
       id: c.id, category: c.category, severity: severityOf(c.max, c.id, failing.length, total),
-      title: c.issueTitle(failing.length), summary: c.summary, pagesAffected: failing.length, pagesTotal: total, pointsLost: lost,
+      title: c.issueTitle(failing.length), summary: c.summary, basis: "pages", pagesAffected: failing.length, pagesTotal: total, pointsLost: lost,
       scoreImpact: Math.round((lost / Math.max(1, total)) * 10) / 10,
       why: c.why, fix: c.fix(pages[0]?.summary.url.replace(/^https:\/\//, "").replace(/\/.*$/, "") ?? "exemple.fr"), evidence,
     });
@@ -163,7 +175,7 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
       id: "duplicate_title", category: "balises", severity: "warning",
       title: `${affected} pages partagent le même titre${dup.length > 1 ? ` (${dup.length} groupes)` : ""}`,
       summary: "Plusieurs pages portent exactement le même titre. Dans Google, elles se ressemblent et se font concurrence au lieu de se compléter.",
-      pagesAffected: affected, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
+      basis: "pages", pagesAffected: affected, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
       why: "Le titre doit dire ce qui distingue chaque page. Quand plusieurs pages ont le même, Google a du mal à choisir laquelle montrer et l'internaute ne sait pas sur laquelle cliquer.",
       fix: { steps: ["Ouvrez chacune des pages concernées.", "Donnez-leur un titre propre qui dit ce qui les distingue (le produit, la catégorie, la ville…).", "Si deux pages présentent vraiment le même contenu, gardez-en une et redirigez l'autre vers elle."], snippet: null },
       evidence: dup.flatMap((g) => g.map((p) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: `« ${p.summary.title} », identique sur ${g.length} pages`, expected: "Un titre propre à chaque page" }))),
@@ -172,6 +184,70 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
   // Ordre du serveur : critiques, puis doublons, puis les autres.
   const sorted = out.sort((a, b) => b.pointsLost - a.pointsLost);
   return [...sorted.filter((i) => i.severity === "critical"), ...dupIssues, ...sorted.filter((i) => i.severity !== "critical")];
+}
+
+/**
+ * Constats du catalogue : produits lus dans le catalogue public d'une boutique sans que leur page soit ouverte.
+ * Ils ne changent jamais la note (scoreImpact 0) et leurs preuves n'ont pas de pageId.
+ */
+const CATALOGUE_RECS: Record<string, { title: (n: number) => string; effort: "quick" | "medium" | "heavy" }> = {
+  catalogue_description: { title: (n) => `Rédiger la description de ${n} produits du catalogue`, effort: "heavy" },
+  catalogue_image_alt: { title: (n) => `Décrire les images de ${n} produits du catalogue`, effort: "medium" },
+  catalogue_title: { title: (n) => `Revoir le titre de ${n} produits du catalogue`, effort: "medium" },
+};
+
+export function catalogueIssuesOf(products: DemoPage[]): IssueDetail[] {
+  const total = products.length;
+  if (!total) return [];
+  const out: IssueDetail[] = [];
+  const pick = (id: string) => products.map((p) => ({ p, k: p.detail.checks.find((c) => c.id === id)! })).filter((x) => x.k.status !== "pass");
+  const desc = pick("meta_description").filter((x) => x.k.status === "fail");
+  if (desc.length) {
+    out.push({
+      id: "catalogue_description", category: "balises", severity: "warning", basis: "catalogue",
+      title: `${desc.length} produits du catalogue n'ont pas de description`,
+      summary: "Dans le catalogue de la boutique, ces fiches produits n'ont pas de description. Google affichera alors un extrait choisi au hasard dans la page.",
+      pagesAffected: desc.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
+      why: "La description est le texte affiché sous le titre dans Google. Sur une fiche produit, c'est l'argument qui donne envie de cliquer plutôt que chez un concurrent.",
+      fix: { steps: ["Dans l'administration de la boutique, ouvrez « Produits ».", "Pour chaque produit listé, remplissez « Référencement naturel » > « Méta-description » (120 à 155 caractères)."], snippet: null },
+      evidence: desc.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+    });
+  }
+  const alt = pick("image_alt");
+  if (alt.length) {
+    out.push({
+      id: "catalogue_image_alt", category: "medias", severity: "warning", basis: "catalogue",
+      title: `Les images de ${alt.length} produits n'ont pas toutes de texte alternatif`,
+      summary: "Dans le catalogue, des photos de produits n'ont pas de texte alternatif : Google Images ne sait pas ce qu'elles montrent.",
+      pagesAffected: alt.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
+      why: "Le texte alternatif décrit l'image à Google et aux personnes malvoyantes. Pour une boutique, c'est aussi une porte d'entrée par Google Images.",
+      fix: { steps: ["Ouvrez chaque produit listé, puis chaque image.", "Cliquez sur « Ajouter un texte alternatif » et décrivez ce qu'on voit : le produit, sa couleur, sa matière."], snippet: null },
+      evidence: alt.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+    });
+  }
+  const title = pick("title");
+  if (title.length) {
+    out.push({
+      id: "catalogue_title", category: "balises", severity: "info", basis: "catalogue",
+      title: `Le titre de ${title.length} produits est trop court ou trop long`,
+      summary: "Le titre d'une fiche produit est la ligne cliquable dans Google. Trop court, il ne dit pas assez ; trop long, il est coupé.",
+      pagesAffected: title.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
+      why: "Un bon titre de produit dit ce qu'est le produit et ce qui le distingue, en 30 à 60 caractères.",
+      fix: { steps: ["Ouvrez chaque produit listé.", "Dans « Référencement naturel », réécrivez le titre de la page : le produit, sa matière ou sa couleur, puis la marque."], snippet: null },
+      evidence: title.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+    });
+  }
+  return out;
+}
+
+/** Ordre du serveur : à gravité égale, les constats fondés sur les pages avant ceux du catalogue. */
+export function mergeIssues(pageIssues: IssueDetail[], catalogue: IssueDetail[]): IssueDetail[] {
+  const crit = pageIssues.filter((i) => i.severity === "critical");
+  const rest = pageIssues.filter((i) => i.severity !== "critical");
+  const dups = rest.filter((i) => i.id.startsWith("duplicate_"));
+  const warn = rest.filter((i) => i.severity === "warning" && !i.id.startsWith("duplicate_"));
+  const info = rest.filter((i) => i.severity === "info");
+  return [...crit, ...dups, ...warn, ...catalogue.filter((i) => i.severity === "warning"), ...info, ...catalogue.filter((i) => i.severity === "info")];
 }
 
 export function toIssue(d: IssueDetail): Issue {
@@ -194,6 +270,13 @@ export function strengthsOf(pages: DemoPage[]): Strength[] {
 export function recommendationsOf(issues: IssueDetail[]): Recommendation[] {
   const recs = issues.map((i) => {
     const c = CRITERIA.find((x) => x.id === i.id);
+    const cat = CATALOGUE_RECS[i.id];
+    if (cat) {
+      return {
+        id: `rec_${i.id}`, issueId: i.id, title: cat.title(i.pagesAffected), impact: "low", effort: cat.effort,
+        pagesAffected: i.pagesAffected, scoreGain: 0, pointsToGain: 0, rank: 0, steps: i.fix.steps,
+      } as Recommendation;
+    }
     if (!c) {
       return {
         id: `rec_${i.id}`, issueId: i.id, title: `Donner un titre unique à ${i.pagesAffected} pages`, impact: "medium", effort: "medium",
@@ -209,7 +292,7 @@ export function recommendationsOf(issues: IssueDetail[]): Recommendation[] {
   });
   const effortW = { quick: 1, medium: 2, heavy: 3 } as const;
   // Les doublons (aucun point) sont placés juste après les actions des problèmes critiques.
-  const val = (r: Recommendation) => (r.pointsToGain === 0 ? 40 : r.pointsToGain) / effortW[r.effort];
+  const val = (r: Recommendation) => (r.issueId.startsWith("catalogue_") ? 1 : r.pointsToGain === 0 ? 40 : r.pointsToGain) / effortW[r.effort];
   recs.sort((a, b) => val(b) - val(a));
   recs.forEach((r, i) => (r.rank = i + 1));
   return recs;
@@ -341,6 +424,23 @@ const lunePaths: SiteProfile["paths"] = [
   { path: "/revendeurs", title: "Revendeurs et boutiques partenaires", h1: "Où trouver nos pièces", words: 190 },
   { path: "/presse", title: "Atelier Lune dans la presse", h1: "Presse", words: 160 },
 ];
+
+/** Produits de la boutique Atelier Lune présents dans le sitemap et le catalogue, au-delà des pages de base. */
+function luneCatalogue(count: number): SiteProfile["paths"] {
+  const r = rng(17);
+  const kinds = ["Bol", "Tasse", "Assiette", "Vase", "Mug", "Coupelle", "Plat", "Pichet", "Bougeoir", "Saladier"];
+  const glazes = ["bleu nuit", "sable", "écume", "brume", "galet", "marée", "lune", "argile", "ardoise", "sel"];
+  const out: SiteProfile["paths"] = [];
+  for (let i = 0; i < count; i++) {
+    const k = kinds[i % kinds.length];
+    const g = glazes[Math.floor(r() * glazes.length)];
+    const slug = `${k.toLowerCase()}-${g.replace(/\s|é/g, (m) => (m === "é" ? "e" : "-"))}-${i + 1}`;
+    const t = r();
+    out.push({ path: `/produits/${slug}`, title: t < 0.25 ? `${k} ${g}` : `${k} ${g} en grès tourné à la main | Atelier Lune`, h1: `${k} ${g}`, words: 60 + Math.floor(r() * 220) });
+  }
+  return out;
+}
+export const LUNE_CATALOGUE = luneCatalogue(50);
 
 export const LUNE: SiteProfile = {
   host: "atelier-lune.example",

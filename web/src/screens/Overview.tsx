@@ -2,7 +2,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Bot, CircleCheck, FileUp, Info, Octagon
 import type { Issue, Overview, Recommendation, SiteSummary, Strength } from "../lib/types";
 import { useOverview, useSettings } from "../lib/queries";
 import { sitePath } from "../lib/router";
-import { fmtCompact, fmtDec, fmtInt, fmtPct, fmtPeriod, fmtPosition, fmtScorePoints, pl } from "../lib/format";
+import { fmtCompact, fmtDec, fmtInt, fmtPct, fmtPeriod, fmtPosition, fmtScorePoints, pl, plural } from "../lib/format";
 import { CATEGORY_LABEL, EFFORT_LABEL, IMPACT_LABEL, SEVERITY_LABEL, scoreVerdict } from "../lib/score";
 import { isRelaunching, isUnreliable, noResultsReason, resultsOf } from "../lib/results";
 import { PageHeader, Section } from "../ui/Section";
@@ -14,6 +14,7 @@ import { Meter } from "../ui/Meter";
 import { Skeleton, SkeletonRows, LoadingLabel } from "../ui/Skeleton";
 import { TrendChart } from "../ui/TrendChart";
 import { useMedia } from "../ui/useVirtual";
+import { CoverageSection } from "./Coverage";
 import { FailedPagesToggle, NoResults, QueryError, RelaunchButton, ReliabilityNote, auditLine, isRunning } from "./common";
 
 function Delta({ value, previous }: { value: number; previous: number | null }) {
@@ -43,6 +44,10 @@ function ScoreBand({ data, site }: { data: Overview; site: SiteSummary }) {
           <div className="scoreband__verdict">
             <p className="scoreband__verdict-title">{scoreVerdict(s.value)}</p>
             <Delta value={s.value} previous={s.previous} />
+            <p className="scoreband__basis">
+              Moyenne de {plural(data.coverage?.totals.analyzed ?? r?.pagesDone ?? data.counts.pages, "page ouverte", "pages ouvertes")} en entier
+              {data.coverage && !data.coverage.complete && data.coverage.totals.onSite !== null ? ` sur ${fmtInt(data.coverage.totals.onSite)}` : ""}
+            </p>
             {running && <p className="scoreband__live">Provisoire : la note évolue à chaque page notée.</p>}
             {isUnreliable(site) && <p className="scoreband__warn">Note peu fiable</p>}
           </div>
@@ -94,7 +99,7 @@ function IssueRow({ issue, siteId }: { issue: Issue; siteId: string }) {
           <span className="issue-row__summary">{issue.summary}</span>
         </span>
         <span className="issue-row__meta">
-          <span className="issue-row__pages tnum">{issue.pagesAffected} / {issue.pagesTotal} {pl(issue.pagesTotal, "page", "pages")}</span>
+          <span className="issue-row__pages tnum">{issue.pagesAffected} / {issue.pagesTotal} {issue.basis === "catalogue" ? pl(issue.pagesTotal, "produit", "produits") : pl(issue.pagesTotal, "page", "pages")}</span>
           <Meter value={issue.pagesAffected} max={issue.pagesTotal} tone={issue.severity === "critical" ? "critical" : issue.severity === "warning" ? "warning" : "neutral"} />
         </span>
         <ArrowRight size={16} className="row-arrow" aria-hidden />
@@ -230,6 +235,7 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
             />
           ) : (
             <>
+              {data.coverage && <CoverageSection coverage={data.coverage} site={site} scoreValue={data.score?.value ?? null} />}
               <div className="overview-cols">
                 <Section
                   id="top-issues"

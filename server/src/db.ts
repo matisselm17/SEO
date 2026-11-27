@@ -93,6 +93,12 @@ CREATE TABLE IF NOT EXISTS competitors (
   data_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audit_catalogue (
+  audit_id TEXT PRIMARY KEY REFERENCES audits(id) ON DELETE CASCADE,
+  read_at TEXT NOT NULL,
+  data_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -107,7 +113,25 @@ export function openDb(dataDir: string | ":memory:"): DB {
   }
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/**
+ * Colonnes ajoutées depuis la première version. Ajout seulement, sans perte : les anciennes lignes gardent
+ * NULL, que le code lit comme une valeur par défaut (type de page déduit du chemin, couverture « par les liens »).
+ */
+const ADDED_COLUMNS: Array<[table: string, column: string, type: string]> = [
+  ["pages", "page_type", "TEXT"],
+  ["page_failures", "page_type", "TEXT"],
+  ["audits", "coverage_json", "TEXT"],
+];
+
+function migrate(db: DB): void {
+  for (const [table, column, type] of ADDED_COLUMNS) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }
 
 /** Exécute une fonction dans une transaction. */

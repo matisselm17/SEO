@@ -52,9 +52,18 @@ export const CATEGORY_HINT: Record<CategoryId, string> = {
  * Doublons (même titre ou même description sur plusieurs pages) : ils ne changent pas la note.
  * Identifiés par leur identifiant ; à défaut, par un impact nul sans aucun point perdu.
  */
-export function isDuplicateIssue(i: { id: string; scoreImpact: number; pointsLost: number }): boolean {
+export function isDuplicateIssue(i: { id: string; scoreImpact: number; pointsLost: number; basis?: "pages" | "catalogue" }): boolean {
+  if (i.basis === "catalogue") return false;
   return i.id.startsWith("duplicate_") || (i.scoreImpact === 0 && i.pointsLost === 0);
 }
+
+/** Constat fondé sur le catalogue de la boutique (produits dont la page n'a pas été ouverte). */
+export function isCatalogueIssue(i: { basis?: "pages" | "catalogue" }): boolean {
+  return i.basis === "catalogue";
+}
+
+export const CATALOGUE_NOTE =
+  "Hors note : ces produits ont été lus dans le catalogue de la boutique, sans ouvrir leur page. Seules les pages ouvertes en entier sont notées. Mais ce que le catalogue contient est ce que Google affiche : le corriger compte quand même.";
 
 export const DUPLICATE_NOTE =
   "Ne change pas la note : elle est calculée page par page. Mais des pages identiques dans Google se font concurrence, et l'internaute ne sait pas laquelle choisir.";

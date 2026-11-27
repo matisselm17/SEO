@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import type { Effort, SiteSummary } from "../lib/types";
-import { useRecommendations } from "../lib/queries";
+import { useIssues, useRecommendations } from "../lib/queries";
 import { sitePath } from "../lib/router";
-import { DUPLICATE_NOTE, EFFORT_HINT, EFFORT_LABEL, IMPACT_LABEL } from "../lib/score";
+import { CATALOGUE_NOTE, DUPLICATE_NOTE, EFFORT_HINT, EFFORT_LABEL, IMPACT_LABEL } from "../lib/score";
 import { isRelaunching, noResultsReason } from "../lib/results";
 import { fmtScorePoints, plural } from "../lib/format";
 import { PageHeader } from "../ui/Section";
@@ -18,6 +18,9 @@ type F = "all" | Effort;
 
 export function RecommendationsScreen({ site }: { site: SiteSummary }) {
   const q = useRecommendations(site.id);
+  // Pour savoir quelles actions viennent du catalogue (le format le porte sur le problème).
+  const issuesQ = useIssues(site.id);
+  const catalogueIds = new Set((issuesQ.data?.issues ?? []).filter((i) => i.basis === "catalogue").map((i) => i.id));
   const [f, setF] = useState<F>("all");
   const recs = q.data?.recommendations;
   const counts = useMemo(() => {
@@ -82,6 +85,8 @@ export function RecommendationsScreen({ site }: { site: SiteSummary }) {
                     <h2 className="rec__title">{r.title}</h2>
                     {r.scoreGain > 0 ? (
                       <span className="rec__gain tnum">+{fmtScorePoints(r.scoreGain)}<span className="rec__gain-unit">sur la note</span></span>
+                    ) : catalogueIds.has(r.issueId) ? (
+                      <span className="rec__gain rec__gain--none">Hors note</span>
                     ) : r.pointsToGain === 0 ? (
                       <span className="rec__gain rec__gain--none">Ne change pas la note</span>
                     ) : null}
@@ -89,9 +94,13 @@ export function RecommendationsScreen({ site }: { site: SiteSummary }) {
                   <div className="rec__tags">
                     <Tag tone={r.impact === "high" ? "accent" : "neutral"}>{IMPACT_LABEL[r.impact]}</Tag>
                     <Tag>Effort : {EFFORT_LABEL[r.effort].toLowerCase()}</Tag>
-                    <span className="small muted">{plural(r.pagesAffected, "page concernée", "pages concernées")}</span>
+                    <span className="small muted">{catalogueIds.has(r.issueId) ? plural(r.pagesAffected, "produit concerné", "produits concernés") : plural(r.pagesAffected, "page concernée", "pages concernées")}</span>
                   </div>
-                  {r.scoreGain === 0 && r.pointsToGain === 0 && <p className="rec__why">{DUPLICATE_NOTE}</p>}
+                  {catalogueIds.has(r.issueId) ? (
+                    <p className="rec__why">{CATALOGUE_NOTE}</p>
+                  ) : (
+                    r.scoreGain === 0 && r.pointsToGain === 0 && <p className="rec__why">{DUPLICATE_NOTE}</p>
+                  )}
                   <ol className="steps rec__steps">
                     {r.steps.map((s, i) => <li key={i}>{s}</li>)}
                   </ol>

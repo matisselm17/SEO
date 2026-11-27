@@ -20,7 +20,8 @@ Scénarios, avec `?demo=…` dans l'adresse (mémorisé pour l'onglet) :
 
 | Scénario | Ce qu'il montre |
 |---|---|
-| `complet` | Deux sites analysés, Search Console importée, concurrents relevés, assistant configuré |
+| `complet` | Deux sites analysés, Search Console importée, concurrents relevés, assistant configuré. Atelier Lune : couverture partielle (42 pages ouvertes en entier, 74 produits lus dans le catalogue Shopify, version anglaise signalée, « Analyser les 116 pages ») ; Maison Orlux : couverture complète (360 pages) |
+| `liens` | Atelier Lune sans sitemap : inventaire inconnu (`inventory: "links"`), aucun total inventé |
 | `vide` | Aucun site : accueil et ajout. Une adresse contenant `injoignable` renvoie `site_unreachable` |
 | `sans-gsc` | Pas d'export Search Console, conversation vide |
 | `sans-config` | Assistant et concurrents non configurés côté serveur |

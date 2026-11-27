@@ -150,7 +150,7 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
           <ol className="onboard__steps">
             <li>
               <strong>Lecture des pages</strong>
-              <span>{maxPages ? `Jusqu'à ${fmtInt(maxPages)} pages, en suivant les liens de votre site.` : "En suivant les liens de votre site."} Vous voyez l'avancée en direct et pouvez naviguer pendant ce temps.</span>
+              <span>{maxPages ? `Jusqu'à ${fmtInt(maxPages)} pages ouvertes en entier, choisies dans le plan du site type par type (accueil, produits, collections, articles…).` : "Les pages sont choisies dans le plan du site, type par type."} Vous voyez l'avancée en direct et pouvez naviguer pendant ce temps.</span>
             </li>
             <li>
               <strong>Note et problèmes</strong>

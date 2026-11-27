@@ -1,0 +1,249 @@
+{
+ "_note": "Catalogue de la boutique d'essai (site fictif). Produits sans défaut en tête ; défauts variés ensuite.",
+ "products": [
+  {
+   "handle": "collier-perle-de-lune-argent",
+   "title": "Collier perle de lune en argent massif",
+   "body_html": "<p>Ce collier perle de lune : un pendentif rond serti d'une pierre de lune laiteuse sur une chaîne fine de quarante-cinq centimètres. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/collier-perle.jpg",
+     "alt": "Collier perle de lune porté"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bague-ondine-argent",
+   "title": "Bague Ondine en argent 925 martelé",
+   "body_html": "<p>La bague Ondine : un anneau large martelé qui accroche la lumière comme une vague, disponible du 50 au 60. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bague-ondine.jpg",
+     "alt": "Bague Ondine martelée"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bracelet-maille-figaro",
+   "title": "Bracelet maille figaro en argent massif",
+   "body_html": "<p>Ce bracelet maille figaro : une maille alternée classique, fermoir mousqueton, longueur ajustable de seize à dix-neuf centimètres. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bracelet-figaro.jpg",
+     "alt": "Bracelet maille figaro"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bague-luna",
+   "title": "Bague Luna",
+   "body_html": "<p>La bague Luna : un croissant de lune ajouré sur un anneau fin, à porter seule ou en accumulation. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bague-luna.jpg",
+     "alt": "Bague Luna croissant"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bracelet-jonc-dore",
+   "title": "Bracelet jonc doré à l'or fin 18 carats",
+   "body_html": "",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/jonc-dore.jpg",
+     "alt": "Bracelet jonc doré"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "boucles-creoles-argent",
+   "title": "Boucles d'oreilles créoles en argent",
+   "body_html": "<p>Créoles fines, <em>légères</em>.</p>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/creoles.jpg",
+     "alt": "Créoles en argent"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bague-solitaire-zircon",
+   "title": "Bague solitaire zircon en argent 925",
+   "body_html": "<p>Cette bague solitaire : un zircon taille brillant de six millimètres monté sur quatre griffes délicates. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/solitaire-1.jpg",
+     "alt": null
+    },
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/solitaire-2.jpg",
+     "alt": ""
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "pendentif-etoile-du-berger",
+   "title": "Pendentif étoile du berger en argent massif 925 avec chaîne forçat ajustable incluse",
+   "body_html": "<p>Ce pendentif étoile : une étoile à huit branches gravée à la main, accompagnée de sa chaîne forçat. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/etoile.jpg",
+     "alt": "Pendentif étoile du berger"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "piercing-nombril-coeur",
+   "title": "Piercing nombril cœur en titane",
+   "body_html": "<p>Piercing en titane de grade implantaire, hypoallergénique, tige de 1,6 mm et longueur 10 mm. Stérilisé et livré sous sachet.</p>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/nombril-coeur.jpg",
+     "alt": "Piercing nombril cœur"
+    }
+   ],
+   "product_type": "Piercing"
+  },
+  {
+   "handle": "piercing-nombril-lune",
+   "title": "Piercing nombril lune en titane",
+   "body_html": "<p>Piercing en titane de grade implantaire, hypoallergénique, tige de 1,6 mm et longueur 10 mm. Stérilisé et livré sous sachet.</p>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/nombril-lune.jpg",
+     "alt": "Piercing nombril lune"
+    }
+   ],
+   "product_type": "Piercing"
+  },
+  {
+   "handle": "chaine-cheville-perles-or",
+   "title": "Chaîne de cheville perles",
+   "body_html": "<p>Cette chaîne de cheville dorée : des perles d'eau douce irrégulières sur une chaîne dorée à l'or fin. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/cheville-or.jpg",
+     "alt": "Chaîne de cheville dorée"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "chaine-cheville-perles-argent",
+   "title": "Chaîne de cheville perles",
+   "body_html": "<p>Cette chaîne de cheville argentée : des perles d'eau douce irrégulières sur une chaîne en argent massif. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/cheville-argent.jpg",
+     "alt": "Chaîne de cheville argentée"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "collier-medaille-soleil",
+   "title": "Collier médaille soleil en argent doré",
+   "body_html": "<p>Ce bijou : une médaille ronde gravée d'un soleil rayonnant, chaîne de quarante centimètres. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/collier-medaille-soleil.jpg",
+     "alt": "Collier médaille soleil en argent doré"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bague-jonc-fine-or",
+   "title": "Bague jonc fine en vermeil, finition polie",
+   "body_html": "<p>Ce bijou : un anneau très fin en vermeil qui se superpose facilement aux autres bagues. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bague-jonc-fine-or.jpg",
+     "alt": "Bague jonc fine en vermeil, finition polie"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "boucles-puces-lune",
+   "title": "Boucles d'oreilles puces lune en argent",
+   "body_html": "<p>Ce bijou : deux petites lunes ciselées montées sur tige, discrètes et légères à porter. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/boucles-puces-lune.jpg",
+     "alt": "Boucles d'oreilles puces lune en argent"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "collier-ras-de-cou-perles",
+   "title": "Collier ras de cou en perles d'eau douce",
+   "body_html": "<p>Ce bijou : un rang de perles baroques blanches assemblées à la main sur fil de soie. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/collier-ras-de-cou-perles.jpg",
+     "alt": "Collier ras de cou en perles d'eau douce"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bracelet-cordon-rouge",
+   "title": "Bracelet cordon rouge et médaille en argent",
+   "body_html": "<p>Ce bijou : un cordon tressé ajustable orné d'une petite médaille en argent massif. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bracelet-cordon-rouge.jpg",
+     "alt": "Bracelet cordon rouge et médaille en argent"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "piercing-helix-etoile",
+   "title": "Piercing hélix étoile en titane et zircon",
+   "body_html": "<p>Ce bijou : une étoile sertie de zircons sur une tige courte adaptée au cartilage. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/piercing-helix-etoile.jpg",
+     "alt": "Piercing hélix étoile en titane et zircon"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "bague-chevaliere-ovale",
+   "title": "Bague chevalière ovale en argent à graver",
+   "body_html": "<p>Ce bijou : une chevalière au plateau ovale lisse, prête à recevoir vos initiales. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/bague-chevaliere-ovale.jpg",
+     "alt": "Bague chevalière ovale en argent à graver"
+    }
+   ],
+   "product_type": "Bijou"
+  },
+  {
+   "handle": "collier-trefle-nacre",
+   "title": "Collier trèfle en nacre et argent doré",
+   "body_html": "<p>Ce bijou : un trèfle à quatre feuilles en nacre blanche serti d'un liseré doré. Chaque pièce est façonnée à la main dans notre atelier lyonnais, polie puis contrôlée une à une avant expédition. Le métal est garanti sans nickel, pensé pour les peaux sensibles et un port quotidien. <strong>Livrée</strong> dans un écrin en coton recyclé, prête à offrir, avec une carte d'entretien.</p><ul><li>Retours gratuits sous trente jours</li><li>Garantie deux ans sur la finition et les fermoirs</li></ul>",
+   "images": [
+    {
+     "src": "https://cdn.shopify.com/s/files/1/0000/0001/products/collier-trefle-nacre.jpg",
+     "alt": "Collier trèfle en nacre et argent doré"
+    }
+   ],
+   "product_type": "Bijou"
+  }
+ ]
+}

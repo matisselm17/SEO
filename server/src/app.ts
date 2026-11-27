@@ -12,6 +12,7 @@ import type {
   ChatRequest,
   ChatState,
   CompetitorsData,
+  CoverageResponse,
   CreateSiteRequest,
   FailedPagesResponse,
   HealthResponse,
@@ -32,7 +33,7 @@ import {
   runCompetitorSurvey,
   type SearchProvider,
 } from "./competitors/competitors.ts";
-import type { Config } from "./config.ts";
+import { DEFAULT_MAX_PAGES, MAX_PAGES_LIMITS, type Config } from "./config.ts";
 import type { Crawler } from "./crawl/crawler.ts";
 import { bareHost, normalizeUrl, parseUserUrl } from "./crawl/url.ts";
 import { errors, HttpError, toHttpError } from "./errors.ts";
@@ -43,7 +44,7 @@ import { compress, guardMutations, JSON_LIMIT, limitBody, RateLimiter, securityH
 import { displayPath } from "./crawl/url.ts";
 import type { PageFacts } from "./analyse/grille.ts";
 import type { SiteRow, Store } from "./store.ts";
-import { isPageSort, issues, listPages, overview, recommendations } from "./views.ts";
+import { coverage, isPageSort, issues, listPages, overview, recommendations } from "./views.ts";
 
 export interface AppDeps {
   config: Config;
@@ -56,8 +57,7 @@ export interface AppDeps {
   searchProvider: SearchProvider | null;
 }
 
-export const MAX_PAGES_LIMITS = { min: 1, max: 500 };
-const DEFAULT_MAX_PAGES = 100;
+export { MAX_PAGES_LIMITS };
 const PING_MS = 20_000;
 
 /** Réponse JSON d'un GET avec ETag ; 304 si l'interface a déjà cette version. */
@@ -323,6 +323,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!row || row.site_id !== s.id) throw errors.notFound("Cette page");
     return getJson(c, { page: store.pageDetail(row, store.gscIndex(s.id)) } satisfies PageResponse);
   });
+  app.get("/api/sites/:siteId/coverage", (c) => getJson(c, { coverage: coverage(store, site(c).id) } satisfies CoverageResponse));
   app.get("/api/sites/:siteId/failed-pages", (c) => {
     const s = site(c);
     const audit = store.resultsAudit(s.id);

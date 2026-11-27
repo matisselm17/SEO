@@ -2,6 +2,7 @@
  * Réponses composées (vue d'ensemble, problèmes, pages, recommandations) au format de shared/api.ts.
  */
 import type {
+  Coverage,
   IssuesResponse,
   Overview,
   PageSort,
@@ -9,8 +10,10 @@ import type {
   RecommendationsResponse,
 } from "../../shared/api.ts";
 import { toIssue } from "./analyse/aggregate.ts";
+import { MAX_PAGES_LIMITS } from "./config.ts";
+import { buildCoverage } from "./coverage.ts";
 import { totalsOf } from "./gsc/import.ts";
-import type { SiteRow, Store } from "./store.ts";
+import type { AuditRow, SiteRow, Store } from "./store.ts";
 
 const PAGE_SORTS: PageSort[] = ["score_asc", "score_desc", "issues_desc", "clicks_desc", "path_asc"];
 export const isPageSort = (s: string): s is PageSort => (PAGE_SORTS as string[]).includes(s);
@@ -39,8 +42,19 @@ export function overview(store: Store, site: SiteRow): Overview {
     topIssues: issues.slice(0, 5).map(toIssue),
     strengths: (agg?.strengths ?? []).slice(0, 5),
     actions: (agg?.recommendations ?? []).slice(0, 5),
+    coverage: audit ? auditCoverage(store, audit) : null,
     organic: gsc ? { period: gsc.data.period, totals: totalsOf(gsc.data), series: gsc.data.series } : null,
   };
+}
+
+/** Couverture de l'analyse affichée ; null tant qu'aucune page n'a été notée. */
+export function coverage(store: Store, siteId: string): Coverage | null {
+  const audit = store.resultsAudit(siteId);
+  return audit ? auditCoverage(store, audit) : null;
+}
+
+export function auditCoverage(store: Store, audit: AuditRow): Coverage {
+  return buildCoverage(store.coverageState(audit), store.typeStats(audit.id), MAX_PAGES_LIMITS.max);
 }
 
 export function issues(store: Store, site: SiteRow): IssuesResponse {

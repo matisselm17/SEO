@@ -16,17 +16,18 @@
  */
 import examples from "../../../docs/exemples/exemples.json";
 import type {
-  ApiError, AuditStatus, ChatMessage, CompetitorsData, ErrorCode, FailedPage, Overview, SearchConsoleData, Settings, SiteEvent, SiteSummary,
+  ApiError, AuditStatus, ChatMessage, CompetitorsData, Coverage, CoverageRow, ErrorCode, FailedPage, IssueDetail, Overview, PageType,
+  SearchConsoleData, Settings, SiteEvent, SiteSummary,
 } from "../lib/types";
 import {
-  LUNE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, categoriesOf, issuesOf,
-  recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
+  LUNE, LUNE_CATALOGUE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, catalogueIssuesOf, categoriesOf,
+  issuesOf, mergeIssues, pageTypeOf, recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
 } from "./data";
 
 type Scenario =
   | "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "relance" | "relance-figee"
-  | "echec" | "coupure" | "erreurs" | "lent";
-const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "relance", "relance-figee", "echec", "coupure", "erreurs", "lent"];
+  | "echec" | "coupure" | "erreurs" | "lent" | "liens" | "couverture-complete" | "catalogue-indispo" | "inventaire";
+const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "relance", "relance-figee", "echec", "coupure", "erreurs", "lent", "liens", "couverture-complete", "catalogue-indispo", "inventaire"];
 
 function readScenario(): Scenario {
   const fromUrl = new URLSearchParams(location.search).get("demo") as Scenario | null;
@@ -65,7 +66,15 @@ interface Run {
 interface DemoSite {
   summary: SiteSummary;
   profile: SiteProfile;
+  /** Pages trouvées en suivant les liens (analyse de base). */
   truth: DemoPage[];
+  /** Inventaire du sitemap (langue principale) : toutes les pages du site, ouvertes ou non. */
+  inventory: DemoPage[];
+  inventoryMode: "sitemap" | "links";
+  platform: "shopify" | null;
+  /** Le catalogue public de la boutique répond-il ? (scénario « catalogue-indispo » : non) */
+  catalogueOk: boolean;
+  otherLocales: string[];
   /** Analyse dont les résultats sont affichés (SiteSummary.results). */
   shown: Run | null;
   /** Dernière analyse lancée (SiteSummary.audit). */
@@ -81,6 +90,17 @@ interface DemoSite {
 const sites: DemoSite[] = [];
 let seq = 100;
 const nextId = (p: string) => `${p}_${(seq++).toString(36)}`;
+
+/** Parcours équilibré dans l'inventaire : l'accueil, puis les types à tour de rôle. */
+function balanced(pool: DemoPage[], max: number): DemoPage[] {
+  const order: PageType[] = ["home", "product", "collection", "article", "blog", "page", "policy", "other"];
+  const byType = order.map((t) => pool.filter((p) => p.summary.pageType === t));
+  const out: DemoPage[] = [];
+  for (let k = 0; out.length < Math.min(max, pool.length); k++) {
+    for (const list of byType) if (list[k] && out.length < max) out.push(list[k]);
+  }
+  return out;
+}
 
 function failedPage(host: string, path: string, httpStatus: number | null, reason: string): FailedPage {
   return { url: `https://${host}${path}`, path, httpStatus, reason };
@@ -118,8 +138,15 @@ function doneRun(truth: DemoPage[], end: string, failed: FailedPage[]): Run {
   };
 }
 
-function makeSite(id: string, name: string, profile: SiteProfile, createdAt: string, opts: { gsc: boolean; auditEnd: string; previous: number | null; competitors: CompetitorsData; chat: ChatMessage[]; limit?: number; failed?: FailedPage[] }): DemoSite {
-  const truth = buildPages(profile, opts.auditEnd).slice(0, opts.limit ?? Infinity);
+function makeSite(id: string, name: string, profile: SiteProfile, createdAt: string, opts: {
+  gsc: boolean; auditEnd: string; previous: number | null; competitors: CompetitorsData; chat: ChatMessage[]; limit?: number; failed?: FailedPage[];
+  extra?: SiteProfile["paths"]; inventoryMode?: "sitemap" | "links"; platform?: "shopify" | null; otherLocales?: string[]; catalogueOk?: boolean;
+}): DemoSite {
+  const all = buildPages({ ...profile, paths: [...profile.paths, ...(opts.extra ?? [])] }, opts.auditEnd);
+  const base = all.slice(0, Math.min(opts.limit ?? Infinity, profile.paths.length));
+  const inventory = opts.limit ? base : all;
+  // Une analyse ouvre au plus maxPagesLimits.max pages, choisies type par type.
+  const truth = base.length > settings.maxPagesLimits.max ? balanced(inventory, settings.maxPagesLimits.max) : base;
   const gsc = opts.gsc
     ? buildSearchConsole(truth, profile.seed + 1, "2026-11-26T14:05:00.000Z", {
         queries: LUNE_QUERIES, host: profile.host, clicksPerDay: 20,
@@ -134,7 +161,9 @@ function makeSite(id: string, name: string, profile: SiteProfile, createdAt: str
       id, url: `https://${profile.host}/`, host: profile.host, name, createdAt, audit: null, results: null, score: null, pagesAnalyzed: 0,
       searchConsole: { available: !!gsc, importedAt: gsc?.importedAt ?? null },
     },
-    profile, truth, shown: run, current: run, previousScore: opts.previous, gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
+    profile, truth, inventory, inventoryMode: opts.inventoryMode ?? "sitemap", platform: opts.platform === undefined ? "shopify" : opts.platform,
+    catalogueOk: opts.catalogueOk ?? true, otherLocales: opts.otherLocales ?? [],
+    shown: run, current: run, previousScore: opts.previous, gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
   };
   sync(site);
   return site;
@@ -143,9 +172,18 @@ function makeSite(id: string, name: string, profile: SiteProfile, createdAt: str
 if (scenario !== "vide") {
   const competitorsLune: CompetitorsData = scenario === "sans-config" ? { available: false, reason: "not_configured" } : buildCompetitors(LUNE.host);
   sites.push(
+    // Couverture partielle : 42 pages ouvertes en entier, les autres produits lus dans le catalogue, version anglaise signalée,
+    // « Analyser les N pages » proposé (inventaire sous le plafond).
+    // « liens » : pas de sitemap, inventaire inconnu. « couverture-complete » : tout est ouvert, une page non chargée.
+    // « catalogue-indispo » : boutique dont le catalogue ne répond pas.
     makeSite("site_8fk2", "Atelier Lune", LUNE, "2026-11-20T09:12:00.000Z", {
       gsc: scenario !== "sans-gsc", auditEnd: "2026-11-26T14:01:42.000Z", previous: 61, competitors: competitorsLune,
       chat: scenario === "sans-gsc" || scenario === "sans-config" ? [] : exChat.messages,
+      extra: scenario === "liens" || scenario === "couverture-complete" ? [] : LUNE_CATALOGUE,
+      inventoryMode: scenario === "liens" ? "links" : "sitemap",
+      platform: scenario === "liens" ? null : "shopify",
+      otherLocales: scenario === "liens" ? [] : ["en"],
+      catalogueOk: scenario !== "catalogue-indispo",
     }),
     makeSite("site_orlx", "Maison Orlux", ORLUX, "2026-11-12T10:30:00.000Z", {
       gsc: false, auditEnd: "2026-11-24T09:40:00.000Z", previous: null,
@@ -233,9 +271,58 @@ function shownPages(site: DemoSite): DemoPage[] {
   return site.shown?.pages ?? [];
 }
 
+const TYPE_ORDER: PageType[] = ["home", "product", "collection", "article", "blog", "page", "policy", "other"];
+const TYPE_LABEL: Record<PageType, string> = {
+  home: "Accueil", product: "Produits", collection: "Collections", article: "Articles de blog", blog: "Blog",
+  page: "Pages", policy: "Politiques et mentions", other: "Autres",
+};
+
+/** Produits de l'inventaire dont la page n'a pas été ouverte : lus dans le catalogue (boutique Shopify). */
+function catalogueProducts(site: DemoSite): DemoPage[] {
+  if (site.platform !== "shopify" || site.inventoryMode !== "sitemap" || !site.catalogueOk || !site.shown) return [];
+  const opened = new Set(site.shown.pages.map((p) => p.summary.id));
+  return site.inventory.filter((p) => p.summary.pageType === "product" && !opened.has(p.summary.id));
+}
+
+function coverageOf(site: DemoSite): Coverage | null {
+  const run = site.shown;
+  if (!run || !run.pages.length) return null;
+  const links = site.inventoryMode === "links";
+  const catalogue = catalogueProducts(site);
+  const rows: CoverageRow[] = [];
+  for (const type of TYPE_ORDER) {
+    const onSite = links ? null : site.inventory.filter((p) => p.summary.pageType === type).length;
+    const opened = run.pages.filter((p) => p.summary.pageType === type);
+    const failed = run.failed.filter((f) => pageTypeOf(f.path) === type).length;
+    const via = catalogue.filter((p) => p.summary.pageType === type).length;
+    if (!opened.length && !via && !failed && !onSite) continue;
+    rows.push({ type, label: TYPE_LABEL[type], onSite, analyzed: opened.length, viaCatalogue: via, failed, score: siteScore(opened) });
+  }
+  const analyzed = run.pages.length;
+  const onSite = links ? null : site.inventory.length;
+  // Complet : toutes les pages inventoriées ont été tentées (ouvertes ou non chargées).
+  const complete = !links && analyzed + run.failed.length >= site.inventory.length;
+  const productsLeft = site.inventory.filter((p) => p.summary.pageType === "product").length - run.pages.filter((p) => p.summary.pageType === "product").length;
+  return {
+    platform: site.platform,
+    catalogue: site.platform !== "shopify" || links ? null : !site.catalogueOk ? "unavailable" : catalogue.length > 0 ? "read" : productsLeft > 0 ? "read" : "not_needed",
+    inventory: site.inventoryMode,
+    rows,
+    totals: { onSite, analyzed, viaCatalogue: catalogue.length, failed: run.failed.length },
+    complete,
+    mainLocale: "fr",
+    otherLocales: site.otherLocales,
+    fullAuditMaxPages: complete || onSite === null || onSite > settings.maxPagesLimits.max ? null : onSite,
+  };
+}
+
+function issuesFor(site: DemoSite): IssueDetail[] {
+  return mergeIssues(issuesOf(shownPages(site)), catalogueIssuesOf(catalogueProducts(site)));
+}
+
 function overviewOf(site: DemoSite): Overview {
   const pages = shownPages(site);
-  const issues = issuesOf(pages);
+  const issues = issuesFor(site);
   const score = siteScore(pages);
   const counts = { critical: 0, warning: 0, info: 0 };
   issues.forEach((i) => counts[i.severity]++);
@@ -246,6 +333,7 @@ function overviewOf(site: DemoSite): Overview {
     topIssues: issues.slice(0, 5).map(toIssue),
     strengths: strengthsOf(pages).slice(0, 5),
     actions: recommendationsOf(issues).slice(0, 5),
+    coverage: coverageOf(site),
     organic: site.gsc ? { period: site.gsc.period, totals: site.gsc.totals, series: site.gsc.series } : null,
   };
 }
@@ -283,7 +371,7 @@ function sseResponse(start: (push: (event: string, data: unknown) => void, close
 
 function startAudit(site: DemoSite, maxPages: number, frozenAt?: number) {
   if (site.timer) clearInterval(site.timer);
-  const truth = site.truth.slice(0, Math.min(maxPages, site.truth.length));
+  const truth = balanced(site.inventoryMode === "sitemap" ? site.inventory : site.truth, maxPages);
   const run: Run = {
     audit: {
       id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages,
@@ -334,6 +422,22 @@ if (scenario === "analyse" || scenario === "analyse-figee") {
     startAudit(s, 100, scenario === "analyse-figee" ? 17 : undefined);
   }
 }
+if (scenario === "inventaire") {
+  // Première analyse, encore à l'inventaire : l'adresse lue est un sitemap, aucune page notée.
+  const s = sites[0];
+  if (s) {
+    s.shown = null;
+    s.current = {
+      audit: {
+        id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages: settings.maxPagesDefault,
+        pagesDone: 0, pagesFailed: 0, pagesQueued: 0, currentUrl: `https://${s.profile.host}/sitemap_products_1.xml?from=1&to=250`, error: null,
+      },
+      pages: [],
+      failed: [],
+    };
+    sync(s);
+  }
+}
 if (scenario === "relance" || scenario === "relance-figee") {
   // Relance : les résultats de l'analyse terminée restent affichés jusqu'à la fin de la nouvelle.
   const s = sites[0];
@@ -343,8 +447,7 @@ if (scenario === "relance" || scenario === "relance-figee") {
 // ───────── Assistant
 
 function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: string; sources: string[] } {
-  const issues = issuesOf(shownPages(site));
-  const recs = recommendationsOf(issues);
+  const recs = recommendationsOf(issuesFor(site));
   const low = q.toLowerCase();
   if (/visite|clic|trafic|rapport/.test(low)) {
     if (!site.gsc) {
@@ -489,8 +592,10 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
   switch (sub) {
     case "overview":
       return json(overviewOf(site));
+    case "coverage":
+      return json({ coverage: coverageOf(site) });
     case "issues": {
-      const issues = issuesOf(pages);
+      const issues = issuesFor(site);
       if (parts[3]) {
         const d = issues.find((i) => i.id === parts[3]);
         return d ? json({ issue: d }) : notFound();
@@ -518,7 +623,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       return json({ pages: list.slice(offset, offset + limit), total: list.length, offset, limit });
     }
     case "recommendations":
-      return json({ recommendations: recommendationsOf(issuesOf(pages)) });
+      return json({ recommendations: recommendationsOf(issuesFor(site)) });
     case "search-console": {
       if (method === "DELETE") {
         site.gsc = null;

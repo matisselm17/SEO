@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { ArrowRight, Bot, Search } from "lucide-react";
+import { ArrowRight, Bot, ExternalLink, Package, Search } from "lucide-react";
 import type { CategoryId, Issue, IssueDetail, Severity, SiteSummary } from "../lib/types";
 import { useIssue, useIssues, useSettings } from "../lib/queries";
 import { closeDetail, navigate, sitePath, useSearch } from "../lib/router";
-import { CATEGORY_LABEL, DUPLICATE_NOTE, SEVERITY_LABEL, SEVERITY_ORDER, isDuplicateIssue, scoreBand } from "../lib/score";
+import { CATALOGUE_NOTE, CATEGORY_LABEL, DUPLICATE_NOTE, SEVERITY_LABEL, SEVERITY_ORDER, isCatalogueIssue, isDuplicateIssue, scoreBand } from "../lib/score";
 import { isRelaunching, noResultsReason, resultsOf } from "../lib/results";
 import { fmtDec, fmtScorePoints, pl, plural } from "../lib/format";
 import { setDraft } from "../lib/draft";
@@ -30,10 +30,13 @@ function AuditRow({ issue, siteId, search }: { issue: Issue; siteId: string; sea
         <span className="audit-row__main">
           <span className="audit-row__title">{issue.title}</span>
           <span className="audit-row__summary">{issue.summary}</span>
+          {isCatalogueIssue(issue) && <CatalogueMark />}
         </span>
         <span className="audit-row__cat">{CATEGORY_LABEL[issue.category]}</span>
         <span className="audit-row__pages">
-          <span className="tnum">{issue.pagesAffected} / {issue.pagesTotal} {pl(issue.pagesTotal, "page", "pages")}</span>
+          <span className="tnum">
+            {issue.pagesAffected} / {issue.pagesTotal} {isCatalogueIssue(issue) ? pl(issue.pagesTotal, "produit", "produits") : pl(issue.pagesTotal, "page", "pages")}
+          </span>
           <Meter value={issue.pagesAffected} max={issue.pagesTotal} tone={issue.severity === "critical" ? "critical" : issue.severity === "warning" ? "warning" : "neutral"} />
         </span>
         <IssuePoints issue={issue} />
@@ -43,8 +46,19 @@ function AuditRow({ issue, siteId, search }: { issue: Issue; siteId: string; sea
   );
 }
 
-/** Effet sur la note du site (sur 100). Les doublons ne la changent pas : aucun chiffre, une mention. */
+/** Mention visible des constats fondés sur le catalogue de la boutique. */
+function CatalogueMark() {
+  return (
+    <span className="catmark">
+      <Package size={12} aria-hidden />
+      Lu dans le catalogue, page non ouverte
+    </span>
+  );
+}
+
+/** Effet sur la note du site (sur 100). Doublons et catalogue ne la changent pas : aucun chiffre, une mention. */
 function IssuePoints({ issue }: { issue: Issue }) {
+  if (isCatalogueIssue(issue)) return <span className="audit-row__pts audit-row__pts--none" title={CATALOGUE_NOTE}>Hors note</span>;
   if (isDuplicateIssue(issue)) return <span className="audit-row__pts audit-row__pts--none" title={DUPLICATE_NOTE}>Sans effet sur la note</span>;
   if (issue.scoreImpact <= 0) return <span className="audit-row__pts audit-row__pts--none">Moins de 0,1 point</span>;
   return (
@@ -60,6 +74,7 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
   const [shown, setShown] = useState(EVIDENCE_STEP);
   const [q, setQ] = useState("");
   const list = useMemo(() => (q ? issue.evidence.filter((e) => e.path.toLowerCase().includes(q.toLowerCase())) : issue.evidence), [issue.evidence, q]);
+  const unit = isCatalogueIssue(issue) ? { one: "fiche", many: "fiches" } : { one: "page", many: "pages" };
   return (
     <>
       {issue.evidence.length > 10 && (
@@ -71,20 +86,28 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
       )}
       <ul className="evidence">
         {list.slice(0, shown).map((e) => (
-          <li key={e.pageId} className="evidence__row">
-            <Link to={sitePath(siteId, "pages", e.pageId)} className="evidence__path mono" title={e.url}>{e.path}</Link>
+          <li key={e.pageId ?? e.url} className="evidence__row">
+            {e.pageId ? (
+              <Link to={sitePath(siteId, "pages", e.pageId)} className="evidence__path mono" title={e.url}>{e.path}</Link>
+            ) : (
+              // Produit lu dans le catalogue : pas de fiche dans l'analyse, on ouvre la page sur le site.
+              <a href={e.url} target="_blank" rel="noopener noreferrer nofollow" className="evidence__path evidence__path--ext mono" title={`${e.url} (s'ouvre sur votre site)`}>
+                <span className="evidence__pathtext">{e.path}</span>
+                <ExternalLink size={12} aria-hidden />
+              </a>
+            )}
             <span className="evidence__found">{e.found ?? "Rien de relevé"}</span>
           </li>
         ))}
       </ul>
-      {list.length === 0 && <p className="muted">Aucune page ne correspond.</p>}
+      {list.length === 0 && <p className="muted">Aucune {unit.one} ne correspond.</p>}
       {list.length > shown && (
         <Button size="sm" variant="ghost" onClick={() => setShown((s) => s + EVIDENCE_STEP)} className="evidence__more">
-          Afficher {Math.min(EVIDENCE_STEP, list.length - shown)} pages de plus ({list.length - shown} restantes)
+          Afficher {Math.min(EVIDENCE_STEP, list.length - shown)} {unit.many} de plus ({list.length - shown} restants)
         </Button>
       )}
       {issue.pagesAffected > issue.evidence.length && (
-        <p className="muted small">Seules les {issue.evidence.length} pages les plus touchées sont listées.</p>
+        <p className="muted small">Seules les {issue.evidence.length} premières {unit.many} sont listées.</p>
       )}
     </>
   );
@@ -110,9 +133,9 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
           <>
             <SeverityBadge severity={issue.severity} />
             <Tag>{CATEGORY_LABEL[issue.category]}</Tag>
-            <span>{plural(issue.pagesAffected, "page concernée", "pages concernées")} sur {issue.pagesTotal}</span>
+            <span>{isCatalogueIssue(issue) ? `${plural(issue.pagesAffected, "produit concerné", "produits concernés")} sur ${issue.pagesTotal} lus dans le catalogue` : `${plural(issue.pagesAffected, "page concernée", "pages concernées")} sur ${issue.pagesTotal}`}</span>
             <span aria-hidden>·</span>
-            <span>{isDuplicateIssue(issue) ? "Sans effet sur la note" : issue.scoreImpact > 0 ? `−${fmtScorePoints(issue.scoreImpact)} sur la note` : "Moins de 0,1 point sur la note"}</span>
+            <span>{isCatalogueIssue(issue) ? "Hors note" : isDuplicateIssue(issue) ? "Sans effet sur la note" : issue.scoreImpact > 0 ? `−${fmtScorePoints(issue.scoreImpact)} sur la note` : "Moins de 0,1 point sur la note"}</span>
           </>
         )
       }
@@ -138,6 +161,11 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
       {issue && (
         <div className="detail-stack">
           <p className="detail-lead">{issue.summary}</p>
+          {isCatalogueIssue(issue) && (
+            <p className="detail-note detail-note--catalogue">
+              <strong>Constat tiré du catalogue de la boutique, sans ouvrir les pages.</strong> Pour ces produits, le titre, la description et les images ont été lus dans le catalogue public. Ils ne comptent pas dans la note sur 100, qui ne repose que sur les pages ouvertes en entier. Ce constat compte quand même : c'est ce texte que Google affiche pour vos produits. Ouvrez une fiche pour vérifier sur votre site.
+            </p>
+          )}
           {isDuplicateIssue(issue) && (
             <p className="detail-note">
               <strong>Ce problème ne change pas la note sur 100</strong>, calculée page par page. Il compte quand même : des pages identiques dans Google se font concurrence, Google hésite sur celle à montrer et l'internaute ne sait pas laquelle choisir.
@@ -167,8 +195,10 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
             )}
           </section>
           <section className="detail-block">
-            <h3 className="detail-block__title">Pages concernées <span className="muted tnum">{issue.pagesAffected}</span></h3>
-            <p className="detail-block__hint">Ce qui a été relevé sur chaque page. Attendu : {issue.evidence[0]?.expected ?? "—"}.</p>
+            <h3 className="detail-block__title">{isCatalogueIssue(issue) ? "Produits concernés" : "Pages concernées"} <span className="muted tnum">{issue.pagesAffected}</span></h3>
+            <p className="detail-block__hint">
+              {isCatalogueIssue(issue) ? "Ce qui a été relevé dans le catalogue pour chaque produit ; l'adresse ouvre la fiche sur votre site." : "Ce qui a été relevé sur chaque page."} Attendu : {issue.evidence[0]?.expected ?? "—"}.
+            </p>
             <Evidence issue={issue} siteId={site.id} />
           </section>
         </div>
@@ -180,8 +210,11 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
 export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: string | null }) {
   const q = useIssues(site.id);
   const search = useSearch();
-  const sev = (search.get("gravite") as SevFilter | null) ?? "all";
-  const cat = (search.get("famille") as CategoryId | null) ?? null;
+  // Une valeur inconnue dans l'adresse revient à « tous », plutôt qu'à une liste vide.
+  const rawSev = search.get("gravite");
+  const sev: SevFilter = rawSev === "critical" || rawSev === "warning" || rawSev === "info" ? rawSev : "all";
+  const rawCat = search.get("famille");
+  const cat = rawCat && rawCat in CATEGORY_LABEL ? (rawCat as CategoryId) : null;
   const qs = (s: SevFilter, c: CategoryId | null) => {
     const p = new URLSearchParams();
     if (s !== "all") p.set("gravite", s);
@@ -205,6 +238,7 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
   const reason = noResultsReason(site);
   const r = resultsOf(site);
   const [famRef] = useOverflowHint<HTMLDivElement>();
+  const catalogueCount = (q.data?.issues ?? []).filter(isCatalogueIssue).reduce((m, i) => Math.max(m, i.pagesTotal), 0);
   const firstRun = isRunning(site) && !isRelaunching(site);
   return (
     <>
@@ -212,7 +246,7 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
         title="Audit SEO"
         description={
           r
-            ? `Tous les problèmes détectés sur ${plural(r.pagesDone, "page analysée", "pages analysées")}${isRelaunching(site) ? " lors de l'analyse précédente" : ""}, du plus coûteux au moins coûteux. Ouvrez-en un pour voir les preuves et la correction.`
+            ? `Tous les problèmes détectés sur ${plural(r.pagesDone, "page ouverte", "pages ouvertes")} en entier${catalogueCount ? ` et ${plural(catalogueCount, "produit lu", "produits lus")} dans le catalogue` : ""}${isRelaunching(site) ? " lors de l'analyse précédente" : ""}, du plus coûteux au moins coûteux. Ouvrez-en un pour voir les preuves et la correction.`
             : "Tous les problèmes détectés, du plus coûteux au moins coûteux, avec leurs preuves et leur correction."
         }
         actions={<RelaunchButton site={site} />}
@@ -285,9 +319,22 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
                     {g.s === "critical" ? "Ils pèsent lourd et touchent la majorité des pages, ou empêchent Google d'afficher des pages." : g.s === "warning" ? "Ils coûtent des points sur une partie des pages." : "Des détails, à corriger quand le reste est fait."}
                   </span>
                 </h2>
-                <ul className="audit-list">
-                  {g.items.map((i) => <AuditRow key={i.id} issue={i} siteId={site.id} search={currentQs} />)}
-                </ul>
+                {g.items.some((i) => !isCatalogueIssue(i)) && (
+                  <ul className="audit-list">
+                    {g.items.filter((i) => !isCatalogueIssue(i)).map((i) => <AuditRow key={i.id} issue={i} siteId={site.id} search={currentQs} />)}
+                  </ul>
+                )}
+                {g.items.some(isCatalogueIssue) && (
+                  <>
+                    <p className="audit-subhead">
+                      <Package size={14} aria-hidden />
+                      <span><strong>Lus dans le catalogue, hors note.</strong> Des produits dont la page n'a pas été ouverte : ces constats ne changent pas la note, mais c'est ce que Google affiche pour eux.</span>
+                    </p>
+                    <ul className="audit-list">
+                      {g.items.filter(isCatalogueIssue).map((i) => <AuditRow key={i.id} issue={i} siteId={site.id} search={currentQs} />)}
+                    </ul>
+                  </>
+                )}
               </section>
             ))
           )}
