@@ -146,6 +146,16 @@ export function useSiteEvents(siteId: string | null) {
             // (état, liste, fiche ouverte, historique), ainsi que les liens depuis l'audit et les pages.
             invalidateShopify(siteId);
             break;
+          case "analytics":
+            // Nouvelle lecture de Google Analytics : le bloc des visites et les fiches de pages (PageDetail.visits).
+            invalidate(keys.analytics(siteId));
+            invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
+            break;
+          case "pagespeed":
+            // Une page mesurée de plus, ou la mesure terminée : l'état de la mesure et les fiches (PageDetail.speed).
+            invalidate(keys.pageSpeed(siteId));
+            invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
+            break;
         }
       },
       (s) => {

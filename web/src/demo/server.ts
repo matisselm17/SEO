@@ -28,6 +28,7 @@ import {
   DEMO_BATCH_IDS, aiConfiguredDemo, assistantBatch, ensureShop, handleAutomation, handleShopify, resourceIdForPath, shopifyConfigured,
   shopifyWritesEnabled, type ShopCtx,
 } from "./shopify";
+import { analyticsConfiguredDemo, handleAnalytics, handlePageSpeed, pageSpeedConfiguredDemo, speedFor, visitsFor, type GoogleCtx } from "./google";
 
 type Scenario =
   | "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "relance" | "relance-figee"
@@ -79,6 +80,8 @@ const settings: Settings = {
     shopify: { configured: shopifyConfigured, writesEnabled: shopifyWritesEnabled },
     searchConsole: { configured: scenario !== "sans-config" && gscMode !== "non-configure" },
     dataForSeo: { configured: scenario !== "sans-config" },
+    analytics: { configured: scenario !== "sans-config" && analyticsConfiguredDemo },
+    pageSpeed: { configured: scenario !== "sans-config" && pageSpeedConfiguredDemo },
   },
 };
 
@@ -357,6 +360,16 @@ function shopCtx(site: DemoSite): ShopCtx {
   };
 }
 
+function googleCtx(site: DemoSite): GoogleCtx {
+  return {
+    siteId: site.summary.id, host: site.summary.host, seed: site.profile.seed, pages: shownPages(site),
+    // Atelier Lune mesure ses ventes dans Google Analytics ; les autres sites non (revenue: null).
+    revenue: site.summary.id === "site_8fk2",
+    configured: { analytics: settings.integrations.analytics.configured, pageSpeed: settings.integrations.pageSpeed.configured },
+    json, apiError, delay, emit: (e) => emit(site, e),
+  };
+}
+
 function overviewOf(site: DemoSite): Overview {
   const pages = shownPages(site);
   const issues = issuesFor(site);
@@ -540,7 +553,7 @@ function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: st
     return {
       tools: ["Lecture des données Search Console", "Lecture des pages analysées"],
       sources: ["Search Console", "Pages analysées"],
-      text: `Sur la période importée, vos pages qui apportent le plus de visites depuis Google sont :\n\n${top.map((p) => `- [${p.path}](${p.url}) : **${p.clicks} clics**${p.score !== null ? `, note ${p.score}/100` : ", page non analysée"}`).join("\n")}\n\nCe sont elles qu'il faut soigner en premier. Pour aller plus loin, le guide de Google sur les [extraits de résultats](https://developers.google.com/search/docs/appearance/snippet) explique comment il choisit le texte affiché.\n\n![capture](https://exemple.invalid/capture.png)`,
+      text: `Sur la période importée, vos pages qui reçoivent le plus de clics depuis Google sont :\n\n${top.map((p) => `- [${p.path}](${p.url}) : **${p.clicks} clics**${p.score !== null ? `, note ${p.score}/100` : ", page non analysée"}`).join("\n")}\n\nCe sont elles qu'il faut soigner en premier. Pour aller plus loin, le guide de Google sur les [extraits de résultats](https://developers.google.com/search/docs/appearance/snippet) explique comment il choisit le texte affiché.\n\n![capture](https://exemple.invalid/capture.png)`,
     };
   }
   if (/description|rédige|écri/.test(low)) {
@@ -690,7 +703,9 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
     case "pages": {
       if (parts[3]) {
         const p = pages.find((x) => x.summary.id === parts[3]) ?? site.truth.find((x) => x.summary.id === parts[3]);
-        return p ? json({ page: { ...p.detail, shopifyResourceId: resourceIdForPath(shopCtx(site), p.detail.path) } }) : notFound();
+        return p
+          ? json({ page: { ...p.detail, shopifyResourceId: resourceIdForPath(shopCtx(site), p.detail.path), visits: visitsFor(googleCtx(site), p.summary.id), speed: speedFor(googleCtx(site), p.summary.id) } })
+          : notFound();
       }
       const sort = url.searchParams.get("sort") ?? "score_asc";
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
@@ -711,6 +726,10 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       const body = method === "GET" ? url.searchParams : init?.body ? JSON.parse(String(init.body)) : {};
       return handleShopify(shopCtx(site), parts.slice(3), method, body);
     }
+    case "analytics":
+      return handleAnalytics(googleCtx(site), parts[3], method, init?.body ? JSON.parse(String(init.body)) : {});
+    case "pagespeed":
+      return handlePageSpeed(googleCtx(site), parts[3], method, init?.body ? JSON.parse(String(init.body)) : {});
     case "automation": {
       const body = method === "PUT" && init?.body ? JSON.parse(String(init.body)) : {};
       return handleAutomation(shopCtx(site), method, body);
@@ -729,7 +748,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
         lastGscSync = Date.now();
         const end = new Date(Date.now() - 2 * 86400_000);
         site.gsc = buildSearchConsole(site.truth, site.profile.seed + (days ?? 28), new Date().toISOString(), {
-          queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20,
+          queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20, days: days ?? 28,
           extraPages: [{ path: "/ancienne-collection", clicks: 3, impressions: 410, position: 31.2 }],
         });
         // La période lue est celle demandée, jusqu'à avant-hier (les deux derniers jours ne sont pas encore consolidés chez Google).

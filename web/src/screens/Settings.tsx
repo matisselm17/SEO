@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { BarChart3, Bot, CircleCheck, CircleMinus, ShoppingBag, Trash2, Users } from "lucide-react";
+import { BarChart3, Bot, CircleCheck, CircleMinus, Gauge, MousePointerClick, ShoppingBag, Trash2, Users } from "lucide-react";
 import type { Settings, SiteSummary, SitesResponse, UpdateSettingsRequest } from "../lib/types";
 import { keys, useAutomation, useSettings } from "../lib/queries";
 import { autoActive } from "../lib/shopify";
@@ -170,12 +170,38 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
                 s.integrations.searchConsole.configured ? (
                   <>Un compte de service Google est présent sur le serveur : vos clics et vos recherches se lisent directement chez Google, en lecture seule, depuis la section <Link to={sitePath(site.id, "traffic")} className="text-link">Mots-clés et trafic organique</Link>. Le dépôt de l'export reste possible.</>
                 ) : (
-                  <>Facultatif : sans lui, déposez l'export de la Search Console. Pour lire directement chez Google, placez le fichier du compte de service sur le serveur (<span className="mono">GOOGLE_SERVICE_ACCOUNT_FILE</span>), puis ajoutez son adresse comme utilisateur de votre propriété Search Console.</>
+                  <>Facultatif : sans lui, déposez l'export de la Search Console. Pour lire directement chez Google, placez le fichier du compte de service sur le serveur (<span className="mono">GOOGLE_APPLICATION_CREDENTIALS</span>), puis ajoutez son adresse comme utilisateur de votre propriété Search Console.</>
                 )
               }
             >
               <span className="setting__icon" aria-hidden><BarChart3 size={16} /></span>
               <Status on={s.integrations.searchConsole.configured} label={s.integrations.searchConsole.configured ? "Compte présent" : "Non configurée"} />
+            </Row>
+            <Row
+              title="Google Analytics"
+              hint={
+                s.integrations.analytics.configured ? (
+                  <>Les visites (ce que font les visiteurs après le clic) se lisent en lecture seule depuis la section <Link to={sitePath(site.id, "traffic")} className="text-link">Mots-clés et trafic organique</Link>. L'adresse du compte de service doit être Lecteur de la propriété Google Analytics.</>
+                ) : (
+                  <>Facultatif. Pour lire les visites, le serveur a besoin du compte de service Google (le même que pour la Search Console) et du numéro de la propriété (<span className="mono">GA4_PROPERTY_ID</span>), puis d'un redémarrage.</>
+                )
+              }
+            >
+              <span className="setting__icon" aria-hidden><MousePointerClick size={16} /></span>
+              <Status on={s.integrations.analytics.configured} label={s.integrations.analytics.configured ? "Configuré" : "Non configuré"} />
+            </Row>
+            <Row
+              title="Vitesse des pages (PageSpeed Insights)"
+              hint={
+                s.integrations.pageSpeed.configured ? (
+                  <>La vitesse des pages se mesure à la demande depuis l'<Link to={sitePath(site.id, "audit")} className="text-link">Audit SEO</Link> ou la fiche d'une page. Elle n'entre pas dans la note SEO.</>
+                ) : (
+                  <>Facultatif. Pour mesurer la vitesse des pages, ajoutez une clé Google PageSpeed Insights (<span className="mono">GOOGLE_PAGESPEED_API_KEY</span>) dans l'environnement du serveur, puis redémarrez-le.</>
+                )
+              }
+            >
+              <span className="setting__icon" aria-hidden><Gauge size={16} /></span>
+              <Status on={s.integrations.pageSpeed.configured} label={s.integrations.pageSpeed.configured ? "Configurée" : "Non configurée"} />
             </Row>
           </>
         )}

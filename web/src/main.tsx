@@ -8,6 +8,7 @@ import "./styles/components.css";
 import "./styles/layout.css";
 import "./styles/screens.css";
 import "./styles/shopify.css";
+import "./styles/google.css";
 import { App } from "./App";
 import { ToastProvider } from "./ui/Toast";
 

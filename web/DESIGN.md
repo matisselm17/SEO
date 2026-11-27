@@ -76,6 +76,8 @@ Règles :
 | `.selbar`, `.actionbar` | Barre d'action collée en bas de l'écran (sélection, brouillon, réglages non enregistrés) |
 | `.seg` | Choix segmenté (période de lecture de la Search Console) |
 | `.mode` | Choix exclusif détaillé (niveau d'automatisation, ce que l'IA peut remplacer) |
+| `SpeedScore`, `SpeedVerdict` (`screens/Speed.tsx`) | Note de vitesse sur 100 (tranches de PageSpeed Insights : 90+, 50 à 89, moins de 50) et verdict de Google par mesure (« Bon », « À améliorer », « Lent ») : icône et mot, jamais la couleur seule |
+| `TrendChart` avec `metrics` | Mêmes petits multiples pour d'autres séries quotidiennes (visites Google Analytics) |
 | `Pagination` | « 51 à 100 sur 240 », précédents, suivants, pour les listes servies par tranches |
 
 ## Boutique Shopify
@@ -88,6 +90,14 @@ Règles :
 - Lecture seule (`writesEnabled` faux) : tout se consulte et se prépare ; les boutons d'application restent visibles, désactivés, avec la raison (une fois par section, bandeau `shop-readonly` auquel les boutons renvoient).
 - Champ vide : on dit ce que Shopify montre à la place (« Vide : Shopify utilise le nom du produit »), jamais un simple tiret.
 - Les images de la boutique ne s'affichent que si leur adresse est en https (`safeImageUrl`), sinon une vignette neutre.
+
+## Google Analytics et vitesse des pages
+
+- Visites : un chapitre « Après le clic : les visites » sous la Search Console (`screens/Visits.tsx`), séparé par un trait et une étiquette de source. Les deux mesures ne sont jamais additionnées ni tracées ensemble ; l'écran le dit une fois. Les libellés d'origine de Google sont traduits (« Organic Search » → « Moteurs de recherche »), le libellé d'origine reste en petit.
+- Chiffre d'affaires absent (`revenue: null`) : selon `revenueStatus`, « Non mesuré » (aucune vente mesurée) ou « Non visible » (l'accès Google n'a pas le droit de le voir, avec le rôle à demander), jamais « 0 € ».
+- Clics (Search Console) et visites (Google Analytics) ne portent jamais le même mot. Sous la liste des recherches, l'écart entre la somme des recherches listées et le total est dit quand il existe. Une page absente d'une liste tronquée (`landingPagesTruncated`) n'est jamais déclarée « sans visite ».
+- Vitesse (`screens/Speed.tsx`) : bloc de l'Audit SEO et de la fiche d'une page. Laboratoire (« Mesure de Google en conditions simulées ») et terrain (« Vécu par vos visiteurs sur 28 jours ») toujours dans deux groupes titrés. Chaque mesure : libellé clair, sigle en petit (LCP, CLS…), une phrase d'explication, valeur, verdict. La progression est `running.done` sur `running.total`, reçue du serveur. Une mesure échouée (`failures`) : marque neutre « Échec » (icône barrée, bordure pointillée, jamais une couleur de gravité) à la place de la note, ou petite icône à côté d'une note plus ancienne ; la raison dans la ligne ouverte et sur l'onglet de l'appareil ; un résumé en tête du bloc. `lastError` : seulement ce qui a arrêté toute la demande. Le vécu réel reste lisible sous la largeur tablette (« Vécu réel : tout le site » sous le chemin). Dans la fiche d'une page, la vitesse est un résumé compact (deux notes, « Mesurer ») juste après l'aperçu Google, détail dépliable.
+- Styles : `src/styles/google.css`.
 
 ## Contenu
 

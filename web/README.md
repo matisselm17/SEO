@@ -71,7 +71,36 @@ Lots présents au chargement : un brouillon de l'assistant (4 lignes, dont une t
 
 Écrire ou annuler un lot (avec `?boutique=ecriture`) avance d'une ligne toutes les 1,6 s ; le bouton « Arrêter après la ligne en cours » (route `stop`, sans confirmation) laisse un lot partiel, avec un bilan et « Reprendre l'écriture… ». Lancer un second lot pendant qu'un premier écrit répond `limit_reached` (« un autre lot est en cours », lien vers ce lot). Une proposition contenant `panne` est refusée, `conflit` provoque un conflit. Limites de débit simulées : un lot nommé `rafale`, plus de 5 préparations par l'IA ou plus de 10 enregistrements de la règle par minute répondent `rate_limited` (le bouton attend la fin du délai). La conversation d'Atelier Lune se termine par une réponse qui porte le lot de l'assistant ; une question contenant `corrige` ou `prépare` en crée un nouveau. **Un lot de l'assistant attend toujours une validation humaine**, même en `?ia=auto` : seule « Préparer des corrections avec l'IA » peut écrire seule.
 
-Lecture directe de la Search Console, avec `?gsc=…` : `google` (défaut, compte de service présent), `non-configure`, `sans-acces` (`search_console_no_access` avec l'adresse du compte), `indispo` (`search_console_unavailable`). Une seule lecture par minute (`rate_limited`).
+Lecture directe de la Search Console, avec `?gsc=…` : `google` (défaut, compte de service présent), `non-configure`, `sans-acces` (`search_console_no_access` avec l'adresse du compte), `indispo` (`search_console_unavailable`). Une seule lecture par minute (`rate_limited`). Le sélecteur de période reprend celle des données affichées (l'export déposé couvre 91 jours : « 3 mois » ; une lecture directe, la période demandée), 28 jours sans données. Sous la liste des recherches, une ligne compare la somme des clics des recherches listées au total (en démo, environ deux tiers) : Google ne détaille pas les recherches trop rares.
+
+Google Analytics (`src/demo/google.ts`), avec `?ga=…` (mémorisé pour l'onglet, combinable) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `lu` (défaut) | Visites lues il y a deux jours (28 jours). Atelier Lune mesure ses ventes (`revenueStatus: "measured"`, chiffre d'affaires en euros) ; Maison Orlux non (`not_measured`, `revenue: null` : « Non mesuré », jamais 0 €) |
+| `tronque` | Comme `lu`, mais 12 pages d'arrivée seulement et `landingPagesTruncated: true` : note sous le tableau, et la fiche d'une page absente de la liste dit qu'elle n'est pas parmi les pages les plus visitées (au lieu de « aucune visite ») |
+| `ca-masque` | Comme `lu`, mais `revenueStatus: "restricted"` : « Non visible », avec le rôle à demander dans Google Analytics |
+| `jamais-lu` | Propriété configurée, jamais lue : invitation à lire (28 jours ou 3 mois) |
+| `non-configure` | `integrations.analytics.configured` faux : explication de ce qu'il faut côté serveur |
+| `sans-acces` | La lecture répond `analytics_no_access` avec l'adresse du compte de service et les étapes |
+| `autre-site` | La lecture répond `analytics_other_site` |
+| `indispo` | La lecture répond `analytics_unavailable` (`retryable`) |
+
+Une lecture par minute au plus : une deuxième lecture dans la minute répond `rate_limited` (le bouton attend la fin du délai). « Réessayer » après une erreur relit la période choisie. Les fiches des pages analysées portent `visits` dès qu'une lecture existe.
+
+Vitesse des pages, avec `?vitesse=…` (mémorisé pour l'onglet, combinable) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `mesure` (défaut) | Six pages mesurées il y a trois jours : vécu réel de la page pour l'accueil, de tout le site (`scope: "site"`) ou absent (`field: null`) pour les autres. `failures` de la dernière demande : `/collections` a échoué sur ordinateur (sa note précédente reste, marquée), `/pages/livraison` sur les deux appareils (ligne « Échec », raison dans la ligne ouverte et sur sa fiche) ; résumé en tête du bloc |
+| `jamais` | Aucune page mesurée : invitation à mesurer |
+| `en-cours` | Mesure en cours à 2 pages sur 7, qui avance d'une page toutes les 6 s (Google prend 10 à 40 s par page et par appareil) ; « Arrêter » garde les pages mesurées |
+| `erreur` | Pages mesurées et `lastError` : la demande entière s'est arrêtée (quota de la clé épuisé) |
+| `indispo` | Lancer une mesure répond `pagespeed_unavailable` |
+| `rafale` | Lancer une mesure répond `rate_limited` (30 pages déjà mesurées dans l'heure, 21 min) |
+| `non-configure` | `integrations.pageSpeed.configured` faux |
+
+Lancer une mesure pendant qu'une autre tourne répond `limit_reached` ; au-delà de 30 pages mesurées dans l'heure, `rate_limited` avec le délai. Une nouvelle demande remet `failures` à zéro ; pendant la mesure, la 4ᵉ page échoue sur ordinateur (la mesure continue). « Mesurer cette page » (fiche d'une page) envoie `pageIds: [id]`. Une amélioration proposée contient « <script> » pour vérifier qu'elle s'affiche comme du texte. Le scénario `sans-config` désactive aussi Google Analytics et la vitesse.
 
 ## Captures
 

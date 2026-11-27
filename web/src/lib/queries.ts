@@ -5,7 +5,7 @@ import type {
   ChatState, CompetitorsData, IssueResponse, IssuesResponse, Overview, PageResponse, PageSummary, PagesResponse,
   FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, ShopifyChangesResponse, ShopifyField, ShopifyResourceResponse,
   ShopifyResourceType, ShopifyResourcesResponse, ShopifyState, SiteResponse, SitesResponse, ShopifyBatchesResponse, ShopifyBatchResponse,
-  AutomationState,
+  AutomationState, AnalyticsData, PageSpeedState,
 } from "./types";
 
 const s = (id: string) => `/sites/${encodeURIComponent(id)}`;
@@ -55,6 +55,10 @@ export const keys = {
   shopifyOptimize: (id: string) => `${s(id)}/shopify/optimize`,
   automation: (id: string) => `${s(id)}/automation`,
   searchConsoleSync: (id: string) => `${s(id)}/search-console/sync`,
+  analytics: (id: string) => `${s(id)}/analytics`,
+  analyticsSync: (id: string) => `${s(id)}/analytics/sync`,
+  pageSpeed: (id: string) => `${s(id)}/pagespeed`,
+  pageSpeedCancel: (id: string) => `${s(id)}/pagespeed/cancel`,
 };
 
 /** Taille d'une page de liste de la boutique (éléments, historique). */
@@ -121,3 +125,5 @@ export const useShopifyChanges = (id: string, offset: number | null) => useQuery
 export const useShopifyBatches = (id: string, enabled = true) => useQuery<ShopifyBatchesResponse>(enabled ? keys.shopifyBatches(id) : null);
 export const useShopifyBatch = (id: string, batchId: string | null) => useQuery<ShopifyBatchResponse>(batchId ? keys.shopifyBatch(id, batchId) : null);
 export const useAutomation = (id: string, enabled = true) => useQuery<AutomationState>(enabled ? keys.automation(id) : null);
+export const useAnalytics = (id: string, enabled = true) => useQuery<AnalyticsData>(enabled ? keys.analytics(id) : null);
+export const usePageSpeed = (id: string, enabled = true) => useQuery<PageSpeedState>(enabled ? keys.pageSpeed(id) : null);

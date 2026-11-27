@@ -1,14 +1,15 @@
 /**
- * Courbes clics / impressions en petits multiples : deux graphiques empilés qui partagent
+ * Courbes en petits multiples (par défaut : clics / impressions de la Search Console ; les visites de
+ * Google Analytics passent leurs propres séries par `metrics`) : deux graphiques empilés qui partagent
  * l'axe du temps et le survol (jamais deux échelles sur un même graphique).
  * Survol à la souris ou au doigt, flèches du clavier, infobulle, et vue en tableau.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import type { OrganicPoint } from "../lib/types";
 import { fmtCompact, fmtDay, fmtDayLong, fmtInt } from "../lib/format";
 
-type Metric = "clicks" | "impressions";
-const METRICS: { id: Metric; label: string; color: string }[] = [
+export interface TrendMetric<K extends string> { id: K; label: string; color: string }
+type Point<K extends string> = { date: string } & Record<K, number>;
+const GSC_METRICS: TrendMetric<"clicks" | "impressions">[] = [
   { id: "clicks", label: "Clics", color: "var(--chart-1)" },
   { id: "impressions", label: "Impressions", color: "var(--chart-2)" },
 ];
@@ -37,7 +38,14 @@ const PAD = { l: 44, r: 12, t: 26, b: 6 };
 const PANEL_H = 112;
 const AXIS_H = 24;
 
-export function TrendChart({ series, height = PANEL_H }: { series: OrganicPoint[]; height?: number }) {
+export function TrendChart<K extends string = "clicks" | "impressions">({ series, height = PANEL_H, metrics, label = "Évolution quotidienne" }: {
+  series: Point<NoInfer<K>>[];
+  height?: number;
+  /** Séries à tracer, une par graphique (deux au plus, empilées). Par défaut : clics et impressions. */
+  metrics?: TrendMetric<K>[];
+  label?: string;
+}) {
+  const METRICS = (metrics ?? GSC_METRICS) as TrendMetric<K>[];
   const [wrap, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const [table, setTable] = useState(false);
@@ -59,7 +67,7 @@ export function TrendChart({ series, height = PANEL_H }: { series: OrganicPoint[
         return { ...m, max, y, d, area, total };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [series, width, height],
+    [series, width, height, METRICS],
   );
 
   // Graduations du temps : environ une tous les 110 px.
@@ -106,16 +114,14 @@ export function TrendChart({ series, height = PANEL_H }: { series: OrganicPoint[
             <thead>
               <tr>
                 <th scope="col">Jour</th>
-                <th scope="col" className="num">Clics</th>
-                <th scope="col" className="num">Impressions</th>
+                {METRICS.map((m) => <th key={m.id} scope="col" className="num">{m.label}</th>)}
               </tr>
             </thead>
             <tbody>
               {[...series].reverse().map((p) => (
                 <tr key={p.date}>
                   <td>{fmtDay(p.date)}</td>
-                  <td className="num tnum">{fmtInt(p.clicks)}</td>
-                  <td className="num tnum">{fmtInt(p.impressions)}</td>
+                  {METRICS.map((m) => <td key={m.id} className="num tnum">{fmtInt(p[m.id])}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -126,10 +132,10 @@ export function TrendChart({ series, height = PANEL_H }: { series: OrganicPoint[
           {width > 0 && (
             <svg
               width={width}
-              height={height * 2 + AXIS_H + 16}
+              height={height * METRICS.length + 16 * (METRICS.length - 1) + AXIS_H}
               className="trend__svg"
               role="img"
-              aria-label={`Évolution quotidienne sur ${n} jours. Utilisez les flèches pour parcourir les jours.`}
+              aria-label={`${label} sur ${n} jours. Utilisez les flèches pour parcourir les jours.`}
               tabIndex={0}
               onPointerMove={onMove}
               onPointerDown={onMove}
@@ -164,9 +170,9 @@ export function TrendChart({ series, height = PANEL_H }: { series: OrganicPoint[
                 );
               })}
               {hover !== null && (
-                <line x1={x(hover)} x2={x(hover)} y1={PAD.t} y2={height * 2 + 16 - PAD.b} className="trend__cross" />
+                <line x1={x(hover)} x2={x(hover)} y1={PAD.t} y2={height * METRICS.length + 16 * (METRICS.length - 1) - PAD.b} className="trend__cross" />
               )}
-              <g transform={`translate(0 ${height * 2 + 16})`}>
+              <g transform={`translate(0 ${height * METRICS.length + 16 * (METRICS.length - 1)})`}>
                 {ticks.map((i, k) => (
                   <text
                     key={i}

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { CloudDownload, FileUp, Link2, Search, Trash2, Upload } from "lucide-react";
+import { CloudDownload, FileUp, Info, Link2, Search, Trash2, Upload } from "lucide-react";
 import type { OrganicPage, OrganicQuery, SearchConsoleData, SiteSummary } from "../lib/types";
 import { keys, useSearchConsole, useSettings } from "../lib/queries";
 import { sendFile, sendJSON, toAppError, type AppError } from "../lib/api";
@@ -20,6 +20,7 @@ import { Skeleton, SkeletonRows, LoadingLabel } from "../ui/Skeleton";
 import { useToast } from "../ui/Toast";
 import { CodeBlock } from "../ui/CodeBlock";
 import { QueryError } from "./common";
+import { VisitsChapter } from "./Visits";
 
 type Available = Extract<SearchConsoleData, { available: true }>;
 const ACCEPT = ".zip,.csv,application/zip,text/csv";
@@ -113,6 +114,18 @@ function useGoogleSync(siteId: string) {
   return { busy, error, run, clear: () => setError(null) };
 }
 
+/**
+ * Période du sélecteur : celle des données affichées quand elle correspond à une période proposée
+ * (à deux jours près : un export de « 3 mois » couvre 90 ou 91 jours), sinon 28 jours.
+ */
+function periodDaysOf(period: { start: string; end: string } | null | undefined): number {
+  if (!period) return 28;
+  const days = Math.round((Date.parse(period.end) - Date.parse(period.start)) / 86400000) + 1;
+  if (!Number.isFinite(days)) return 28;
+  const match = PERIODS.find((p) => Math.abs(p.days - days) <= Math.max(2, Math.round(p.days * 0.02)));
+  return match ? match.days : 28;
+}
+
 function PeriodPicker({ value, onChange, id }: { value: number; onChange: (d: number) => void; id: string }) {
   return (
     <div className="seg" role="radiogroup" aria-labelledby={id}>
@@ -150,8 +163,8 @@ function GoogleError({ g }: { g: ReturnType<typeof useGoogleSync> }) {
  * Bloc de lecture directe, à côté du dépôt de fichier (qui reste disponible). `replacesFile` : un export déposé
  * est en place ; la lecture le remplacerait, donc elle est d'abord confirmée.
  */
-function GoogleRead({ g, compact, replacesFile }: { g: ReturnType<typeof useGoogleSync>; compact?: boolean; replacesFile?: { importedAt: string } }) {
-  const [days, setDays] = useState<number>(90);
+function GoogleRead({ g, compact, replacesFile, initialDays = 28 }: { g: ReturnType<typeof useGoogleSync>; compact?: boolean; replacesFile?: { importedAt: string }; initialDays?: number }) {
+  const [days, setDays] = useState<number>(initialDays);
   const [confirming, setConfirming] = useState(false);
   // Une lecture par minute au plus : après un refus, le bouton attend la fin du délai donné par le serveur.
   const wait = useRetryCountdown(g.error);
@@ -217,7 +230,7 @@ function HowTo() {
     <ol className="howto">
       <li>
         <strong>Ouvrez la Search Console</strong>
-        <span>Sur search.google.com/search-console, choisissez votre site. C'est l'outil gratuit de Google qui mesure vos visites.</span>
+        <span>Sur search.google.com/search-console, choisissez votre site. C'est l'outil gratuit de Google qui mesure votre présence dans ses résultats.</span>
       </li>
       <li>
         <strong>Allez dans « Performances »</strong>
@@ -237,7 +250,7 @@ function NoImport({ siteId, google }: { siteId: string; google: boolean }) {
   return (
     <div className="gsc-empty">
       <div className="gsc-empty__main">
-        <h2 className="gsc-empty__title">Reliez vos visites à vos pages</h2>
+        <h2 className="gsc-empty__title">Reliez vos clics dans Google à vos pages</h2>
         <p className="gsc-empty__lead">
           L'analyse dit comment vos pages sont construites. L'export de la Search Console dit ce qu'elles vous rapportent : les recherches qui mènent à votre site, les clics, la position dans Google. C'est facultatif, et vous pouvez le remplacer à tout moment.
         </p>
@@ -255,7 +268,25 @@ function NoImport({ siteId, google }: { siteId: string; google: boolean }) {
 
 const STEP = 50;
 
-function QueriesTable({ rows, mode }: { rows: OrganicQuery[]; mode: "all" | "reach" }) {
+/**
+ * Écart entre le total des clics et la somme des recherches listées : Google ne détaille pas les recherches
+ * trop rares (confidentialité). Calculé à partir des seules données affichées ; rien quand il n'y a pas d'écart.
+ */
+function HiddenQueriesNote({ rows, totalClicks, source }: { rows: OrganicQuery[]; totalClicks: number; source: Available["source"] }) {
+  const listed = rows.reduce((s, r) => s + r.clicks, 0);
+  if (!(totalClicks > 0) || listed >= totalClicks) return null;
+  return (
+    <p className="table-note gsc-hidden small">
+      <Info size={14} aria-hidden />
+      <span>
+        <strong className="tnum">{fmtInt(listed)} des {fmtInt(totalClicks)} clics</strong> viennent de recherches que Google détaille ; les autres recherches, trop rares, sont masquées par Google pour protéger ceux qui les ont faites
+        {source === "file" ? `, ou ne tiennent pas dans l'export (${fmtInt(1000)} recherches au plus).` : "."}
+      </span>
+    </p>
+  );
+}
+
+function QueriesTable({ rows, mode, totalClicks, source }: { rows: OrganicQuery[]; mode: "all" | "reach"; totalClicks: number; source: Available["source"] }) {
   const [q, setQ] = useState("");
   const [shown, setShown] = useState(STEP);
   const list = useMemo(() => {
@@ -300,6 +331,7 @@ function QueriesTable({ rows, mode }: { rows: OrganicQuery[]; mode: "all" | "rea
       </div>
       {list.length === 0 && <p className="muted table-empty">Aucune recherche ne correspond.</p>}
       {list.length > shown && <Button size="sm" variant="ghost" onClick={() => setShown((s) => s + STEP)} className="table-more">Afficher {Math.min(STEP, list.length - shown)} de plus</Button>}
+      {mode === "all" && <HiddenQueriesNote rows={rows} totalClicks={totalClicks} source={source} />}
     </>
   );
 }
@@ -376,7 +408,7 @@ function Imported({ data, site }: { data: Available; site: SiteSummary }) {
   const [tab, setTab] = useState<"queries" | "reach" | "pages">(data.queries ? "queries" : "pages");
   const reach = data.queries?.filter((r) => r.position > 3 && r.position <= 15).length ?? 0;
   const kpis = [
-    { label: "Clics", value: fmtCompact(data.totals.clicks), hint: "Visites venues de Google" },
+    { label: "Clics", value: fmtCompact(data.totals.clicks), hint: "Clics depuis les résultats de Google" },
     { label: "Impressions", value: fmtCompact(data.totals.impressions), hint: "Affichages dans les résultats" },
     { label: "Taux de clic", value: fmtPct(data.totals.ctr), hint: "Part des affichages suivis d'un clic" },
     { label: "Position moyenne", value: fmtPosition(data.totals.position), hint: "Rang moyen dans les résultats" },
@@ -415,7 +447,7 @@ function Imported({ data, site }: { data: Available; site: SiteSummary }) {
             ]}
           />
         </div>
-        {(tab === "queries" || tab === "reach") && data.queries && <QueriesTable key={tab} rows={data.queries} mode={tab === "reach" ? "reach" : "all"} />}
+        {(tab === "queries" || tab === "reach") && data.queries && <QueriesTable key={tab} rows={data.queries} mode={tab === "reach" ? "reach" : "all"} totalClicks={data.totals.clicks} source={data.source} />}
         {tab === "pages" && data.pages && <PagesTable rows={data.pages} siteId={site.id} />}
         {!data.queries && !data.pages && <p className="muted">L'export ne contient ni les recherches ni les pages.</p>}
       </Section>
@@ -454,7 +486,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
     <>
       <PageHeader
         title="Mots-clés et trafic organique"
-        description="Ce que Google vous apporte : les recherches qui mènent à votre site, et les pages qui reçoivent les visites."
+        description="Ce que Google vous apporte : les recherches qui mènent à votre site, les pages sur lesquelles on clique, puis ce que font les visiteurs une fois arrivés."
         meta={data?.available ? (
           <span className="gsc-source small">
             <span className="gsc-source__tag">{data.source === "google" ? "Lu chez Google" : "Export déposé"}</span>
@@ -464,7 +496,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
         actions={
           data?.available ? (
             <>
-              {google && <GoogleRead g={g} compact replacesFile={data.source === "file" ? { importedAt: data.importedAt } : undefined} />}
+              {google && <GoogleRead key={data.period ? `${data.period.start}_${data.period.end}` : "none"} initialDays={periodDaysOf(data.period)} g={g} compact replacesFile={data.source === "file" ? { importedAt: data.importedAt } : undefined} />}
               <Button icon={<Upload size={15} aria-hidden />} loading={u.busy} onClick={() => picker.current?.click()}>{data.source === "google" ? "Déposer un export" : "Remplacer l'export"}</Button>
               <ConfirmButton icon={<Trash2 size={15} aria-hidden />} confirmLabel="Confirmer la suppression" onConfirm={remove} loading={deleting}>Supprimer</ConfirmButton>
               <input ref={picker} type="file" accept={ACCEPT} className="sr-only" tabIndex={-1} aria-hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void u.upload(f); e.target.value = ""; }} />
@@ -488,6 +520,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
       {data && !data.available && <NoImport siteId={site.id} google={google} />}
       {data && data.available && <Imported data={data} site={site} />}
       {data?.available && <p className="muted small gsc-foot">{plural(data.queries?.length ?? 0, "recherche", "recherches")} et {plural(data.pages?.length ?? 0, "page", "pages")} {data.source === "google" ? "lues chez Google" : "dans l'export"}.</p>}
+      {data && <VisitsChapter site={site} withGsc={data.available} />}
     </>
   );
 }

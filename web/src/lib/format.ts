@@ -73,3 +73,23 @@ export function fmtWhen(iso: string, now = new Date()): string {
   return `le ${dateFmt.format(d)} à ${clockFmt.format(d)}`;
 }
 export const fmtClock = (iso: string) => clockFmt.format(new Date(iso));
+
+/** Montant dans la devise de la propriété Google Analytics ; sans devise connue, le nombre seul. */
+export function fmtMoney(n: number, currency: string | null): string {
+  if (currency) {
+    try {
+      return new Intl.NumberFormat("fr-FR", { style: "currency", currency, maximumFractionDigits: n >= 1000 ? 0 : 2 }).format(n);
+    } catch {
+      /* code de devise inconnu du navigateur : nombre et code */
+      return `${int.format(Math.round(n))} ${currency}`;
+    }
+  }
+  return int.format(Math.round(n));
+}
+
+const sec = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const dec2 = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** Durée en millisecondes, lisible : « 180 ms », « 2,4 s ». */
+export const fmtMs = (ms: number) => (ms < 1000 ? `${int.format(Math.round(ms / 10) * 10)} ms` : `${sec.format(ms / 1000)} s`);
+/** Valeur sans unité à deux décimales (stabilité de la mise en page). */
+export const fmtDec2 = (n: number) => dec2.format(n);

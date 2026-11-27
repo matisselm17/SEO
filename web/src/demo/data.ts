@@ -133,6 +133,8 @@ export function buildPages(profile: SiteProfile, analyzedAt: string): DemoPage[]
         description: descText ? (descText.length > 155 ? descText.slice(0, 152).trimEnd() + "…" : descText) : null,
       },
       queries: null,
+      visits: null,
+      speed: null,
       shopifyResourceId: null,
     };
     return { summary, detail };
@@ -326,14 +328,16 @@ export function recommendationsOf(issues: IssueDetail[]): Recommendation[] {
 
 // ───────── Search Console
 
-export function buildSearchConsole(pages: DemoPage[], seed: number, importedAt: string, opts: { queries: string[]; extraPages: { path: string; clicks: number; impressions: number; position: number }[]; host: string; clicksPerDay: number }): Extract<SearchConsoleData, { available: true }> {
+export function buildSearchConsole(pages: DemoPage[], seed: number, importedAt: string, opts: { queries: string[]; extraPages: { path: string; clicks: number; impressions: number; position: number }[]; host: string; clicksPerDay: number; days?: number }): Extract<SearchConsoleData, { available: true }> {
   const r = rng(seed);
   const end = new Date(Date.UTC(2026, 10, 25));
   const series: OrganicPoint[] = [];
-  for (let i = 90; i >= 0; i--) {
+  // Un export « 3 mois » couvre 91 jours ; une lecture directe, la période demandée.
+  const span = (opts.days ?? 91) - 1;
+  for (let i = span; i >= 0; i--) {
     const d = new Date(end.getTime() - i * 86400000);
     const dow = d.getUTCDay();
-    const trend = 0.75 + (0.45 * (90 - i)) / 90;
+    const trend = 0.75 + (0.45 * (span - i)) / span;
     const weekly = dow === 0 || dow === 6 ? 0.72 : 1.06;
     const noise = 0.8 + r() * 0.4;
     const clicks = Math.round(opts.clicksPerDay * trend * weekly * noise);

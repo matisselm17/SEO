@@ -19,6 +19,7 @@ import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skelet
 import { StrengthList } from "./Overview";
 import { useOverflowHint } from "../ui/useVirtual";
 import { NoResults, QueryError, RelaunchButton, ReliabilityNote, isRunning } from "./common";
+import { SpeedSection } from "./Speed";
 
 type SevFilter = "all" | Severity;
 
@@ -367,6 +368,8 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
               </section>
             ))
           )}
+
+          {!cat && sev === "all" && <SpeedSection site={site} />}
 
           {q.data.strengths.length > 0 && !cat && sev === "all" && (
             <Section id="audit-strengths" title="Ce qui est déjà bien fait" description="Critères validés sur au moins 90 % des pages.">

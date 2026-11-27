@@ -17,6 +17,8 @@ import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { useMedia, useWindowVirtual } from "../ui/useVirtual";
 import { FailedPagesToggle, NoResults, QueryError, ReliabilityNote, isRunning } from "./common";
+import { PageVisitsBlock } from "./Visits";
+import { PageSpeedBlock } from "./Speed";
 
 type SortKey = "path" | "type" | "score" | "issues" | "words" | "clicks" | "position";
 type Band = "all" | "critical" | "warning" | "good";
@@ -111,9 +113,11 @@ function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName
         )}
       </section>
 
+      <PageSpeedBlock siteId={siteId} pageId={page.id} pageUrl={page.url} pagePath={page.path} speed={page.speed} />
+
       {page.organic && (
         <section className="detail-block">
-          <h3 className="detail-block__title">Visites depuis Google</h3>
+          <h3 className="detail-block__title">Dans les résultats de Google <span className="detail-block__src">Search Console</span></h3>
           <dl className="minikpis">
             <div><dt>Clics</dt><dd className="tnum">{fmtInt(page.organic.clicks)}</dd></div>
             <div><dt>Impressions</dt><dd className="tnum">{fmtCompact(page.organic.impressions)}</dd></div>
@@ -137,6 +141,8 @@ function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName
           )}
         </section>
       )}
+
+      <PageVisitsBlock siteId={siteId} visits={page.visits} />
 
       <section className="detail-block">
         <h3 className="detail-block__title">Critères de la grille</h3>
@@ -162,6 +168,7 @@ function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName
           <div><dt>Analysée</dt><dd>le {fmtDateTime(page.analyzedAt)}</dd></div>
         </dl>
       </section>
+
     </div>
   );
 }
