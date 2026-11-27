@@ -1,6 +1,20 @@
 # Premier test réel d'écriture : une seule description pour Google
 
-État au 27 novembre 2026 : **préparé, non exécuté.** Aucune écriture n'a jamais été envoyée à la boutique. Ce test attend l'autorisation du propriétaire.
+État au 27 novembre 2026, 17 h 04 : **exécuté avec succès**, avec l'autorisation du propriétaire. Ce sont les deux seules écritures jamais envoyées à la boutique.
+
+| Vérification | Résultat |
+|---|---|
+| Écriture conditionnelle sur un champ existant de type `string` | acceptée par Shopify, type conservé |
+| Valeur relue identique à la valeur envoyée | oui |
+| Reste du produit (titre, texte, images, textes alternatifs, prix, titre pour Google) | identique, même empreinte avant et après |
+| Annulation depuis l'historique | la valeur est revenue à `llo` |
+| État final comparé à l'état d'avant le test | strictement identique |
+| Historique | deux lignes : la modification (marquée annulée) et l'annulation |
+| Écritures automatiques | aucune, `SHOPIFY_AUTO_APPLY` vide |
+
+Fait par l'interface (fiche du produit, confirmation avant/après, puis Historique → Annuler). La description fautive `llo` est donc toujours en place : la bonne description reste à réappliquer, sur décision du propriétaire.
+
+Toujours non vérifié en réel : la création d'un champ qui n'existe pas encore, le vidage d'un champ, le titre pour Google, le texte alternatif d'une image, les traductions, les pages et articles, les lots et le mode automatique.
 
 ## Élément choisi
 

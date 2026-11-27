@@ -44,7 +44,7 @@ Note de passage pour reprendre le travail dans une nouvelle session. Les règles
 - **Search Console directe : fonctionne en réel** depuis le 27 novembre (fichier du compte de service dans `secrets/`, chemin dans `GOOGLE_APPLICATION_CREDENTIALS`).
 - **Google Analytics 4** (visites, origines, pages d'arrivée, chiffre d'affaires) et **PageSpeed Insights** (vitesse sur téléphone et ordinateur, laboratoire et terrain séparés) : codés, testés contre un faux Google, **jamais essayés en réel** : `GA4_PROPERTY_ID` et `GOOGLE_PAGESPEED_API_KEY` sont vides. À confirmer au premier essai : forme réelle des réponses, clé PageSpeed envoyée en en-tête, stabilité de terrain divisée par 100, ligne de total d'un rapport sans dimension.
 
-**Toujours vrai : aucune écriture n'a été envoyée à la vraie boutique.** Lots, automatisation et annulation ne sont vérifiés que contre un faux Shopify et un client Claude simulé (trois appels réels à Claude ont seulement produit des propositions, non écrites).
+**Premier test réel d'écriture réussi le 27 novembre** (une description pour Google de produit, puis son annulation ; détail dans `docs/premier-test-ecriture.md`). Ce sont les deux seules écritures envoyées à la vraie boutique. Lots, automatisation, et les autres champs ne sont vérifiés que contre un faux Shopify et un client Claude simulé (trois appels réels à Claude ont seulement produit des propositions, non écrites).
 
 ### Prochaines corrections proposées, non faites
 
