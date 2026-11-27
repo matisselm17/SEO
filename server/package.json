@@ -12,6 +12,7 @@
     "start": "node --disable-warning=ExperimentalWarning dist/server/src/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/*.test.ts",
+    "test:cible": "node --disable-warning=ExperimentalWarning --import tsx --test",
     "shopify:sauvegarde": "node --disable-warning=ExperimentalWarning --import tsx scripts/shopify-sauvegarde.ts"
   },
   "dependencies": {
