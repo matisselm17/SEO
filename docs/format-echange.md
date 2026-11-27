@@ -45,6 +45,13 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 | `GET /api/sites/:siteId/chat` | | `ChatState` | |
 | `POST /api/sites/:siteId/chat` | `ChatRequest` | flux SSE de `ChatEvent` | `chat_not_configured` (JSON, statut 503) sans clé d'API |
 | `DELETE /api/sites/:siteId/chat` | | `204` | Efface la conversation |
+| `GET /api/sites/:siteId/shopify` | | `ShopifyState` | Ne lit pas toute la boutique : état de la connexion (vérifiée auprès de Shopify, gardée 60 s) et résumé de la dernière lecture |
+| `POST /api/sites/:siteId/shopify/sync` | | `ShopifyState` | Lit tous les produits, collections, pages et articles (lecture seule) et les rapproche des pages analysées. Répond quand c'est fini |
+| `GET /api/sites/:siteId/shopify/resources` | | `ShopifyResourcesResponse` | Paramètres : `type` (`ShopifyResourceType`), `q` (nom ou chemin), `missing` (`seo_title`, `seo_description` ou `image_alt` : seulement les éléments où ce champ est vide), `offset`, `limit` (défaut 50, max 200). `shopify_not_synced` avant la première lecture |
+| `GET /api/sites/:siteId/shopify/resources/:resourceId` | | `ShopifyResourceResponse` | Relit l'élément en direct dans Shopify, avec ses traductions et son historique |
+| `POST /api/sites/:siteId/shopify/changes` | `ShopifyChangeRequest` | `201 ShopifyChangeResponse` | **Écrit dans la boutique.** Voir « Boutique Shopify » |
+| `GET /api/sites/:siteId/shopify/changes` | | `ShopifyChangesResponse` | Historique du site, le plus récent d'abord. `offset`, `limit` (défaut 50, max 200) |
+| `POST /api/sites/:siteId/shopify/changes/:changeId/restore` | | `201 ShopifyChangeResponse` | **Écrit dans la boutique** : remet la valeur d'avant. Voir « Boutique Shopify » |
 
 **Quelle analyse est affichée.** `overview`, `issues`, `pages`, `failed-pages` et `recommendations` portent toujours sur l'analyse désignée par `SiteSummary.results` : la dernière analyse terminée ; à défaut (première analyse en cours, ou jamais terminée), la plus récente qui a au moins une page notée. Une analyse en cours, arrêtée ou en échec ne remplace jamais une analyse terminée : pendant une relance, les résultats précédents restent affichés et `SiteSummary.audit` décrit la nouvelle analyse. Avant la première page notée, `results` et `overview.score` valent `null` et les listes sont vides — l'interface dit alors « aucune page analysée », jamais « aucun problème ».
 
@@ -53,6 +60,36 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 **Fin d'une analyse.** Arrêt demandé par l'utilisateur : `cancelled`, même avant la première page. Aucune page notée sans arrêt demandé : `failed`. Arrêt ou redémarrage du serveur : `failed` avec un message qui le dit. Sinon `done`, même avec des pages en échec ; l'interface signale une note peu fiable quand `pagesFailed > pagesDone`.
 
 **Les points.** Seuls `Issue.scoreImpact` et `Recommendation.scoreGain` s'affichent : ce sont des points sur la note du site, sur 100. `pointsLost` et `pointsToGain` sont des sommes brutes réservées au tri.
+
+## Boutique Shopify
+
+Le serveur se connecte à une seule boutique, celle des variables `SHOPIFY_*`. Elle n'est proposée que sur le site dont l'hôte est le domaine public de cette boutique ; sur les autres sites, `connection.state` vaut `other_shop` (ou `not_configured`) et toutes les routes `shopify/…` sauf la première répondent par l'erreur correspondante.
+
+**Lecture.** `sync` lit la boutique sans rien y écrire et garde en base, par élément : son type, son chemin public, son nom, son titre et sa description pour Google, le nombre d'images et celles sans texte alternatif. Chaque élément est rapproché de la page analysée de même chemin (`pageId`). Le détail d'un élément est toujours relu en direct : c'est la valeur actuelle de la boutique, pas une copie.
+
+**Écriture : trois garde-fous.**
+
+1. `SHOPIFY_WRITES_ENABLED=1` doit être présent côté serveur. Sans lui, les deux routes d'écriture répondent `shopify_writes_disabled` (statut 403) avant tout appel à Shopify. C'est l'état par défaut.
+2. Une écriture ne part que d'une demande explicite de l'utilisateur pour **une** valeur. Il n'y a ni écriture en lot ni écriture automatique. L'interface montre l'avant et l'après et demande une confirmation.
+3. Avant d'écrire, le serveur relit la valeur dans Shopify. Si elle diffère de `expectedBefore` (ou, pour une annulation, de la valeur que la modification avait écrite), il n'écrit rien et répond `shopify_conflict` (statut 409) ; `details.current` porte la valeur actuelle.
+
+Après l'écriture, le serveur relit la valeur, enregistre la modification (`before`, `after` relu) et émet l'événement `shopify`. Si la valeur demandée est déjà en place, rien n'est écrit ni enregistré : la réponse est `bad_request` avec un message qui le dit.
+
+**Ce qui est modifiable.** `seo_title` et `seo_description` sur les quatre types ; `image_alt` sur les images des produits seulement (l'image d'une collection ou d'un article est affichée mais non modifiable tant que son écriture n'a pas été vérifiée sur une boutique d'essai : Shopify peut remplacer ou retirer l'image ; `readOnlyReasons` le dit) ; les traductions de `seo_title` et `seo_description` dans les langues publiées, quand Shopify le permet (`ShopifyTranslation.editable`). Le texte est normalisé (espaces en trop retirés) et jamais transformé autrement : une valeur qui contient `<` ou `>`, un caractère de contrôle, ou qui dépasse la longueur maximale (255 caractères pour un titre, 500 pour une description, 512 pour un texte alternatif) est refusée par `shopify_invalid_value` (statut 422), rien n'est écrit. L'interface applique la même règle avant la confirmation : ce qu'elle montre est exactement ce qui sera écrit. Un champ dont la valeur actuelle n'a pas pu être lue en entier n'est pas modifiable (l'annulation ne serait pas fidèle).
+
+**Écriture ciblée.** Titre et description passent, pour les quatre types, par les champs `global.title_tag` et `global.description_tag` avec écriture conditionnelle : Shopify refuse lui-même si la valeur a changé depuis la relecture, et l'autre champ n'est jamais touché.
+
+**Journal avant écriture.** La valeur d'avant et la valeur demandée sont enregistrées avant l'appel à Shopify. Si Shopify refuse, l'entrée est marquée en échec et n'apparaît pas dans l'historique. Si Shopify accepte mais que la relecture échoue, la modification apparaît avec `afterVerified: false` et reste annulable : la réponse n'est jamais « rien n'a été fait » après une écriture acceptée. Une permission absente donne `shopify_missing_scope` et `ShopifyResourceDetail.editable` le dit d'avance.
+
+**Historique et annulation.** Chaque écriture ajoute une ligne à l'historique ; aucune ligne n'est modifiée ni supprimée, même à la suppression du site de la boutique. Annuler une modification écrit sa valeur `before` et ajoute une ligne `kind: "restore"`. Seule la dernière modification d'un champ est annulable (`restorable`) ; annuler une annulation rétablit la valeur.
+
+**Lien avec l'analyse.** `PageDetail.shopifyResourceId` et `Evidence.shopifyResourceId` relient une page analysée à son élément Shopify ; `IssueDetail.shopifyField` dit quel champ corrige le problème. Une modification ne change pas la note affichée : l'analyse reflète le site au moment où elle a tourné, et l'interface invite à la relancer.
+
+**Limites.** 30 écritures par minute et une lecture complète (`sync`) par minute au plus (`rate_limited`). L'historique et la liste des éléments, stockés par le logiciel, restent consultables quand Shopify ne répond pas.
+
+**Statuts des erreurs.** `shopify_not_configured` 503 ; `shopify_other_shop` et `shopify_not_synced` 409 (`details.shopHost` : domaine public de la boutique connectée) ; `shopify_writes_disabled` et `shopify_missing_scope` 403 ; `shopify_conflict` 409 ; `shopify_unavailable` 502 avec `details.retryable` ; `shopify_invalid_value` 422 ; un champ non modifiable sur cet élément (texte alternatif d'une image de collection, d'article ou de page) : `bad_request` 400, avant tout appel à Shopify ; un refus de Shopify sur la valeur elle-même : `bad_request` 422, avec le message de Shopify en clair.
+
+**Limite connue.** Les éléments non publiés (brouillons) sont lus et comptés comme les autres : le format ne porte pas encore leur statut.
 
 ## Flux en direct
 
@@ -70,6 +107,7 @@ data: {"type":"audit","audit":{…AuditStatus},"score":71}
 - `audit` : à chaque changement réel (page terminée, page mise en file, changement d'état), au plus 4 par seconde.
 - `page` : une page vient d'être notée (`PageSummary`).
 - `search_console` : un import a été ajouté ou supprimé.
+- `shopify` : la boutique a été relue ou modifiée.
 - Un commentaire `: ping` toutes les 20 secondes pour garder la connexion.
 
 **Progression réelle.** L'interface affiche `pagesDone`, `pagesQueued`, `pagesFailed` et `currentUrl`. Le total final n'est pas connu d'avance : aucun pourcentage n'est calculé tant que `state` n'est pas `done`.
@@ -91,6 +129,7 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 
 ## Protection du serveur
 
+- Toute requête `/api` dont l'en-tête `Host` n'est pas `localhost`, `127.0.0.1` ou `[::1]` (sur le port du serveur), ni un hôte déclaré dans `ALLOWED_HOSTS`, est refusée (statut 403) : une page web tierce ne peut pas atteindre le serveur par rebond DNS.
 - Les routes qui modifient (POST, PATCH, DELETE) exigent `content-type: application/json` (ou multipart pour le dépôt de fichier) et refusent un en-tête `Origin` qui n'est pas celui du serveur.
 - Le corps d'une requête est limité au fil de la lecture : 64 Ko en JSON, 21 Mo pour le dépôt.
 - Limites : nombre de sites, analyses simultanées (les suivantes attendent en `queued`), demandes par minute à l'assistant et au relevé des concurrents. Dépassement : `rate_limited` (statut 429) ou `limit_reached` (statut 409).
@@ -108,3 +147,8 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 | `ANTHROPIC_API_KEY` | Clé de l'API Claude pour l'assistant | non — sans elle, `ChatState.available` vaut `false` |
 | `ANTHROPIC_MODEL` | Modèle de l'assistant, `claude-sonnet-5-5` par défaut | non |
 | `FIRECRAWL_API_KEY` | Recherche Google pour le relevé des concurrents | non — sans elle, la section Concurrents est désactivée |
+| `SHOPIFY_STORE_DOMAIN` | Domaine `xxx.myshopify.com` de la boutique | non — sans les trois variables `SHOPIFY_*`, `connection.state` vaut `not_configured` |
+| `SHOPIFY_CLIENT_ID` | Identifiant de l'application Shopify | non |
+| `SHOPIFY_CLIENT_SECRET` | Secret de l'application Shopify | non |
+| `SHOPIFY_WRITES_ENABLED` | `1` pour autoriser le serveur à écrire dans la boutique | non — sans elle, la boutique est en lecture seule |
+| `ALLOWED_HOSTS` | Hôtes publics acceptés dans l'en-tête `Host`, séparés par des virgules (ex. `seo.exemple.fr`) | non — à renseigner chez un hébergeur |

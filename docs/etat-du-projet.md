@@ -1,4 +1,4 @@
-# État du projet au 27 novembre 2026
+# État du projet au 27 novembre 2026 (soir)
 
 Note de passage pour reprendre le travail dans une nouvelle session. Les règles du projet sont dans `CLAUDE.md`, le format d'échange dans `docs/format-echange.md` et `shared/api.ts`.
 
@@ -8,9 +8,32 @@ Note de passage pour reprendre le travail dans une nouvelle session. Les règles
 - **Interface** (`web/`) : huit sections, design system décrit dans `web/DESIGN.md`, progression d'analyse en direct, couverture de l'analyse par type de page, thème clair et sombre, mode de démonstration réservé au développement.
 - **Équipe d'agents** : `.claude/agents/` (moteur, interface, QA et sécurité).
 
+## Ajouté le 27 novembre : connexion à la boutique Shopify
+
+- **Connexion** (`server/src/shopify/auth.ts`) : Client Credentials Grant, jeton de 24 h gardé en mémoire et renouvelé tout seul. Variables `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`.
+- **Lecture** : produits, collections, pages et articles, rapprochés des pages de l'audit. Section « Boutique Shopify » dans l'interface, lien depuis un problème de l'audit et depuis une page.
+- **Écriture** : titre et description pour Google (quatre types), texte alternatif des images de produit, traductions. Une valeur à la fois, confirmation avant/après, relecture avant écriture, historique et annulation. Détail dans `docs/format-echange.md`, section « Boutique Shopify ».
+- **Écritures désactivées par défaut** : `SHOPIFY_WRITES_ENABLED` est vide. Seul le client l'active. **Aucune écriture n'a jamais été envoyée à la vraie boutique** : tout le chemin d'écriture n'est vérifié que contre un faux Shopify (`server/test/helpers/fake-shopify.ts`).
+- **Protection ajoutée** : le serveur refuse tout en-tête `Host` qui n'est pas local ou listé dans `ALLOWED_HOSTS` (rebond DNS).
+- **Préparation Search Console** : `docs/integration-search-console.md` (rien de codé ; bloqué par la création d'un compte de service Google par le client).
+
+### À vérifier lors de la première écriture réelle (une seule valeur, sous les yeux du client)
+
+1. `metafieldsSet` accepte le type `string` des champs existants de cette boutique, et `compareDigest: null` signifie bien « ne doit pas exister ».
+2. `metafieldsDelete` sur `global.title_tag` vide bien le titre pour Google d'un produit.
+3. `fileUpdate` change le texte alternatif d'une image de produit sans toucher à l'image.
+4. L'annulation remet exactement la valeur d'avant.
+
+### Volontairement non fait
+
+- Texte alternatif des images de collection et d'article : Shopify peut remplacer ou retirer l'image (bug reconnu côté article). À vérifier sur une boutique d'essai avant de l'ouvrir.
+- Aucune écriture en lot, aucune écriture par l'assistant.
+- Permission absente : `write_themes` (corriger le double H1 dans le thème). Shopify ne l'accorde que sur demande d'exemption.
+- Les deux défauts du parcours trouvés le matin restent à corriger : catalogue public déclaré inaccessible à tort, pages refusées (429) sans nouvelle tentative. La connexion Shopify permettrait de lire le catalogue par l'API au lieu de `/products.json`.
+
 ## Vérifié
 
-- `npm --prefix server run typecheck` et `npm --prefix server run test` : 75 tests réussis.
+- `npm --prefix server run typecheck` et `npm --prefix server run test` : 108 tests réussis.
 - `npm --prefix web run typecheck` et `npm --prefix web run build`.
 - Parcours complet dans Chrome sur des sites d'essai locaux (`server/test/helpers/fixture-site.ts`, variantes `boutique` et `vitrine-sans-sitemap`), sans erreur de console.
 - Une revue QA et sécurité complète a été faite sur la première version ; ses corrections sont appliquées.
@@ -19,7 +42,7 @@ Note de passage pour reprendre le travail dans une nouvelle session. Les règles
 
 L'environnement de développement d'origine bloquait l'accès aux sites externes et n'avait aucune clé.
 
-- **Aucun vrai site public n'a été analysé.** Premier test à faire : `orluxjewelry.com` (boutique Shopify, 216 pages d'après son sitemap : 159 produits, 22 collections, 23 articles).
+- **Analyse réelle faite le 27 novembre** sur `orluxjewelry.com` : 98 pages notées, note 88, inventaire de 212 pages. Deux défauts trouvés (voir ci-dessus).
 - **L'assistant** n'a jamais appelé la vraie API Claude (clients simulés seulement).
 - **Le relevé des concurrents** n'a jamais appelé la vraie API Firecrawl.
 - **L'import Search Console** n'a été testé que sur des fichiers fabriqués, en français et en anglais.

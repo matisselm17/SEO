@@ -26,6 +26,14 @@ export type ErrorCode =
   | "competitors_unavailable" // le service de recherche est injoignable ou en quota dépassé
   | "rate_limited" // trop de demandes en peu de temps ; details.retryAfterSeconds
   | "limit_reached" // plafond atteint (nombre de sites, analyses simultanées)
+  | "shopify_not_configured" // les trois variables SHOPIFY_* ne sont pas renseignées côté serveur
+  | "shopify_other_shop" // la boutique connectée n'est pas celle de ce site
+  | "shopify_unavailable" // Shopify est injoignable ou a refusé la demande ; details.retryable
+  | "shopify_not_synced" // la boutique n'a pas encore été lue : lancer une lecture d'abord
+  | "shopify_writes_disabled" // les modifications ne sont pas autorisées côté serveur (SHOPIFY_WRITES_ENABLED)
+  | "shopify_missing_scope" // l'application Shopify n'a pas la permission nécessaire ; details.scope
+  | "shopify_conflict" // la valeur a changé dans Shopify depuis sa dernière lecture ; rien n'a été écrit
+  | "shopify_invalid_value" // la valeur demandée est refusée telle quelle (trop longue, caractères < ou >) ; rien n'a été écrit
   | "bad_request"
   | "internal";
 
@@ -162,6 +170,8 @@ export interface Evidence {
   /** Valeur relevée sur cette page. */
   found: string | null;
   expected: string;
+  /** Élément de la boutique Shopify qui correspond à cette page ; null sans boutique lue ou sans correspondance. */
+  shopifyResourceId: string | null;
 }
 
 export interface Fix {
@@ -182,6 +192,14 @@ export interface IssueDetail extends Issue {
   fix: Fix;
   /** Pages concernées avec leur preuve, les plus touchées d'abord. Au plus 200. */
   evidence: Evidence[];
+  /**
+   * `Evidence.shopifyResourceId` n'est renseigné, pour ce problème, que si ce champ est réellement modifiable
+   * sur l'élément (ex. jamais pour "image_alt" sur une page, dont les images viennent du thème).
+   * Champ Shopify qui corrige ce problème, quand il y en a un : "title" et "duplicate_title" → "seo_title",
+   * "meta_description" et "duplicate_description" → "seo_description", "image_alt" et
+   * "catalogue_image_alt" → "image_alt". null pour les autres problèmes.
+   */
+  shopifyField: ShopifyField | null;
 }
 
 /** Un point positif : un critère validé sur toutes les pages, ou presque. */
@@ -250,6 +268,8 @@ export interface PageDetail extends PageSummary {
   serpPreview: { url: string; title: string | null; description: string | null };
   /** Requêtes Search Console qui mènent à cette page ; null si l'export ne les relie pas à une page. */
   queries: OrganicQuery[] | null;
+  /** Élément de la boutique Shopify qui correspond à cette page ; null sans boutique lue ou sans correspondance. */
+  shopifyResourceId: string | null;
 }
 
 /** Une page qui n'a pas pu être chargée pendant l'analyse `results`. */
@@ -385,6 +405,178 @@ export interface Coverage {
   fullAuditMaxPages: number | null;
 }
 
+// ───────────────────────── Boutique Shopify ─────────────────────────
+
+export type ShopifyResourceType = "product" | "collection" | "page" | "article";
+
+/**
+ * Ce que le logiciel sait modifier dans la boutique.
+ * "seo_title" : le titre affiché dans Google (meta title). "seo_description" : la description affichée
+ * dans Google (meta description). "image_alt" : le texte alternatif d'une image.
+ */
+export type ShopifyField = "seo_title" | "seo_description" | "image_alt";
+
+export interface ShopifyConnection {
+  /**
+   * "not_configured" : les variables SHOPIFY_* manquent. "other_shop" : une boutique est connectée, mais
+   * son domaine public n'est pas celui de ce site. "error" : Shopify a refusé ou n'a pas répondu (voir `error`).
+   * "connected" : la boutique de ce site est connectée.
+   */
+  state: "not_configured" | "other_shop" | "error" | "connected";
+  /** Nom de la boutique ; null hors "connected" et "other_shop". */
+  shopName: string | null;
+  /** Domaine public de la boutique, sans "www." ; null si inconnu. Le domaine myshopify.com n'est jamais renvoyé. */
+  shopHost: string | null;
+  /** Permissions réellement accordées à l'application, ex. "write_products". Vide hors "connected". */
+  scopes: string[];
+  /** Permissions dont le logiciel se sert et qui ne sont pas accordées. */
+  missingScopes: ShopifyMissingScope[];
+  /** Le serveur accepte d'écrire dans la boutique. false par défaut : tout est alors en lecture seule. */
+  writesEnabled: boolean;
+  /** Langue principale de la boutique, ex. "fr" ; null si inconnue. */
+  primaryLocale: string | null;
+  /** Autres langues publiées, ex. ["de", "en"]. */
+  otherLocales: string[];
+  /** Renseigné quand state vaut "error". */
+  error: ApiError["error"] | null;
+}
+
+export interface ShopifyMissingScope {
+  scope: string;
+  /** Ce que cette absence empêche, en français, ex. "Modifier les titres et descriptions des pages et articles". */
+  blocks: string;
+}
+
+/** GET /api/sites/:siteId/shopify — état de la connexion et de la dernière lecture de la boutique. */
+export interface ShopifyState {
+  connection: ShopifyConnection;
+  /** Dernière lecture complète de la boutique ; null si elle n'a jamais été lue pour ce site. */
+  sync: {
+    syncedAt: string;
+    counts: Record<ShopifyResourceType, number>;
+    /** Sur l'ensemble des éléments lus. */
+    missing: { seoTitle: number; seoDescription: number; imagesWithoutAlt: number; images: number };
+  } | null;
+}
+
+export interface ShopifyResourceSummary {
+  /** Identifiant interne, stable d'une lecture à l'autre. */
+  id: string;
+  type: ShopifyResourceType;
+  /** Chemin public dans la langue principale, ex. "/products/anneau-titane". */
+  path: string;
+  /** Nom de l'élément dans Shopify (nom du produit, de la collection, de la page, de l'article). */
+  title: string;
+  /** null : champ vide dans Shopify, qui utilise alors le nom de l'élément. */
+  seoTitle: string | null;
+  /** null : champ vide dans Shopify, qui utilise alors le début du texte de l'élément. */
+  seoDescription: string | null;
+  images: number;
+  imagesWithoutAlt: number;
+  /** Page correspondante dans l'analyse affichée ; null si elle n'a pas été ouverte. */
+  pageId: string | null;
+  /** Note de cette page ; null si pageId est null. */
+  pageScore: number | null;
+  /** Nombre de modifications faites par le logiciel sur cet élément. */
+  changes: number;
+}
+
+export interface ShopifyImage {
+  id: string;
+  /** Adresse de l'image chez Shopify (https). */
+  url: string;
+  alt: string | null;
+}
+
+/** Valeur d'un champ dans une autre langue que la langue principale. */
+export interface ShopifyTranslation {
+  locale: string;
+  field: "seo_title" | "seo_description";
+  value: string | null;
+  /** La traduction date d'avant la dernière modification du texte d'origine. */
+  outdated: boolean;
+  /** false quand Shopify ne permet pas de traduire ce champ ici (ex. texte d'origine vide) ; `reason` dit pourquoi. */
+  editable: boolean;
+  reason: string | null;
+}
+
+/** Lu en direct dans Shopify à chaque demande : ce sont les valeurs actuelles de la boutique. */
+export interface ShopifyResourceDetail extends ShopifyResourceSummary {
+  /** Au plus 50 images, dans l'ordre de la boutique. */
+  imageList: ShopifyImage[];
+  translations: ShopifyTranslation[];
+  /** Modifications faites par le logiciel sur cet élément, la plus récente d'abord. */
+  history: ShopifyChange[];
+  /** Champs que le logiciel peut modifier sur cet élément. */
+  editable: Record<ShopifyField | "translations", boolean>;
+  /**
+   * Pour chaque champ non modifiable, la raison en français, affichable telle quelle
+   * (permission absente, type d'élément non pris en charge, valeur trop longue pour être annulée fidèlement…).
+   * Absente pour un champ modifiable. Le mode lecture seule du serveur n'y figure pas : voir `writesEnabled`.
+   */
+  readOnlyReasons: Partial<Record<ShopifyField | "translations", string>>;
+}
+
+/** Une modification écrite dans la boutique par le logiciel. Rien n'est jamais effacé de cet historique. */
+export interface ShopifyChange {
+  id: string;
+  resourceId: string;
+  resourceType: ShopifyResourceType;
+  resourceTitle: string;
+  path: string;
+  field: ShopifyField;
+  /** Image concernée quand field vaut "image_alt" ; null sinon. */
+  image: { id: string; url: string } | null;
+  /** Langue modifiée ; null pour la langue principale. */
+  locale: string | null;
+  /** Valeur lue dans Shopify juste avant l'écriture. null : le champ était vide. */
+  before: string | null;
+  /** Valeur écrite, relue dans Shopify après l'écriture. null : le champ a été vidé. */
+  after: string | null;
+  /**
+   * false quand Shopify a accepté l'écriture mais que la relecture a échoué : `after` est alors la valeur
+   * envoyée, pas une valeur relue. L'interface le signale.
+   */
+  afterVerified: boolean;
+  appliedAt: string;
+  /** "edit" : une modification demandée. "restore" : le retour à la valeur d'avant d'une modification précédente. */
+  kind: "edit" | "restore";
+  /** Pour un "restore", la modification annulée. */
+  restoresChangeId: string | null;
+  /** Modification qui a annulé celle-ci ; null si elle est toujours en place. */
+  restoredByChangeId: string | null;
+  /**
+   * true si cette modification peut être annulée : c'est la dernière faite sur ce champ (même élément,
+   * même image, même langue) et elle n'a pas déjà été annulée.
+   */
+  restorable: boolean;
+}
+
+/** GET /api/sites/:siteId/shopify/resources?type=&q=&missing=&offset=&limit= */
+export interface ShopifyResourcesResponse { resources: ShopifyResourceSummary[]; total: number; offset: number; limit: number }
+export interface ShopifyResourceResponse { resource: ShopifyResourceDetail }
+
+/**
+ * POST /api/sites/:siteId/shopify/changes — écrit une valeur dans la boutique.
+ * `expectedBefore` est la valeur que l'utilisateur avait sous les yeux : si Shopify en contient une autre
+ * au moment d'écrire, rien n'est écrit et le serveur répond "shopify_conflict".
+ */
+export interface ShopifyChangeRequest {
+  resourceId: string;
+  field: ShopifyField;
+  /** Obligatoire quand field vaut "image_alt". */
+  imageId?: string;
+  /** Langue à modifier ; absente ou null pour la langue principale. Jamais avec "image_alt". */
+  locale?: string | null;
+  /** Texte brut. null ou vide : vider le champ. */
+  value: string | null;
+  expectedBefore: string | null;
+}
+/** Réponse à une écriture ou à une annulation : la modification enregistrée et l'élément relu dans Shopify. */
+export interface ShopifyChangeResponse { change: ShopifyChange; resource: ShopifyResourceDetail }
+/** GET /api/sites/:siteId/shopify/changes?offset=&limit= — la plus récente d'abord. */
+export interface ShopifyChangesResponse { changes: ShopifyChange[]; total: number; offset: number; limit: number }
+
 // ───────────────────────── Vue d'ensemble ─────────────────────────
 
 export interface Overview {
@@ -447,6 +639,8 @@ export interface Settings {
   integrations: {
     chat: { configured: boolean; model: string | null };
     competitors: { configured: boolean };
+    /** `writesEnabled` : le serveur accepte d'écrire dans la boutique (SHOPIFY_WRITES_ENABLED=1). */
+    shopify: { configured: boolean; writesEnabled: boolean };
   };
   version: string;
 }
@@ -496,7 +690,9 @@ export type SiteEvent =
   /** Une page vient d'être notée. */
   | { type: "page"; page: PageSummary }
   /** L'import Search Console a changé (ajout ou suppression). */
-  | { type: "search_console"; available: boolean };
+  | { type: "search_console"; available: boolean }
+  /** La boutique Shopify a été relue ou modifiée : l'interface recharge ce qu'elle affiche de la boutique. */
+  | { type: "shopify" };
 
 /**
  * POST /api/sites/:siteId/chat — la réponse est un flux SSE.
