@@ -1,8 +1,8 @@
 import { useDeferredValue, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ExternalLink, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, ExternalLink, PenLine, Search } from "lucide-react";
 import type { CategoryId, PageCheck, PageDetail, PageSummary, PageType, SiteSummary } from "../lib/types";
 import { PAGE_TYPE_LABEL, PAGE_TYPE_ORDER } from "../lib/pagetype";
-import { useAllPages, useOverview, usePage } from "../lib/queries";
+import { useAllPages, useOverview, usePage, useSettings } from "../lib/queries";
 import { closeDetail, sitePath } from "../lib/router";
 import { isRelaunching, noResultsReason, resultsOf } from "../lib/results";
 import { CATEGORY_LABEL, scoreBand } from "../lib/score";
@@ -12,7 +12,7 @@ import { CheckBadge, ScorePill, Tag } from "../ui/Badge";
 import { Tabs } from "../ui/Tabs";
 import { Sheet } from "../ui/Sheet";
 import { SerpPreview } from "../ui/SerpPreview";
-import { Link } from "../ui/Button";
+import { ButtonLink, Link } from "../ui/Button";
 import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { useMedia, useWindowVirtual } from "../ui/useVirtual";
@@ -92,7 +92,8 @@ function CheckRow({ c }: { c: PageCheck }) {
   );
 }
 
-function PageDetailBody({ page, siteName }: { page: PageDetail; siteName: string }) {
+function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName: string; siteId: string }) {
+  const shopWrites = useSettings().data?.integrations.shopify.writesEnabled === true;
   const byCat = CAT_ORDER.map((id) => {
     const checks = page.checks.filter((c) => c.category === id).sort((a, b) => (a.status === "pass" ? 1 : 0) - (b.status === "pass" ? 1 : 0));
     return { id, checks, pts: checks.reduce((s, c) => s + c.points, 0), max: checks.reduce((s, c) => s + c.max, 0) };
@@ -102,6 +103,12 @@ function PageDetailBody({ page, siteName }: { page: PageDetail; siteName: string
       <section className="detail-block">
         <h3 className="detail-block__title">Aperçu dans Google</h3>
         <SerpPreview url={page.serpPreview.url} title={page.serpPreview.title} description={page.serpPreview.description} siteName={siteName} />
+        {page.shopifyResourceId && (
+          <div className="shoplink">
+            <p className="shoplink__text">Cette page correspond à un élément de votre boutique Shopify : son titre et sa description pour Google y sont relus en direct{shopWrites ? " et s'y corrigent" : ""}.</p>
+            <ButtonLink to={sitePath(siteId, "shopify", page.shopifyResourceId)} size="sm" variant="secondary" icon={<PenLine size={14} aria-hidden />}>Ouvrir dans la boutique</ButtonLink>
+          </div>
+        )}
       </section>
 
       {page.organic && (
@@ -187,7 +194,7 @@ function PageSheet({ site, pageId, onClose }: { site: SiteSummary; pageId: strin
       {!page && !q.error && (
         <div className="detail-stack"><LoadingLabel /><Skeleton h={110} r={8} /><SkeletonText lines={2} /><SkeletonRows rows={6} height={56} /></div>
       )}
-      {page && <PageDetailBody page={page} siteName={site.name} />}
+      {page && <PageDetailBody page={page} siteName={site.name} siteId={site.id} />}
     </Sheet>
   );
 }

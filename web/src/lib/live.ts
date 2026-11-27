@@ -38,6 +38,12 @@ export function patchSite(siteId: string, patch: (s: SiteSummary) => SiteSummary
   setQueryData<Overview>(keys.overview(siteId), (prev) => (prev ? { ...prev, site: patch(prev.site) } : prev));
 }
 
+export function invalidateShopify(siteId: string) {
+  invalidate(keys.shopifyAll(siteId));
+  invalidate(`/sites/${encodeURIComponent(siteId)}/issues/`);
+  invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
+}
+
 const RESULT_KEYS = (id: string) => [keys.overview(id), keys.issues(id), keys.recommendations(id), keys.failedPages(id)];
 
 export function invalidateSiteResults(siteId: string) {
@@ -134,6 +140,11 @@ export function useSiteEvents(siteId: string | null) {
             invalidate(keys.overview(siteId));
             invalidate(keys.allPages(siteId));
             invalidate(keys.site(siteId));
+            break;
+          case "shopify":
+            // La boutique a été relue ou modifiée : tout ce qui en est affiché est relu
+            // (état, liste, fiche ouverte, historique), ainsi que les liens depuis l'audit et les pages.
+            invalidateShopify(siteId);
             break;
         }
       },

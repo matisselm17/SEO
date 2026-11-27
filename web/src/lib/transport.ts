@@ -6,12 +6,15 @@
  */
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** Mode démonstration : `vite --mode demo` (script dev:demo) ou VITE_DEMO=1, en développement uniquement. */
+export const DEMO_ENABLED: boolean = import.meta.env.DEV && (import.meta.env.MODE === "demo" || import.meta.env.VITE_DEMO === "1");
+
 let impl: FetchLike = (input, init) => fetch(input, init);
 let ready: Promise<void> = Promise.resolve();
 
-export const DEMO_ENABLED: boolean = import.meta.env.DEV && import.meta.env.VITE_DEMO === "1";
-
-if (import.meta.env.DEV && import.meta.env.VITE_DEMO === "1") {
+if (import.meta.env.DEV && (import.meta.env.MODE === "demo" || import.meta.env.VITE_DEMO === "1")) {
+  // En démonstration, jamais de repli sur fetch : si le faux serveur ne charge pas, toute requête échoue.
+  impl = () => Promise.reject(new Error("Mode démonstration : faux serveur non chargé, aucun appel réseau réel."));
   ready = import("../demo/server").then((m) => {
     impl = m.demoFetch;
   });

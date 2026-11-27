@@ -14,6 +14,7 @@ import { PagesScreen } from "./screens/Pages";
 import { TrafficScreen } from "./screens/Traffic";
 import { CompetitorsScreen } from "./screens/Competitors";
 import { RecommendationsScreen } from "./screens/Recommendations";
+import { ShopifyScreen } from "./screens/Shopify";
 import { AssistantScreen } from "./screens/Assistant";
 import { SettingsScreen } from "./screens/Settings";
 import type { SiteSummary } from "./lib/types";
@@ -36,6 +37,8 @@ function Screen({ route, site }: { route: Route; site: SiteSummary }) {
       return <CompetitorsScreen site={site} />;
     case "recommendations":
       return <RecommendationsScreen site={site} />;
+    case "shopify":
+      return <ShopifyScreen site={site} resourceId={route.resourceId} />;
     case "assistant":
       return <AssistantScreen site={site} />;
     case "settings":
@@ -52,7 +55,7 @@ function ShellSkeleton() {
         <div className="sidebar__top"><Skeleton w={110} h={18} /></div>
         <div style={{ padding: "0 12px" }}><Skeleton h={44} r={8} /></div>
         <div className="nav">
-          {NAV.map((n) => (
+          {NAV.filter((n) => n.id !== "shopify").map((n) => (
             <div key={n.id} className="nav__item"><Skeleton w={18} h={18} r={4} /><Skeleton w="60%" h={10} /></div>
           ))}
         </div>

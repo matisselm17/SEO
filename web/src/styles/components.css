@@ -549,3 +549,67 @@
 .scroll-hint[data-more="right"] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
 .scroll-hint[data-more="left"] { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 36px), transparent); }
 .scroll-hint[data-more="both"] { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); }
+
+/* ───────────────────────── Fenêtre de confirmation ───────────────────────── */
+.dialog { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: var(--space-4); }
+.dialog__overlay { position: absolute; inset: 0; background: var(--overlay); opacity: 0; transition: opacity var(--dur-base) var(--ease-out); }
+.dialog__panel {
+  position: relative;
+  width: min(480px, 100%);
+  max-height: calc(100vh - 2 * var(--space-8));
+  display: flex; flex-direction: column;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(8px) scale(0.99);
+  transition: transform var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out);
+}
+.dialog__panel--lg { width: min(600px, 100%); }
+.dialog--open .dialog__overlay { opacity: 1; }
+.dialog--open .dialog__panel { opacity: 1; transform: none; }
+.dialog__panel:focus-visible { box-shadow: var(--shadow-lg); }
+.dialog__head { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-5) var(--space-6) 0; }
+.dialog__title { flex: 1; min-width: 0; font-size: var(--text-xl); font-weight: var(--weight-semibold); line-height: var(--leading-tight); letter-spacing: -0.01em; padding-top: 4px; }
+.dialog__body { padding: var(--space-4) var(--space-6) var(--space-5); overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-4); }
+.dialog__body .error-banner { margin-bottom: 0; }
+.dialog__foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-4) var(--space-6); border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .dialog { align-items: end; padding: 0; }
+  .dialog__panel, .dialog__panel--lg { width: 100%; max-height: 92vh; border-radius: var(--radius-lg) var(--radius-lg) 0 0; border-bottom: 0; transform: translateY(24px); }
+  .dialog__head { padding: var(--space-4) var(--space-4) 0; }
+  .dialog__body { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .dialog__foot { padding: var(--space-3) var(--space-4); }
+  .dialog__foot .btn { flex: 1 1 auto; }
+}
+
+/* ───────────────────────── Compteur de caractères ───────────────────────── */
+.charcount { display: inline-flex; align-items: center; gap: 5px; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
+.charcount svg { flex: none; }
+.charcount__hint { color: var(--text-subtle); }
+.charcount--good, .charcount--good .charcount__hint { color: var(--good); }
+.charcount--warning, .charcount--warning .charcount__hint { color: var(--warning); }
+
+/* ───────────────────────── Pagination ───────────────────────── */
+.pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-4) 0; }
+.pager__range { font-size: var(--text-sm); color: var(--text-muted); }
+.pager__btns { display: flex; gap: var(--space-2); }
+
+/* ───────────────────────── Vignette d'image ───────────────────────── */
+.thumb { flex: none; display: block; object-fit: cover; border-radius: var(--radius-sm); background: var(--bg-muted); border: 1px solid var(--line); }
+.thumb--empty { display: grid; place-items: center; color: var(--text-subtle); }
+
+/* Valeur venue d'une source externe, affichée telle quelle */
+.value { overflow-wrap: anywhere; white-space: pre-wrap; }
+.value--empty { font-style: italic; color: var(--text-subtle); }
+
+/* Variantes d'avertissement */
+.notice--info { border-color: var(--line-strong); background: var(--bg-subtle); }
+.notice--info .notice__icon { color: var(--text-muted); }
+.notice--good { border-color: var(--good-line); background: var(--good-soft); }
+.notice--good .notice__icon { color: var(--good); }
+.notice__list { margin-top: 4px; font-size: var(--text-sm); color: var(--text-muted); display: flex; flex-direction: column; gap: 2px; }
+.notice__list strong { color: var(--text); font-weight: var(--weight-semibold); }
+.notice__list + .notice__text { margin-top: 6px; }
+.notice__actions { margin-top: var(--space-3); display: flex; gap: var(--space-2); }

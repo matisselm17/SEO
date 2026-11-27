@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowRight, Bot, ExternalLink, Package, Search } from "lucide-react";
+import { ArrowRight, Bot, ExternalLink, Package, PenLine, Search } from "lucide-react";
 import type { CategoryId, Issue, IssueDetail, Severity, SiteSummary } from "../lib/types";
 import { useIssue, useIssues, useSettings } from "../lib/queries";
 import { closeDetail, navigate, sitePath, useSearch } from "../lib/router";
@@ -13,7 +13,7 @@ import { Tabs } from "../ui/Tabs";
 import { Meter } from "../ui/Meter";
 import { Sheet } from "../ui/Sheet";
 import { CodeBlock } from "../ui/CodeBlock";
-import { Button, Link } from "../ui/Button";
+import { Button, ButtonLink, Link } from "../ui/Button";
 import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonRows, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { StrengthList } from "./Overview";
@@ -75,6 +75,13 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
   const [q, setQ] = useState("");
   const list = useMemo(() => (q ? issue.evidence.filter((e) => e.path.toLowerCase().includes(q.toLowerCase())) : issue.evidence), [issue.evidence, q]);
   const unit = isCatalogueIssue(issue) ? { one: "fiche", many: "fiches" } : { one: "page", many: "pages" };
+  // Problème corrigeable dans la boutique : chaque preuve reliée à un élément Shopify ouvre sa fiche sur le bon champ.
+  const fix = issue.shopifyField;
+  const fixable = !!fix && issue.evidence.some((e) => e.shopifyResourceId);
+  // Le lien n'existe que si le champ est modifiable sur cet élément (le serveur ne renseigne shopifyResourceId que dans ce cas).
+  // En lecture seule, il ne promet pas une correction impossible.
+  const shopWrites = useSettings().data?.integrations.shopify.writesEnabled === true;
+  const fixLabel = shopWrites ? "Corriger dans Shopify" : "Voir dans la boutique";
   return (
     <>
       {issue.evidence.length > 10 && (
@@ -84,9 +91,16 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filtrer par adresse" />
         </label>
       )}
+      {fixable && (
+        <p className="evidence__shop">
+          {shopWrites
+            ? <>Ces {unit.many} sont reliées à votre boutique Shopify : « Corriger dans Shopify » ouvre l'élément sur le bon champ, avec un aperçu et une confirmation avant toute modification.</>
+            : <>Ces {unit.many} sont reliées à votre boutique Shopify, consultable en lecture seule : « Voir dans la boutique » ouvre l'élément sur le bon champ.</>}
+        </p>
+      )}
       <ul className="evidence">
         {list.slice(0, shown).map((e) => (
-          <li key={e.pageId ?? e.url} className="evidence__row">
+          <li key={e.pageId ?? e.url} className={`evidence__row ${fixable ? "evidence__row--fix" : ""}`}>
             {e.pageId ? (
               <Link to={sitePath(siteId, "pages", e.pageId)} className="evidence__path mono" title={e.url}>{e.path}</Link>
             ) : (
@@ -97,6 +111,21 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
               </a>
             )}
             <span className="evidence__found">{e.found ?? "Rien de relevé"}</span>
+            {fixable && (
+              <span className="evidence__fix">
+                {fix && e.shopifyResourceId && (
+                  <ButtonLink
+                    to={`${sitePath(siteId, "shopify", e.shopifyResourceId)}?champ=${fix}`}
+                    size="sm"
+                    variant="ghost"
+                    icon={<PenLine size={14} aria-hidden />}
+                    aria-label={`${fixLabel} : ${e.path}`}
+                  >
+                    {fixLabel}
+                  </ButtonLink>
+                )}
+              </span>
+            )}
           </li>
         ))}
       </ul>

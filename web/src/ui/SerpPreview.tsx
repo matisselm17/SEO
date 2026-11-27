@@ -11,7 +11,7 @@ function crumbs(url: string) {
 }
 
 /** Aperçu du résultat dans Google, à partir de serpPreview (déjà coupé par le serveur). */
-export function SerpPreview({ url, title, description, siteName }: { url: string; title: string | null; description: string | null; siteName?: string }) {
+export function SerpPreview({ url, title, description, siteName, missingDescription }: { url: string; title: string | null; description: string | null; siteName?: string; missingDescription?: string }) {
   const c = crumbs(url);
   return (
     <figure className="serp" aria-label="Aperçu du résultat dans Google">
@@ -27,7 +27,7 @@ export function SerpPreview({ url, title, description, siteName }: { url: string
       </div>
       <p className={`serp__title ${title ? "" : "is-missing"}`}>{title ?? "Sans titre : Google en choisira un"}</p>
       <p className={`serp__desc ${description ? "" : "is-missing"}`}>
-        {description ?? "Pas de description : Google affichera un extrait de la page choisi par lui-même."}
+        {description ?? missingDescription ?? "Pas de description : Google affichera un extrait de la page choisi par lui-même."}
       </p>
     </figure>
   );

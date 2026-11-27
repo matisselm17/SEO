@@ -7,14 +7,16 @@ Application React + TypeScript (Vite). Elle consomme le format d'échange de `do
 ```bash
 npm install
 npm run dev        # interface sur http://localhost:5173, /api relayé vers http://localhost:8787 (flux SSE compris)
-npm run dev:demo   # mode démonstration : faux serveur en mémoire, aucun serveur nécessaire
+npm run dev:demo   # mode démonstration : faux serveur en mémoire, aucun appel au vrai serveur (/api n'est pas relayé)
 npm run typecheck
 npm run build      # vérifie les types puis compile dans web/dist
 ```
 
 ## Mode démonstration (développement uniquement)
 
-`npm run dev:demo` charge `.env.demo` (`VITE_DEMO=1`). `src/lib/transport.ts` remplace alors `fetch` par `src/demo/server.ts`, qui répond aux mêmes routes à partir de `docs/exemples/exemples.json`, étoffé par `src/demo/data.ts` (deux sites : 42 et 360 pages). La condition est `import.meta.env.DEV && VITE_DEMO === "1"` : elle vaut `false` dans tout build de production, et le module n'est pas inclus dans `dist/` (vérifié par recherche dans les fichiers compilés).
+`npm run dev:demo` lance `vite --mode demo`. Ce mode s'active lui-même, sans aucun fichier `.env` : `vite.config.ts` définit `VITE_DEMO=1`, **désactive le relais `/api` vers le port 8787** et répond 503 à toute requête `/api` qui atteindrait quand même le serveur de développement (message « [démo] requête /api bloquée » dans le terminal). Dans le navigateur, `src/lib/transport.ts` remplace `fetch` par `src/demo/server.ts`, sans jamais se rabattre sur le vrai réseau (si le faux serveur ne charge pas, toute requête échoue). Il répond aux mêmes routes à partir de `docs/exemples/exemples.json`, étoffé par `src/demo/data.ts` (deux sites : 42 et 360 pages). Le badge « Données de démonstration » s'affiche en bas de la navigation. La condition est `import.meta.env.DEV && (MODE === "demo" || VITE_DEMO === "1")` : elle vaut `false` dans tout build de production, et le module n'est pas inclus dans `dist/` (vérifié par recherche dans les fichiers compilés).
+
+**Ne lancez jamais `npm run dev` (sans démo) pour essayer l'interface** quand le serveur du port 8787 est relié à une vraie boutique : `/api` y est relayé et les écritures seraient réelles.
 
 Scénarios, avec `?demo=…` dans l'adresse (mémorisé pour l'onglet) :
 
@@ -39,6 +41,19 @@ Saisies spéciales, dans tous les scénarios :
 - ajout d'un site : une adresse contenant `injoignable` → `site_unreachable`, `plafond` → `limit_reached`, `rafale` → `rate_limited` (20 s) ;
 - assistant : une question contenant `clé` → clé refusée avant toute réponse (erreur définitive, champ désactivé), `panne` → échec avant toute réponse (la question n'est pas conservée), `limite` → `rate_limited` (45 s) ;
 - Search Console : un fichier nommé `pas-un-export…` est refusé (`invalid_file`).
+
+Boutique Shopify (`src/demo/shopify.ts`, boutique fictive du site Atelier Lune), avec `?boutique=…` dans l'adresse (mémorisé pour l'onglet, combinable avec `?demo=`) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `lecture` (défaut) | Boutique connectée et lue, modifications désactivées côté serveur, permission des images manquante |
+| `ecriture` | Modifications activées, toutes les permissions |
+| `ecriture-partielle` | Modifications activées, permission des images manquante |
+| `jamais-lue` | Boutique connectée jamais lue : invitation à la lire (la lecture dure ~3 s) |
+| `erreur` | Shopify ne répond pas (`connection.state: "error"`) |
+| `non-configuree` | Aucune boutique configurée : la section disparaît du menu, reste joignable par son adresse |
+
+Maison Orlux montre toujours « la boutique connectée est celle d'un autre site ». Saisies spéciales dans un champ, au moment d'appliquer : `conflit` → la valeur est changée « dans Shopify » puis `shopify_conflict` ; `rafale` → `rate_limited` (20 s) ; `permission` → `shopify_missing_scope` ; `panne` → `shopify_unavailable` ; `relecture` → écriture acceptée mais non relue (`afterVerified: false`). Les valeurs avec `<`, `>`, un caractère de contrôle ou trop longues sont bloquées par l'interface avant la confirmation (le faux serveur répond `shopify_invalid_value` s'il les reçoit). Les images des collections et des articles sont en lecture seule (`readOnlyReasons.image_alt`). Une lecture complète par minute au plus.
 
 ## Captures
 

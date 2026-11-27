@@ -1,4 +1,4 @@
-import { Bot, FileText, LayoutDashboard, Lightbulb, ListChecks, Settings, TrendingUp, Users, type LucideIcon } from "lucide-react";
+import { Bot, FileText, LayoutDashboard, Lightbulb, ListChecks, Settings, ShoppingBag, TrendingUp, Users, type LucideIcon } from "lucide-react";
 import type { SectionName } from "../lib/router";
 
 export const NAV: { id: SectionName; label: string; short: string; icon: LucideIcon }[] = [
@@ -8,6 +8,8 @@ export const NAV: { id: SectionName; label: string; short: string; icon: LucideI
   { id: "traffic", label: "Mots-clés et trafic organique", short: "Trafic", icon: TrendingUp },
   { id: "competitors", label: "Concurrents", short: "Concurrents", icon: Users },
   { id: "recommendations", label: "Recommandations", short: "Actions", icon: Lightbulb },
+  // N'apparaît que si une boutique est configurée côté serveur (Settings.integrations.shopify.configured).
+  { id: "shopify", label: "Boutique Shopify", short: "Boutique", icon: ShoppingBag },
   { id: "assistant", label: "Assistant IA", short: "Assistant", icon: Bot },
   { id: "settings", label: "Paramètres", short: "Paramètres", icon: Settings },
 ];

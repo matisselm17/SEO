@@ -6,7 +6,7 @@
  */
 import type {
   CategoryId, CategoryScore, Competitor, CompetitorsData, Evidence, Issue, IssueDetail, OrganicPage, OrganicPoint, OrganicQuery,
-  PageCheck, PageDetail, PageSummary, PageType, Recommendation, SearchConsoleData, Severity, Strength,
+  PageCheck, PageDetail, PageSummary, PageType, Recommendation, SearchConsoleData, Severity, ShopifyField, Strength,
 } from "../lib/types";
 import { CATEGORY_LABELS, CRITERIA, type PageFacts } from "./criteria";
 
@@ -36,16 +36,36 @@ export interface SiteProfile {
 
 const CAT_ORDER: CategoryId[] = ["balises", "contenu", "technique", "medias", "partage"];
 
+/** Champ Shopify qui corrige chaque critère (comme IssueDetail.shopifyField côté serveur). */
+const SHOPIFY_FIELD: Record<string, ShopifyField> = {
+  title: "seo_title", meta_description: "seo_description", image_alt: "image_alt",
+  catalogue_title: "seo_title", catalogue_description: "seo_description", catalogue_image_alt: "image_alt",
+};
+
 /** Type d'une page, déduit de son adresse (comme le serveur). */
 export function pageTypeOf(path: string): PageType {
   if (path === "/") return "home";
   if (/^\/(produits|products)\//.test(path)) return "product";
   if (/^\/(collections|boutique)(\/|$)/.test(path)) return "collection";
-  if (/^\/(blog|blogs)\/[^/]+/.test(path)) return "article";
-  if (/^\/(blog|blogs)$/.test(path)) return "blog";
-  if (/^\/(livraison|cgv|mentions-legales|confidentialite|pages\/livraison|policies)/.test(path)) return "policy";
+  if (/^\/blogs\/[^/]+\/[^/]+/.test(path)) return "article";
+  if (/^\/blogs\/[^/]+$/.test(path)) return "blog";
+  if (/^\/blog\/[^/]+/.test(path)) return "article";
+  if (/^\/blog$/.test(path)) return "blog";
+  if (/^\/(pages\/)?(livraison|cgv|mentions-legales|confidentialite)|^\/policies/.test(path)) return "policy";
   if (/^\/(en|de|es)\//.test(path)) return "other";
   return "page";
+}
+
+/** Chemins d'une boutique Shopify : /products, /collections, /pages, /blogs/<blog>/<article>. */
+function shopifyPath(path: string): string {
+  if (path === "/") return "/";
+  let m: RegExpMatchArray | null;
+  if ((m = path.match(/^\/produits\/(.+)$/))) return `/products/${m[1]}`;
+  if (path === "/boutique") return "/collections";
+  if ((m = path.match(/^\/boutique\/(.+)$/))) return `/collections/${m[1]}`;
+  if (path === "/blog") return "/blogs/journal";
+  if ((m = path.match(/^\/blog\/(.+)$/))) return `/blogs/journal/${m[1]}`;
+  return `/pages/${path.slice(1).replace(/\//g, "-")}`;
 }
 
 export function buildPages(profile: SiteProfile, analyzedAt: string): DemoPage[] {
@@ -113,6 +133,7 @@ export function buildPages(profile: SiteProfile, analyzedAt: string): DemoPage[]
         description: descText ? (descText.length > 155 ? descText.slice(0, 152).trimEnd() + "…" : descText) : null,
       },
       queries: null,
+      shopifyResourceId: null,
     };
     return { summary, detail };
   });
@@ -152,12 +173,13 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
       .map((p) => ({ p, k: p.detail.checks.find((k) => k.id === c.id)! }))
       .sort((a, b) => a.k.points - b.k.points || (b.p.summary.organic?.clicks ?? 0) - (a.p.summary.organic?.clicks ?? 0))
       .slice(0, 200)
-      .map(({ p, k }) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected }));
+      .map(({ p, k }) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected, shopifyResourceId: null }));
     out.push({
       id: c.id, category: c.category, severity: severityOf(c.max, c.id, failing.length, total),
       title: c.issueTitle(failing.length), summary: c.summary, basis: "pages", pagesAffected: failing.length, pagesTotal: total, pointsLost: lost,
       scoreImpact: Math.round((lost / Math.max(1, total)) * 10) / 10,
       why: c.why, fix: c.fix(pages[0]?.summary.url.replace(/^https:\/\//, "").replace(/\/.*$/, "") ?? "exemple.fr"), evidence,
+      shopifyField: SHOPIFY_FIELD[c.id] ?? null,
     });
   }
   // Doublons : même titre sur plusieurs pages. Ils ne changent pas la note (scoreImpact 0).
@@ -178,7 +200,8 @@ export function issuesOf(pages: DemoPage[]): IssueDetail[] {
       basis: "pages", pagesAffected: affected, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
       why: "Le titre doit dire ce qui distingue chaque page. Quand plusieurs pages ont le même, Google a du mal à choisir laquelle montrer et l'internaute ne sait pas sur laquelle cliquer.",
       fix: { steps: ["Ouvrez chacune des pages concernées.", "Donnez-leur un titre propre qui dit ce qui les distingue (le produit, la catégorie, la ville…).", "Si deux pages présentent vraiment le même contenu, gardez-en une et redirigez l'autre vers elle."], snippet: null },
-      evidence: dup.flatMap((g) => g.map((p) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: `« ${p.summary.title} », identique sur ${g.length} pages`, expected: "Un titre propre à chaque page" }))),
+      evidence: dup.flatMap((g) => g.map((p) => ({ pageId: p.summary.id, url: p.summary.url, path: p.summary.path, found: `« ${p.summary.title} », identique sur ${g.length} pages`, expected: "Un titre propre à chaque page", shopifyResourceId: null }))),
+      shopifyField: null,
     });
   }
   // Ordre du serveur : critiques, puis doublons, puis les autres.
@@ -210,7 +233,8 @@ export function catalogueIssuesOf(products: DemoPage[]): IssueDetail[] {
       pagesAffected: desc.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
       why: "La description est le texte affiché sous le titre dans Google. Sur une fiche produit, c'est l'argument qui donne envie de cliquer plutôt que chez un concurrent.",
       fix: { steps: ["Dans l'administration de la boutique, ouvrez « Produits ».", "Pour chaque produit listé, remplissez « Référencement naturel » > « Méta-description » (120 à 155 caractères)."], snippet: null },
-      evidence: desc.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+      evidence: desc.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected, shopifyResourceId: null })),
+      shopifyField: SHOPIFY_FIELD["catalogue_description"] ?? null,
     });
   }
   const alt = pick("image_alt");
@@ -222,7 +246,8 @@ export function catalogueIssuesOf(products: DemoPage[]): IssueDetail[] {
       pagesAffected: alt.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
       why: "Le texte alternatif décrit l'image à Google et aux personnes malvoyantes. Pour une boutique, c'est aussi une porte d'entrée par Google Images.",
       fix: { steps: ["Ouvrez chaque produit listé, puis chaque image.", "Cliquez sur « Ajouter un texte alternatif » et décrivez ce qu'on voit : le produit, sa couleur, sa matière."], snippet: null },
-      evidence: alt.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+      evidence: alt.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected, shopifyResourceId: null })),
+      shopifyField: SHOPIFY_FIELD["catalogue_image_alt"] ?? null,
     });
   }
   const title = pick("title");
@@ -234,7 +259,8 @@ export function catalogueIssuesOf(products: DemoPage[]): IssueDetail[] {
       pagesAffected: title.length, pagesTotal: total, scoreImpact: 0, pointsLost: 0,
       why: "Un bon titre de produit dit ce qu'est le produit et ce qui le distingue, en 30 à 60 caractères.",
       fix: { steps: ["Ouvrez chaque produit listé.", "Dans « Référencement naturel », réécrivez le titre de la page : le produit, sa matière ou sa couleur, puis la marque."], snippet: null },
-      evidence: title.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected })),
+      evidence: title.slice(0, 200).map(({ p, k }) => ({ pageId: null, url: p.summary.url, path: p.summary.path, found: k.found, expected: k.expected, shopifyResourceId: null })),
+      shopifyField: SHOPIFY_FIELD["catalogue_title"] ?? null,
     });
   }
   return out;
@@ -251,8 +277,8 @@ export function mergeIssues(pageIssues: IssueDetail[], catalogue: IssueDetail[])
 }
 
 export function toIssue(d: IssueDetail): Issue {
-  const { why: _w, fix: _f, evidence: _e, ...rest } = d;
-  void _w; void _f; void _e;
+  const { why: _w, fix: _f, evidence: _e, shopifyField: _s, ...rest } = d;
+  void _w; void _f; void _e; void _s;
   return rest;
 }
 
@@ -440,13 +466,13 @@ function luneCatalogue(count: number): SiteProfile["paths"] {
   }
   return out;
 }
-export const LUNE_CATALOGUE = luneCatalogue(50);
+export const LUNE_CATALOGUE = luneCatalogue(50).map((p) => ({ ...p, path: shopifyPath(p.path) }));
 
 export const LUNE: SiteProfile = {
   host: "atelier-lune.example",
   seed: 7,
   fail: { meta_description: 0.62, h1: 0.66, image_alt: 0.7, canonical: 0.25, headings: 0.5, structured_data: 0.7, open_graph: 0.6, twitter_card: 0.8, internal_links: 0.3, link_text: 0.45, image_size: 0.5, title_h1: 0.3, h2: 0.55, description_unique: 0.2, viewport: 0, lang: 0, charset: 0, indexable: 0.03, blocking_scripts: 0.4, favicon: 0 },
-  paths: lunePaths,
+  paths: lunePaths.map((p) => ({ ...p, path: shopifyPath(p.path) })),
 };
 
 const bijouxCats = ["bagues", "colliers", "boucles-d-oreilles", "bracelets", "piercings", "chevilleres"];

@@ -3,7 +3,8 @@ import { useQuery } from "./cache";
 import { getJSON } from "./api";
 import type {
   ChatState, CompetitorsData, IssueResponse, IssuesResponse, Overview, PageResponse, PageSummary, PagesResponse,
-  FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, SiteResponse, SitesResponse,
+  FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, ShopifyChangesResponse, ShopifyField, ShopifyResourceResponse,
+  ShopifyResourceType, ShopifyResourcesResponse, ShopifyState, SiteResponse, SitesResponse,
 } from "./types";
 
 const s = (id: string) => `/sites/${encodeURIComponent(id)}`;
@@ -25,7 +26,34 @@ export const keys = {
   chat: (id: string) => `${s(id)}/chat`,
   events: (id: string) => `${s(id)}/events`,
   audits: (id: string) => `${s(id)}/audits`,
+  /** Préfixe de tout ce qui vient de la boutique (rechargé à l'événement « shopify »). */
+  shopifyAll: (id: string) => `${s(id)}/shopify`,
+  shopify: (id: string) => `${s(id)}/shopify`,
+  shopifySync: (id: string) => `${s(id)}/shopify/sync`,
+  shopifyResources: (id: string, f: ShopifyResourceFilter) => {
+    const p = new URLSearchParams();
+    if (f.type) p.set("type", f.type);
+    if (f.q) p.set("q", f.q);
+    if (f.missing) p.set("missing", f.missing);
+    p.set("offset", String(f.offset));
+    p.set("limit", String(SHOPIFY_PAGE));
+    return `${s(id)}/shopify/resources?${p.toString()}`;
+  },
+  shopifyResource: (id: string, rid: string) => `${s(id)}/shopify/resources/${encodeURIComponent(rid)}`,
+  shopifyChanges: (id: string, offset: number) => `${s(id)}/shopify/changes?offset=${offset}&limit=${SHOPIFY_PAGE}`,
+  shopifyChangesPost: (id: string) => `${s(id)}/shopify/changes`,
+  shopifyRestore: (id: string, changeId: string) => `${s(id)}/shopify/changes/${encodeURIComponent(changeId)}/restore`,
 };
+
+/** Taille d'une page de liste de la boutique (éléments, historique). */
+export const SHOPIFY_PAGE = 50;
+
+export interface ShopifyResourceFilter {
+  type: ShopifyResourceType | null;
+  q: string;
+  missing: ShopifyField | null;
+  offset: number;
+}
 
 export interface AllPages {
   pages: PageSummary[];
@@ -72,3 +100,7 @@ export const useFailedPages = (id: string, enabled = true) => useQuery<FailedPag
 export const useSearchConsole = (id: string) => useQuery<SearchConsoleData>(keys.searchConsole(id));
 export const useCompetitors = (id: string) => useQuery<CompetitorsData>(keys.competitors(id));
 export const useChat = (id: string) => useQuery<ChatState>(keys.chat(id));
+export const useShopify = (id: string, enabled = true) => useQuery<ShopifyState>(enabled ? keys.shopify(id) : null);
+export const useShopifyResources = (id: string, f: ShopifyResourceFilter | null) => useQuery<ShopifyResourcesResponse>(f ? keys.shopifyResources(id, f) : null);
+export const useShopifyResource = (id: string, rid: string | null) => useQuery<ShopifyResourceResponse>(rid ? keys.shopifyResource(id, rid) : null);
+export const useShopifyChanges = (id: string, offset: number | null) => useQuery<ShopifyChangesResponse>(offset === null ? null : keys.shopifyChanges(id, offset));

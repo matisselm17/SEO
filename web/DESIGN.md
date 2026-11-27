@@ -70,6 +70,16 @@ Règles :
 | `SerpPreview` | Aperçu du résultat dans Google |
 | `ConfirmButton` | Action destructive en deux temps |
 | `useWindowVirtual` | Virtualisation des longues listes (pages analysées) |
+| `Dialog` | Fenêtre de confirmation posée au-dessus de tout, panneau latéral compris (feuille montante sur mobile) ; Échap ne ferme qu'elle, le focus y reste |
+| `CharCount` | Compteur de caractères avec repère de longueur (ceux de la grille d’audit : titre 30 à 60, description 70 à 160 ; un champ vide n’est pas compté comme un défaut) : un mot et une icône, pas la couleur seule |
+| `Pagination` | « 51 à 100 sur 240 », précédents, suivants, pour les listes servies par tranches |
+
+## Boutique Shopify
+
+- Toute écriture dans la boutique passe par `ConfirmWrite` (`screens/ShopifyChanges.tsx`) : l'élément, le champ, l'avant et l'après, et la phrase « La boutique en ligne sera modifiée tout de suite ». Une seule valeur par confirmation, jamais d'action en lot.
+- Lecture seule (`writesEnabled` faux) : tout se consulte et se prépare ; les boutons d'application restent visibles, désactivés, avec la raison (une fois par section).
+- Champ vide : on dit ce que Shopify montre à la place (« Vide : Shopify utilise le nom du produit »), jamais un simple tiret.
+- Les images de la boutique ne s'affichent que si leur adresse est en https (`safeImageUrl`), sinon une vignette neutre.
 
 ## Contenu
 

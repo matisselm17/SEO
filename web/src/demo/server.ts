@@ -9,6 +9,7 @@
  * qu'à sa fin.
  *
  * Scénarios, choisis avec ?demo=… dans l'adresse (mémorisé pour l'onglet) : voir web/README.md.
+ * Boutique Shopify (site Atelier Lune) : voir src/demo/shopify.ts, état choisi avec ?boutique=….
  * Saisies spéciales :
  *   - ajout d'un site : « injoignable » → site_unreachable, « plafond » → limit_reached, « rafale » → rate_limited ;
  *   - assistant : « clé » → clé refusée (erreur définitive), « panne » → échec avant toute réponse,
@@ -23,6 +24,7 @@ import {
   LUNE, LUNE_CATALOGUE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, catalogueIssuesOf, categoriesOf,
   issuesOf, mergeIssues, pageTypeOf, recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
 } from "./data";
+import { handleShopify, resourceIdForPath, shopifyConfigured, shopifyWritesEnabled, type ShopCtx } from "./shopify";
 
 type Scenario =
   | "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "relance" | "relance-figee"
@@ -51,6 +53,7 @@ const settings: Settings = {
   integrations: {
     chat: scenario === "sans-config" ? { configured: false, model: null } : exSettings.integrations.chat,
     competitors: { configured: scenario !== "sans-config" },
+    shopify: { configured: shopifyConfigured, writesEnabled: shopifyWritesEnabled },
   },
 };
 
@@ -245,7 +248,7 @@ if (scenario === "echec") {
 
 // ───────── Réponses
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // Scénario « lent » : la liste des sites arrive, les écrans restent en chargement (skeletons).
 const latency = (path: string) => (scenario === "lent" && path !== "/sites" && path !== "/settings" ? 600_000 : 120 + Math.random() * 220);
 
@@ -317,7 +320,16 @@ function coverageOf(site: DemoSite): Coverage | null {
 }
 
 function issuesFor(site: DemoSite): IssueDetail[] {
-  return mergeIssues(issuesOf(shownPages(site)), catalogueIssuesOf(catalogueProducts(site)));
+  const issues = mergeIssues(issuesOf(shownPages(site)), catalogueIssuesOf(catalogueProducts(site)));
+  // Après une lecture de la boutique, chaque preuve est rattachée à son élément Shopify.
+  return issues.map((i) => ({ ...i, evidence: i.evidence.map((e) => ({ ...e, shopifyResourceId: i.shopifyField ? resourceIdForPath(shopCtx(site), e.path, i.shopifyField) : null })) }));
+}
+
+function shopCtx(site: DemoSite): ShopCtx {
+  return {
+    host: site.summary.host, inventory: site.inventory, shown: shownPages(site), json, apiError, delay,
+    emit: () => emit(site, { type: "shopify" }),
+  };
 }
 
 function overviewOf(site: DemoSite): Overview {
@@ -462,9 +474,9 @@ function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: st
   }
   if (/description|rédige|écri/.test(low)) {
     return {
-      tools: ["Lecture de la page /boutique"],
-      sources: ["Page /boutique"],
-      text: "Voici une proposition pour la page `/boutique` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Le nom de champ `meta__description` de certains thèmes n'a rien à voir avec du gras. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
+      tools: ["Lecture de la page /collections"],
+      sources: ["Page /collections"],
+      text: "Voici une proposition pour la page `/collections` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Le nom de champ `meta__description` de certains thèmes n'a rien à voir avec du gras. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
     };
   }
   const first = recs[0];
@@ -607,7 +619,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
     case "pages": {
       if (parts[3]) {
         const p = pages.find((x) => x.summary.id === parts[3]) ?? site.truth.find((x) => x.summary.id === parts[3]);
-        return p ? json({ page: p.detail }) : notFound();
+        return p ? json({ page: { ...p.detail, shopifyResourceId: resourceIdForPath(shopCtx(site), p.detail.path) } }) : notFound();
       }
       const sort = url.searchParams.get("sort") ?? "score_asc";
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
@@ -624,6 +636,10 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
     }
     case "recommendations":
       return json({ recommendations: recommendationsOf(issuesFor(site)) });
+    case "shopify": {
+      const body = method === "GET" ? url.searchParams : init?.body ? JSON.parse(String(init.body)) : {};
+      return handleShopify(shopCtx(site), parts.slice(3), method, body);
+    }
     case "search-console": {
       if (method === "DELETE") {
         site.gsc = null;

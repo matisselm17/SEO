@@ -63,6 +63,7 @@ export type Route =
   | { name: "traffic"; siteId: string }
   | { name: "competitors"; siteId: string }
   | { name: "recommendations"; siteId: string }
+  | { name: "shopify"; siteId: string; resourceId: string | null }
   | { name: "assistant"; siteId: string }
   | { name: "settings"; siteId: string | null }
   | { name: "notfound" };
@@ -76,6 +77,7 @@ const SECTION_SLUGS: Record<string, SectionName> = {
   trafic: "traffic",
   concurrents: "competitors",
   recommandations: "recommendations",
+  boutique: "shopify",
   assistant: "assistant",
   parametres: "settings",
 };
@@ -87,6 +89,7 @@ export const SECTION_PATHS: Record<SectionName, string> = {
   traffic: "/trafic",
   competitors: "/concurrents",
   recommendations: "/recommandations",
+  shopify: "/boutique",
   assistant: "/assistant",
   settings: "/parametres",
 };
@@ -107,6 +110,8 @@ export function parseRoute(path: string): Route {
       return { name: "audit", siteId, issueId: extra };
     case "pages":
       return { name: "pages", siteId, pageId: extra };
+    case "shopify":
+      return { name: "shopify", siteId, resourceId: extra };
     default:
       if (extra) return { name: "notfound" };
       return { name: section, siteId } as Route;

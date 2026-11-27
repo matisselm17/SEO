@@ -1,13 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Bot, CircleCheck, CircleMinus, Trash2, Users } from "lucide-react";
+import { Bot, CircleCheck, CircleMinus, ShoppingBag, Trash2, Users } from "lucide-react";
 import type { Settings, SiteSummary, SitesResponse, UpdateSettingsRequest } from "../lib/types";
 import { keys, useSettings } from "../lib/queries";
 import { sendJSON, toAppError } from "../lib/api";
 import { removeQueries, setQueryData } from "../lib/cache";
-import { navigate } from "../lib/router";
+import { navigate, sitePath } from "../lib/router";
 import { fmtDate, fmtDateTime, fmtInt } from "../lib/format";
 import { PageHeader } from "../ui/Section";
-import { Button } from "../ui/Button";
+import { Button, Link } from "../ui/Button";
+import { Tag } from "../ui/Badge";
 import { TextField } from "../ui/Field";
 import { ConfirmButton } from "../ui/ConfirmButton";
 import { Skeleton, LoadingLabel } from "../ui/Skeleton";
@@ -122,7 +123,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
       <section className="settings-group" aria-labelledby="set-int">
         <h2 id="set-int" className="settings-group__title">Services connectés</h2>
         <p className="settings-group__desc">Ils se configurent côté serveur. Les clés d'accès restent sur le serveur et ne sont jamais affichées ici.</p>
-        {!s && <><LoadingLabel /><Skeleton h={64} /><div style={{ height: 8 }} /><Skeleton h={64} /></>}
+        {!s && <><LoadingLabel /><Skeleton h={64} /><div style={{ height: 8 }} /><Skeleton h={64} /><div style={{ height: 8 }} /><Skeleton h={64} /></>}
         {s && (
           <>
             <Row
@@ -138,6 +139,22 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
             >
               <span className="setting__icon" aria-hidden><Users size={16} /></span>
               <Status on={s.integrations.competitors.configured} label={s.integrations.competitors.configured ? "Activé" : "Non configuré"} />
+            </Row>
+            <Row
+              title="Boutique Shopify"
+              hint={
+                !s.integrations.shopify.configured ? (
+                  <>Pour l'activer, ajoutez les variables <span className="mono">SHOPIFY_STORE_DOMAIN</span>, <span className="mono">SHOPIFY_CLIENT_ID</span> et <span className="mono">SHOPIFY_CLIENT_SECRET</span> dans l'environnement du serveur, puis redémarrez-le.</>
+                ) : s.integrations.shopify.writesEnabled ? (
+                  <>Les titres, descriptions et textes alternatifs se corrigent depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>, une valeur à la fois, après confirmation.</>
+                ) : (
+                  <>Lecture seule : la boutique se consulte depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>, sans rien y modifier. Pour autoriser les modifications, ajoutez <span className="mono">SHOPIFY_WRITES_ENABLED=1</span> dans l'environnement du serveur, puis redémarrez-le.</>
+                )
+              }
+            >
+              <span className="setting__icon" aria-hidden><ShoppingBag size={16} /></span>
+              {s.integrations.shopify.configured && <Tag>{s.integrations.shopify.writesEnabled ? "Modifications activées" : "Lecture seule"}</Tag>}
+              <Status on={s.integrations.shopify.configured} label={s.integrations.shopify.configured ? "Configurée" : "Non configurée"} />
             </Row>
           </>
         )}

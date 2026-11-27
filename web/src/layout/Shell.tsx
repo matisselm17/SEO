@@ -3,7 +3,7 @@ import { Menu, Moon, Sun, WifiOff, X } from "lucide-react";
 import type { SiteSummary } from "../lib/types";
 import { sitePath, usePath, type SectionName } from "../lib/router";
 import { prefetch } from "../lib/cache";
-import { keys } from "../lib/queries";
+import { keys, useSettings } from "../lib/queries";
 import { setTheme, useTheme } from "../lib/theme";
 import { DEMO_ENABLED } from "../lib/transport";
 import { Link } from "../ui/Button";
@@ -47,6 +47,7 @@ const PREFETCH: Partial<Record<SectionName, (id: string) => string>> = {
   traffic: keys.searchConsole,
   competitors: keys.competitors,
   recommendations: keys.recommendations,
+  shopify: keys.shopify,
   assistant: keys.chat,
   settings: () => keys.settings,
 };
@@ -82,6 +83,9 @@ function SidebarContent({ sites, site, section, counts, onNavigate }: {
   counts?: { critical: number };
   onNavigate?: () => void;
 }) {
+  // « Boutique Shopify » n'apparaît que si une boutique est configurée côté serveur (ou si on y est déjà, par l'adresse).
+  const shopify = useSettings().data?.integrations.shopify?.configured === true;
+  const items = NAV.filter((n) => n.id !== "shopify" || shopify || section === "shopify");
   return (
     <>
       <div className="sidebar__top">
@@ -91,7 +95,7 @@ function SidebarContent({ sites, site, section, counts, onNavigate }: {
       </div>
       <SiteSwitcher sites={sites} current={site} section={section} />
       <nav className="nav" aria-label="Sections">
-        {NAV.map((n) => {
+        {items.map((n) => {
           const to = site ? sitePath(site.id, n.id) : n.id === "settings" ? "/parametres" : "/";
           const active = n.id === section;
           const disabled = !site && n.id !== "settings";
