@@ -4,14 +4,29 @@ import type { ChatClient } from "../../src/chat/assistant.ts";
 import type { SearchProvider } from "../../src/competitors/competitors.ts";
 import { DEFAULT_LIMITS, type Config, type Limits } from "../../src/config.ts";
 import { Crawler } from "../../src/crawl/crawler.ts";
+import type { RetryPolicy } from "../../src/crawl/throttle.ts";
 import { openDb } from "../../src/db.ts";
 import { EventHub } from "../../src/events.ts";
 import { Store } from "../../src/store.ts";
 import { ShopifyService } from "../../src/shopify/service.ts";
 import { FAKE_CREDS } from "./fake-shopify.ts";
 
+/** Conduite face aux refus passagers, en millisecondes, pour des tests rapides. */
+export const FAST_RETRY: RetryPolicy = {
+  maxRetries: 3,
+  firstPauseMs: 20,
+  maxPauseMs: 60,
+  maxRetryAfterMs: 1000,
+  slowDelayMs: 5,
+  maxSlowDelayMs: 10,
+  budgetMs: 2000,
+  catalogueBudgetMs: 1000,
+};
+
 export function testEnv(
   opts: { chatClient?: ChatClient | null; searchProvider?: SearchProvider | null; delayMs?: number; limits?: Partial<Limits>; cataloguePageSize?: number; dataDir?: string;
+    /** Conduite face aux refus passagers ; par défaut des délais de quelques millisecondes (tests rapides). */
+    retry?: RetryPolicy;
     /** Boutique Shopify simulée (faux fetch) ; sans elle, la boutique n'est pas configurée. */
     shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number };
   } = {},
@@ -34,7 +49,7 @@ export function testEnv(
   };
   const store = new Store(openDb(opts.dataDir ?? ":memory:"));
   const hub = new EventHub();
-  const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024, cataloguePageSize: opts.cataloguePageSize }, limits.maxConcurrentAudits);
+  const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024, cataloguePageSize: opts.cataloguePageSize, retry: opts.retry ?? FAST_RETRY }, limits.maxConcurrentAudits);
   const shopify = new ShopifyService(store, hub, {
     creds: config.shopify,
     writesEnabled: config.shopifyWritesEnabled,

@@ -6,7 +6,8 @@
  */
 import { createHash } from "node:crypto";
 import * as cheerio from "cheerio";
-import { safeFetch } from "../net/fetch.ts";
+import { FetchError, safeFetch } from "../net/fetch.ts";
+import { DEFAULT_RETRY, isTransientStatus, parseRetryAfter, sleep, Throttle } from "./throttle.ts";
 
 /** Un produit tel que lu dans le catalogue, réduit à ce qui sert aux constats. */
 export interface CatalogueProduct {
@@ -89,40 +90,95 @@ export function toCatalogueProduct(p: RawProduct, url: string, path: string): Ca
   };
 }
 
+/** Résultat de la lecture du catalogue. */
+export type CatalogueResult =
+  | { ok: true; products: RawProduct[]; complete: boolean }
+  /** Illisible : `reason` est la cause réelle (statut HTTP ou type d'erreur, jamais le contenu reçu) ; `transient` : refus passager encore présent après les nouvelles tentatives. */
+  | { ok: false; reason: string; transient: boolean };
+
+type PageOutcome =
+  | { kind: "ok"; list: unknown[] }
+  | { kind: "permanent"; reason: string }
+  | { kind: "transient"; reason: string; retryAfterMs: number | null };
+
+/** Une page du catalogue, sans nouvelle tentative. */
+async function fetchCataloguePage(url: string, signal: AbortSignal): Promise<PageOutcome> {
+  let res;
+  try {
+    res = await safeFetch(url, {
+      signal,
+      timeoutMs: CATALOGUE_LIMITS.timeoutMs,
+      maxBytes: CATALOGUE_LIMITS.maxBytes,
+      accept: "application/json",
+      // Une redirection (vers la page du mot de passe, par exemple) n'est pas suivie.
+      shouldFollow: () => false,
+      // Le corps d'une erreur n'est jamais lu.
+      acceptBody: (status) => status === 200,
+    });
+  } catch (err) {
+    const kind = err instanceof FetchError ? err.kind : "network";
+    // Délai dépassé ou coupure réseau : passager. Adresse refusée, trop lourde… : définitif.
+    if (kind === "timeout" || kind === "network") return { kind: "transient", reason: `erreur ${kind}`, retryAfterMs: null };
+    return { kind: "permanent", reason: `erreur ${kind}` };
+  }
+  if (isTransientStatus(res.status)) return { kind: "transient", reason: `HTTP ${res.status}`, retryAfterMs: parseRetryAfter(res.headers["retry-after"]) };
+  if (res.status >= 300 && res.status < 400) return { kind: "permanent", reason: `redirection HTTP ${res.status}${/\/password(\/|$|\?)/.test(new URL(res.url).pathname) ? " vers la page du mot de passe" : ""}` };
+  if (res.status !== 200) return { kind: "permanent", reason: `HTTP ${res.status}` };
+  if (!/json/.test(res.contentType)) return { kind: "permanent", reason: "réponse qui n'est pas du JSON" };
+  let data: unknown;
+  try {
+    data = JSON.parse(res.body.toString("utf8"));
+  } catch {
+    return { kind: "permanent", reason: "JSON illisible" };
+  }
+  const raw = data && typeof data === "object" ? (data as Record<string, unknown>).products : null;
+  if (!Array.isArray(raw)) return { kind: "permanent", reason: "JSON sans liste de produits" };
+  return { kind: "ok", list: raw };
+}
+
 /**
  * Lit /products.json page par page jusqu'à une page vide (ou incomplète).
- * Renvoie null si le catalogue n'est pas lisible (désactivé, autre plateforme, erreur dès la première page).
- * `complete` vaut false si la lecture s'est arrêtée avant la fin (plafond, erreur en cours de route).
+ * Un refus passager (429, 503, délai dépassé) est retenté après une pause, selon le rythme adaptatif de l'analyse.
+ * `ok: false` si la première page n'est pas lisible ; `complete` vaut false si la lecture s'est arrêtée avant la fin
+ * (plafond, erreur en cours de route). Chaque échec est journalisé côté serveur avec sa cause (jamais le contenu).
  */
 export async function readShopifyCatalogue(
   origin: string,
-  opts: { signal: AbortSignal; pageSize?: number; maxPages?: number; onPage?(url: string): void },
-): Promise<{ products: RawProduct[]; complete: boolean } | null> {
+  opts: { signal: AbortSignal; pageSize?: number; maxPages?: number; onPage?(url: string): void; throttle?: Throttle },
+): Promise<CatalogueResult> {
   const pageSize = opts.pageSize ?? CATALOGUE_LIMITS.pageSize;
   const maxPages = opts.maxPages ?? CATALOGUE_LIMITS.maxPages;
+  const throttle = opts.throttle ?? new Throttle(DEFAULT_RETRY, 1, 0);
+  const host = new URL(origin).host;
   const products: RawProduct[] = [];
   const handles = new Set<string>();
   for (let page = 1; page <= maxPages; page++) {
-    if (opts.signal.aborted) return page === 1 ? null : { products, complete: false };
     const url = new URL(`/products.json?limit=${pageSize}&page=${page}`, origin).href;
-    opts.onPage?.(url);
-    let list: unknown[];
-    try {
-      const res = await safeFetch(url, {
-        signal: opts.signal,
-        timeoutMs: CATALOGUE_LIMITS.timeoutMs,
-        maxBytes: CATALOGUE_LIMITS.maxBytes,
-        accept: "application/json",
-        // Une redirection (vers la page du mot de passe, par exemple) n'est pas suivie.
-        shouldFollow: () => false,
-      });
-      if (res.status !== 200 || !/json/.test(res.contentType)) throw new Error("not json");
-      const data = JSON.parse(res.body.toString("utf8")) as unknown;
-      const raw = data && typeof data === "object" ? (data as Record<string, unknown>).products : null;
-      if (!Array.isArray(raw)) throw new Error("bad shape");
-      list = raw;
-    } catch {
-      return page === 1 ? null : { products, complete: false };
+    let list: unknown[] | null = null;
+    for (let attempt = 0; ; attempt++) {
+      await throttle.waitPause(opts.signal);
+      if (opts.signal.aborted) return page === 1 ? { ok: false, reason: "analyse arrêtée", transient: false } : { ok: true, products, complete: false };
+      opts.onPage?.(url);
+      const epoch = throttle.epoch;
+      const out = await fetchCataloguePage(url, opts.signal);
+      if (opts.signal.aborted) return page === 1 ? { ok: false, reason: "analyse arrêtée", transient: false } : { ok: true, products, complete: false };
+      if (out.kind === "ok") {
+        if (attempt > 0) console.info(`[catalogue] ${host} page ${page} lue après ${attempt} nouvelle(s) tentative(s)`);
+        list = out.list;
+        break;
+      }
+      if (out.kind === "permanent") {
+        console.warn(`[catalogue] ${host} page ${page} illisible : ${out.reason}`);
+        return page === 1 ? { ok: false, reason: out.reason, transient: false } : { ok: true, products, complete: false };
+      }
+      const d = throttle.onRefusal({ attempt, retryAfterMs: out.retryAfterMs, startedEpoch: epoch, pool: "catalogue" });
+      if (!d.retry) {
+        console.warn(`[catalogue] ${host} page ${page} refusée (${out.reason}), abandon après ${attempt} nouvelle(s) tentative(s) : ${d.why}`);
+        return page === 1 ? { ok: false, reason: out.reason, transient: true } : { ok: true, products, complete: false };
+      }
+      console.info(`[catalogue] ${host} page ${page} refusée (${out.reason}), nouvelle tentative dans ${Math.round(d.pauseMs / 100) / 10} s`);
+      // Pas de pause commune (refus d'une requête partie avant) : on attend au moins le délai courant.
+      if (throttle.pauseLeftMs() <= 0) await sleep(d.pauseMs, opts.signal);
     }
     let added = 0;
     for (const r of list.slice(0, pageSize)) {
@@ -133,9 +189,11 @@ export async function readShopifyCatalogue(
       added++;
     }
     // Page vide ou incomplète : fin du catalogue.
-    if (!list.length || list.length < pageSize) return { products, complete: true };
+    if (!list.length || list.length < pageSize) return { ok: true, products, complete: true };
     // Rien de nouveau sur une page pleine : la boutique ignore la pagination, la suite n'est pas lisible.
-    if (!added) return { products, complete: false };
+    if (!added) return { ok: true, products, complete: false };
+    // Entre deux pages du catalogue : le délai courant de l'analyse.
+    await sleep(throttle.delayMs, opts.signal);
   }
-  return { products, complete: false };
+  return { ok: true, products, complete: false };
 }

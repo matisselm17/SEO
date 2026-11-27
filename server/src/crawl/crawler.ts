@@ -24,6 +24,7 @@ import {
   mainLocaleFrom,
 } from "./inventory.ts";
 import { readShopifyCatalogue, toCatalogueProduct, type CatalogueProduct } from "./shopify.ts";
+import { DEFAULT_RETRY, isTransientStatus, parseRetryAfter, sleep, Throttle, type RetryPolicy } from "./throttle.ts";
 import { displayPath, exclusionReason, normalizeUrl, sameSite, urlKey } from "./url.ts";
 
 export interface CrawlOptions {
@@ -34,16 +35,11 @@ export interface CrawlOptions {
   maxPageBytes: number;
   /** Produits par page de /products.json (250 sur une vraie boutique ; réduit dans les tests pour la pagination). */
   cataloguePageSize?: number;
+  /** Conduite face aux refus passagers (429, 503) ; réduite dans les tests pour qu'ils restent rapides. */
+  retry?: RetryPolicy;
 }
 
-export const DEFAULT_CRAWL: CrawlOptions = { concurrency: 3, delayMs: 300, pageTimeoutMs: 15_000, maxPageBytes: 5 * 1024 * 1024 };
-
-const sleep = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
-  });
+export const DEFAULT_CRAWL: CrawlOptions = { concurrency: 3, delayMs: 300, pageTimeoutMs: 15_000, maxPageBytes: 5 * 1024 * 1024, retry: DEFAULT_RETRY };
 
 /** Nom du site : og:site_name, sinon la partie du titre de l'accueil qui ressemble à une marque. */
 export function siteNameFrom(title: string, siteName: string, host: string): string {
@@ -72,6 +68,7 @@ export function httpFailureReason(status: number): string {
   if (status === 404 || status === 410) return `Page introuvable (${status})`;
   if (status === 401 || status === 403) return `Accès refusé par le site (${status})`;
   if (status === 429) return "Le site a refusé le chargement : trop de demandes (429)";
+  if (status === 503) return "Le site était momentanément indisponible (503)";
   if (status >= 500) return `Erreur du serveur du site (${status})`;
   return `Erreur HTTP (${status})`;
 }
@@ -85,6 +82,15 @@ interface QueueItem {
   type: PageType;
   /** La page vient de l'inventaire (sitemap). */
   inv: boolean;
+  /** Nouvelles tentatives déjà faites après un refus passager. */
+  retries?: number;
+}
+
+/** Fin de la raison d'un échec après un refus passager, selon la raison de l'abandon. */
+function giveUpSuffix(why: "max_retries" | "budget" | "retry_after_too_long", retries: number): string {
+  if (why === "retry_after_too_long") return ", le site demande d'attendre trop longtemps avant de réessayer";
+  if (why === "budget") return retries ? `, toujours refusé après ${retries} nouvelle${retries > 1 ? "s" : ""} tentative${retries > 1 ? "s" : ""} (temps d'attente maximal atteint)` : " (temps d'attente maximal atteint)";
+  return `, toujours refusé après ${retries} nouvelle${retries > 1 ? "s" : ""} tentative${retries > 1 ? "s" : ""}`;
 }
 
 export class Crawler {
@@ -230,6 +236,8 @@ export class Crawler {
     const crawlDelayMs = robots.crawlDelay ? Math.min(robots.crawlDelay, 5) * 1000 : 0;
     const concurrency = crawlDelayMs ? 1 : opts.concurrency;
     const delayMs = Math.max(opts.delayMs, crawlDelayMs);
+    /** Rythme adaptatif : ralentit dès le premier refus passager du site, partagé avec la lecture du catalogue. */
+    const throttle = new Throttle(opts.retry ?? DEFAULT_RETRY, concurrency, delayMs);
 
     const maxPages = audit.max_pages;
     const startNorm = normalizeUrl(start, undefined, prefer)!;
@@ -245,6 +253,10 @@ export class Crawler {
     const extra = new Map<PageType, Set<string>>();
     const typeQueues = new Map<PageType, QueueItem[]>();
     const linkBuckets: QueueItem[][] = [];
+    /** Pages refusées passagèrement, à retenter en priorité (après la pause). */
+    const retryQueue: QueueItem[] = [];
+    /** Le site refuse encore alors que le temps d'attente maximal est atteint : plus aucune nouvelle page n'est chargée. */
+    let stopNew = false;
     const attemptedInv = new Set<string>();
     const analyzedKeys = new Set<string>();
     const failedKeys = new Set<string>();
@@ -367,6 +379,10 @@ export class Crawler {
     /** Parcours équilibré : les types de l'inventaire à tour de rôle, puis les liens découverts, du plus proche au plus lointain. */
     let turn = 0;
     const dequeue = (): QueueItem | null => {
+      if (retryQueue.length) {
+        queuedCount--;
+        return retryQueue.shift()!;
+      }
       for (let i = 0; i < ROUND_ROBIN.length; i++) {
         const t = ROUND_ROBIN[(turn + i) % ROUND_ROBIN.length];
         const q = typeQueues.get(t);
@@ -392,8 +408,10 @@ export class Crawler {
       store.insertFailure(audit.id, url, reason, status, item.type);
     };
 
-    const processOne = async (item: QueueItem): Promise<void> => {
+    /** Renvoie "retry" si la page a été remise en file après un refus passager. */
+    const processOne = async (item: QueueItem): Promise<"retry" | void> => {
       let res;
+      const epoch = throttle.epoch;
       try {
         res = await safeFetch(item.url.href, {
           signal,
@@ -416,6 +434,21 @@ export class Crawler {
         return;
       }
       const finalUrl = new URL(res.url);
+      if (isTransientStatus(res.status)) {
+        const retries = item.retries ?? 0;
+        const d = throttle.onRefusal({ attempt: retries, retryAfterMs: parseRetryAfter(res.headers["retry-after"]), startedEpoch: epoch, pool: "pages" });
+        if (d.retry) {
+          console.info(`[analyse] ${start.host} : refus passager (${res.status}), page remise en file (nouvelle tentative ${retries + 1}/${throttle.policy.maxRetries}) ; rythme : ${throttle.concurrency} à la fois, ${throttle.delayMs} ms`);
+          retryQueue.push({ ...item, retries: retries + 1 });
+          queuedCount++;
+          return "retry";
+        }
+        console.warn(`[analyse] ${start.host} : refus passager (${res.status}), page abandonnée (${d.why}, ${retries} nouvelle(s) tentative(s))`);
+        if (d.why === "budget") stopNew = true;
+        fail(item, finalUrl.href, httpFailureReason(res.status) + giveUpSuffix(d.why, retries), res.status);
+        if (item.depth === 0) startFailure = lowerFirst(httpFailureReason(res.status));
+        return;
+      }
       if (res.status >= 400) {
         fail(item, finalUrl.href, httpFailureReason(res.status), res.status);
         if (item.depth === 0) startFailure = lowerFirst(httpFailureReason(res.status));
@@ -498,8 +531,8 @@ export class Crawler {
       lastStarted = item.url.href;
       sync();
       try {
-        await processOne(item);
-        if (item.inv && !signal.aborted) attemptedInv.add(item.key);
+        const outcome = await processOne(item);
+        if (item.inv && !signal.aborted && outcome !== "retry") attemptedInv.add(item.key);
       } finally {
         inflight--;
         sync();
@@ -507,8 +540,15 @@ export class Crawler {
       }
     };
 
-    const worker = async (): Promise<void> => {
-      while (!signal.aborted) {
+    const worker = async (index: number): Promise<void> => {
+      while (!signal.aborted && !stopNew) {
+        // Après un refus passager, un seul chargeur continue (le premier) ; les autres s'arrêtent.
+        if (index >= throttle.concurrency) return;
+        if (throttle.pauseLeftMs() > 0) {
+          sync();
+          await throttle.waitPause(signal);
+          if (signal.aborted || stopNew) return;
+        }
         if (done + failed + inflight >= maxPages) return;
         const item = dequeue();
         if (!item) {
@@ -521,16 +561,27 @@ export class Crawler {
           continue;
         }
         await runItem(item);
-        await sleep(delayMs, signal);
+        await sleep(throttle.nextDelay(), signal);
       }
     };
 
-    // ── 2. L'accueil d'abord, seul ; puis les chargeurs en parallèle.
+    // ── 2. L'accueil d'abord, seul (retenté s'il est refusé passagèrement) ; puis les chargeurs en parallèle.
     queuedCount--;
-    await runItem(homeItem);
+    let first: QueueItem | undefined = homeItem;
+    while (first && !signal.aborted) {
+      await runItem(first);
+      first = undefined;
+      if (done === 0 && retryQueue.length) {
+        sync();
+        await throttle.waitPause(signal);
+        first = dequeue() ?? undefined;
+      }
+    }
     if (!signal.aborted && done > 0) {
-      await sleep(delayMs, signal);
-      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      await sleep(throttle.nextDelay(), signal);
+      await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)));
+      // Une page remise en file juste après l'arrêt du dernier chargeur (plafond presque atteint) est retentée quand même.
+      while (retryQueue.length && !signal.aborted && !stopNew && done + failed < maxPages) await worker(0);
     }
     if (signal.aborted) {
       sync();
@@ -545,9 +596,12 @@ export class Crawler {
       if (!productsUnknown && !unopened) catalogueStatus = "not_needed";
       else if (!robots.isAllowed("/products.json")) catalogueStatus = "unavailable";
       else {
+        // Le catalogue suit le dernier chargement de page : on observe d'abord le délai courant (et la pause en cours).
+        await sleep(throttle.delayMs, signal);
         const result = await readShopifyCatalogue(start.origin, {
           signal,
           pageSize: opts.cataloguePageSize,
+          throttle,
           onPage: (u) => {
             phaseUrl = u;
             sync();
@@ -558,8 +612,9 @@ export class Crawler {
           sync();
           return this.finishAborted(site.id, audit.id, signal);
         }
-        if (!result || !result.products.length) {
-          // Illisible, désactivé ou vide : les produits non ouverts ne sont pas couverts.
+        if (!result.ok || !result.products.length) {
+          // Illisible (cause journalisée par la lecture), désactivé ou vide : les produits non ouverts ne sont pas couverts.
+          if (result.ok) console.warn(`[catalogue] ${start.host} : catalogue vide`);
           catalogueStatus = "unavailable";
         } else {
           const prefixPath = startPrefix ? `/${startPrefix}` : "";

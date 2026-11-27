@@ -141,9 +141,37 @@ ${o.body}
 </html>`;
 }
 
-/** `catalogue` : comportement de /products.json — servi normalement, absent (404), vide, ou interdit par robots.txt. */
-export function startShopFixture(port = 0, opts: { listen?: string; slowMs?: number; catalogue?: "ok" | "404" | "empty" | "disallowed" } = {}): Promise<FixtureSite> {
+/**
+ * Refus passagers simulés : `paths` associe un chemin (ou "/products.json" pour le catalogue) au nombre de refus
+ * avant de servir normalement (Infinity : toujours refusé). `prefix` : tous les chemins qui commencent ainsi.
+ */
+export interface RefusalPlan {
+  paths?: Record<string, number>;
+  prefix?: { start: string; times: number };
+  status?: 429 | 503;
+  retryAfter?: string;
+}
+
+/**
+ * `catalogue` : comportement de /products.json — servi normalement, absent (404), vide, interdit par robots.txt,
+ * redirigé vers la page du mot de passe, ou une page HTML au lieu du JSON.
+ */
+export function startShopFixture(
+  port = 0,
+  opts: { listen?: string; slowMs?: number; catalogue?: "ok" | "404" | "empty" | "disallowed" | "password" | "html"; refuse?: RefusalPlan } = {},
+): Promise<FixtureSite> {
   const requests: string[] = [];
+  const refusedSoFar = new Map<string, number>();
+  /** Vrai si cette requête doit être refusée passagèrement (et la compte). */
+  const shouldRefuse = (p: string): boolean => {
+    const plan = opts.refuse;
+    if (!plan) return false;
+    const times = plan.paths?.[p] ?? (plan.prefix && p.startsWith(plan.prefix.start) ? plan.prefix.times : 0);
+    const n = refusedSoFar.get(p) ?? 0;
+    if (n >= times) return false;
+    refusedSoFar.set(p, n + 1);
+    return true;
+  };
   const products = shopCatalogue();
   const byHandle = new Map(products.map((p) => [p.handle, p]));
   const server = http.createServer((req, res) => {
@@ -171,6 +199,10 @@ export function startShopFixture(port = 0, opts: { listen?: string; slowMs?: num
       );
     const go = () => {
       const p = url.pathname.replace(/\/+$/, "") || "/";
+      if (shouldRefuse(p)) {
+        const status = opts.refuse?.status ?? 429;
+        return send(status, "text/html", "<h1>Too many requests</h1>", opts.refuse?.retryAfter !== undefined ? { "retry-after": opts.refuse.retryAfter } : {});
+      }
       const loc = /^\/(de|en|de-de|en-gb)(\/|$)/.exec(p)?.[1];
       if (p === "/robots.txt")
         return send(
@@ -190,6 +222,8 @@ export function startShopFixture(port = 0, opts: { listen?: string; slowMs?: num
       if (p === "/sitemap_articles_1.xml") return urlset(SHOP.articles.map((a) => `/blogs/journal/${a.handle}`));
       if (p === "/products.json") {
         if (opts.catalogue === "404") return send(404, "text/html", "<h1>Introuvable</h1>");
+        if (opts.catalogue === "password") return send(302, "text/html", "", { location: "/password" });
+        if (opts.catalogue === "html") return send(200, "text/html; charset=utf-8", "<html><body>Boutique</body></html>");
         if (opts.catalogue === "empty") return send(200, "application/json; charset=utf-8", JSON.stringify({ products: [] }));
         const limit = Math.min(250, Math.max(1, Number(url.searchParams.get("limit") ?? 30)));
         const page = Math.max(1, Number(url.searchParams.get("page") ?? 1));

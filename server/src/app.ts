@@ -38,6 +38,7 @@ import {
 } from "./competitors/competitors.ts";
 import { DEFAULT_MAX_PAGES, MAX_PAGES_LIMITS, type Config } from "./config.ts";
 import type { Crawler } from "./crawl/crawler.ts";
+import { isTransientStatus } from "./crawl/throttle.ts";
 import { bareHost, normalizeUrl, parseUserUrl } from "./crawl/url.ts";
 import { errors, HttpError, toHttpError } from "./errors.ts";
 import type { EventHub } from "./events.ts";
@@ -221,7 +222,8 @@ export function createApp(deps: AppDeps): Hono {
           throw err;
         }
       }
-      if (res.status >= 400) throw errors.unreachable(parsed.href, `il renvoie une erreur ${res.status}.`);
+      // Un refus passager (429, 503) prouve que le site répond : l'analyse saura attendre et réessayer.
+      if (res.status >= 400 && !isTransientStatus(res.status)) throw errors.unreachable(parsed.href, `il renvoie une erreur ${res.status}.`);
       finalUrl = new URL(res.url);
     } catch (err) {
       if (err instanceof HttpError) throw err;
