@@ -5,7 +5,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
 import { createClient } from "./chat/assistant.ts";
 import { FirecrawlSearch } from "./competitors/competitors.ts";
-import { loadConfig } from "./config.ts";
+import { envNamesMissing, loadConfig } from "./config.ts";
 import { Crawler, DEFAULT_CRAWL, INTERRUPTED } from "./crawl/crawler.ts";
 import { openDb } from "./db.ts";
 import { EventHub } from "./events.ts";
@@ -70,6 +70,10 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   console.log(`[serveur] Google Analytics : ${config.ga4PropertyId ? "identifiant de propriété présent" : gaRaw && !parseGa4PropertyId(gaRaw) ? "GA4_PROPERTY_ID ignoré (identifiant numérique attendu)" : "non configuré (GA4_PROPERTY_ID)"}`);
   console.log(`[serveur] Vitesse des pages : ${config.pageSpeedApiKey ? "clé présente" : "non configurée (GOOGLE_PAGESPEED_API_KEY)"}`);
   console.log(`[serveur] Concurrents : ${config.firecrawlApiKey ? "activé" : "désactivé (pas de clé FIRECRAWL_API_KEY)"}`);
+  const missing = envNamesMissing();
+  if (missing.length) {
+    console.warn(`[serveur] ATTENTION : ${missing.length} variable(s) de .env.example sont absentes de .env (${missing.join(", ")}). Si vous ne les avez pas retirées vous-même, le fichier a peut-être été écrasé par une ancienne version : une copie datée se trouve dans secrets/sauvegardes-env/.`);
+  }
   if (config.allowPrivateHosts) {
     console.warn("[serveur] ATTENTION : ALLOW_PRIVATE_HOSTS=1 autorise le chargement d'adresses internes. Réservé au développement et aux tests.");
   }

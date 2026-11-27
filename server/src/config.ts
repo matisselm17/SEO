@@ -66,6 +66,24 @@ function loadDotenv(): void {
   }
 }
 
+/**
+ * Noms des variables décrites dans `.env.example` et absentes de `.env` (ni renseignées ni même listées).
+ * Sert à signaler au démarrage un `.env` écrasé par une ancienne version. Ne lit et ne renvoie aucune valeur.
+ */
+export function envNamesMissing(): string[] {
+  const names = (file: string): Set<string> | null => {
+    try {
+      return new Set(Object.keys(parseDotenv(readFileSync(path.join(REPO_DIR, file), "utf8"))));
+    } catch {
+      return null;
+    }
+  };
+  const expected = names(".env.example");
+  const present = names(".env");
+  if (!expected || !present) return [];
+  return [...expected].filter((n) => !present.has(n)).sort();
+}
+
 /** Bornes du plafond de pages d'une analyse, et plafond par défaut d'une nouvelle analyse. */
 export const MAX_PAGES_LIMITS = { min: 1, max: 100 };
 export const DEFAULT_MAX_PAGES = 100;
