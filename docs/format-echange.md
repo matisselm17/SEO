@@ -47,11 +47,23 @@ Ce document et `shared/api.ts` sont la référence. Seul l'agent principal les m
 | `DELETE /api/sites/:siteId/chat` | | `204` | Efface la conversation |
 | `GET /api/sites/:siteId/shopify` | | `ShopifyState` | Ne lit pas toute la boutique : état de la connexion (vérifiée auprès de Shopify, gardée 60 s) et résumé de la dernière lecture |
 | `POST /api/sites/:siteId/shopify/sync` | | `ShopifyState` | Lit tous les produits, collections, pages et articles (lecture seule) et les rapproche des pages analysées. Répond quand c'est fini |
-| `GET /api/sites/:siteId/shopify/resources` | | `ShopifyResourcesResponse` | Paramètres : `type` (`ShopifyResourceType`), `q` (nom ou chemin), `missing` (`seo_title`, `seo_description` ou `image_alt` : seulement les éléments où ce champ est vide), `offset`, `limit` (défaut 50, max 200). `shopify_not_synced` avant la première lecture |
+| `GET /api/sites/:siteId/shopify/resources` | | `ShopifyResourcesResponse` | Paramètres : `type` (`ShopifyResourceType`), `q` (nom ou chemin), `missing` (`seo_title`, `seo_description` ou `image_alt` : seulement les éléments où ce champ est vide), `fix` (`seo_title` ou `seo_description` : seulement les éléments dont la page analysée ne valide pas ce critère), `offset`, `limit` (défaut 50, max 200). `shopify_not_synced` avant la première lecture |
 | `GET /api/sites/:siteId/shopify/resources/:resourceId` | | `ShopifyResourceResponse` | Relit l'élément en direct dans Shopify, avec ses traductions et son historique |
 | `POST /api/sites/:siteId/shopify/changes` | `ShopifyChangeRequest` | `201 ShopifyChangeResponse` | **Écrit dans la boutique.** Voir « Boutique Shopify » |
 | `GET /api/sites/:siteId/shopify/changes` | | `ShopifyChangesResponse` | Historique du site, le plus récent d'abord. `offset`, `limit` (défaut 50, max 200) |
 | `POST /api/sites/:siteId/shopify/changes/:changeId/restore` | | `201 ShopifyChangeResponse` | **Écrit dans la boutique** : remet la valeur d'avant. Voir « Boutique Shopify » |
+| `POST /api/sites/:siteId/search-console/sync` | `{ "days": 28 }` (28, 90 ou 480) | `SearchConsoleData` | Lit la Search Console chez Google par le compte de service. Remplace l'import précédent (`source: "google"`). `search_console_not_configured`, `search_console_no_access`, `search_console_unavailable` |
+| `GET /api/sites/:siteId/shopify/batches` | | `ShopifyBatchesResponse` | Lots de corrections, le plus récent d'abord |
+| `POST /api/sites/:siteId/shopify/batches` | `CreateBatchRequest` | `201 ShopifyBatchResponse` | Crée un brouillon. N'écrit rien dans la boutique |
+| `GET /api/sites/:siteId/shopify/batches/:batchId` | | `ShopifyBatchResponse` | |
+| `PATCH /api/sites/:siteId/shopify/batches/:batchId/items/:itemId` | `UpdateBatchItemRequest` | `ShopifyBatchResponse` | Brouillon seulement (`batch_not_editable` sinon) |
+| `POST /api/sites/:siteId/shopify/batches/:batchId/apply` | | `202 ShopifyBatchResponse` | **Écrit dans la boutique** les lignes retenues, une par une. Voir « Lots de corrections » |
+| `POST /api/sites/:siteId/shopify/batches/:batchId/restore` | | `202 ShopifyBatchResponse` | **Écrit dans la boutique** : annule chaque ligne écrite encore annulable |
+| `POST /api/sites/:siteId/shopify/batches/:batchId/stop` | | `ShopifyBatchResponse` | Arrête une écriture ou une annulation en cours après la ligne en cours ; le lot passe `partial`, rien n'est perdu |
+| `DELETE /api/sites/:siteId/shopify/batches/:batchId` | | `ShopifyBatchResponse` | Abandonne un brouillon (`cancelled`) ; le lot reste consultable |
+| `POST /api/sites/:siteId/shopify/optimize` | `OptimizeRequest` | `202 ShopifyBatchResponse` | Demande à l'IA de préparer un lot. Voir « Automatisation » |
+| `GET /api/sites/:siteId/automation` | | `AutomationState` | |
+| `PUT /api/sites/:siteId/automation` | `UpdateAutomationRequest` | `AutomationState` | |
 
 **Quelle analyse est affichée.** `overview`, `issues`, `pages`, `failed-pages` et `recommendations` portent toujours sur l'analyse désignée par `SiteSummary.results` : la dernière analyse terminée ; à défaut (première analyse en cours, ou jamais terminée), la plus récente qui a au moins une page notée. Une analyse en cours, arrêtée ou en échec ne remplace jamais une analyse terminée : pendant une relance, les résultats précédents restent affichés et `SiteSummary.audit` décrit la nouvelle analyse. Avant la première page notée, `results` et `overview.score` valent `null` et les listes sont vides — l'interface dit alors « aucune page analysée », jamais « aucun problème ».
 
@@ -91,6 +103,61 @@ Après l'écriture, le serveur relit la valeur, enregistre la modification (`bef
 
 **Limite connue.** Les éléments non publiés (brouillons) sont lus et comptés comme les autres : le format ne porte pas encore leur statut.
 
+## Lots de corrections
+
+Un lot regroupe au plus 50 propositions (élément, champ, valeur proposée). Il existe pour relire et valider plusieurs corrections d'un coup, jamais pour contourner les garde-fous : chaque ligne passe par le même chemin d'écriture qu'une modification isolée.
+
+- **Préparation.** À la création, le serveur lit la valeur actuelle de chaque champ (`before`) et valide la valeur proposée (mêmes règles : `shopify_invalid_value`). Une ligne dont la valeur proposée est déjà en place est refusée. Deux lignes ne peuvent pas viser le même champ.
+- **Aperçu et validation.** Tant que le lot est un brouillon, chaque ligne montre l'avant et l'après, peut être corrigée (`proposed`) ou écartée (`selected: false`). Rien n'est écrit.
+- **Application.** `apply` exige `SHOPIFY_WRITES_ENABLED=1`, répond tout de suite (`applying`) puis écrit les lignes retenues une par une, au rythme de la limite d'écriture. Avant chaque ligne, la valeur est relue : si elle n'est plus `before`, la ligne passe en `conflict` et le lot continue. Chaque ligne écrite devient une modification de l'historique (`ShopifyChange.batchId`). L'événement `shopify` est émis à chaque ligne. Un arrêt du serveur laisse le lot en `partial` : les lignes déjà écrites sont dans l'historique, les autres restent `pending`.
+- **Annulation.** `restore` annule, une par une, les lignes écrites encore annulables ; une ligne dont la valeur a changé depuis reste telle quelle et le dit. Chaque modification d'un lot reste aussi annulable seule depuis l'historique.
+
+## Automatisation
+
+Trois niveaux, du plus prudent au plus autonome : l'IA ne prépare rien (`off`), l'IA prépare et un humain valide (`propose`), l'IA applique seule dans des limites (`auto`). La règle (`AutomationPolicy`) s'applique à tout ce que l'IA prépare : l'outil de l'assistant comme `optimize`. Elle ne s'applique pas aux lots que l'utilisateur compose lui-même.
+
+**Quatre verrous pour qu'une écriture parte sans validation humaine**, tous nécessaires :
+
+1. `SHOPIFY_WRITES_ENABLED=1` côté serveur ;
+2. `SHOPIFY_AUTO_APPLY=1` côté serveur (`autoAllowed`) — sans lui, le mode `auto` se comporte comme `propose` ;
+3. `policy.mode` vaut `auto` ;
+4. la ligne respecte la règle (champ, type d'élément, `scope`, traductions), le filtre de contenu et le plafond d'écritures automatiques du jour.
+
+Les quatre verrous sont revérifiés **juste avant chaque écriture**, après toute attente : passer la règle sur `off` arrête un lot automatique à la ligne suivante. Seuls les lots de `optimize` peuvent être appliqués sans validation ; **un lot préparé par l'assistant attend toujours une validation humaine**, parce que la conversation mêle des pages web et des requêtes de recherche, contenus non fiables.
+
+**Filtre de contenu des écritures automatiques.** Une proposition de l'IA appliquée sans relecture est refusée (elle reste dans le lot, à valider par un humain) si elle contient une adresse web, un nom de domaine, une adresse e-mail ou un numéro de téléphone, ou si elle ne reprend aucun mot significatif du nom de l'élément. Pour toutes les écritures, humaines comprises, les caractères invisibles de mise en forme (catégorie Unicode Cf) sont refusés par `shopify_invalid_value`.
+
+Par défaut : `mode: "propose"`, champs `seo_description` seulement, types `product` et `collection`, `scope: "empty_only"`, pas de traductions, 10 lignes par lot, 20 écritures automatiques par jour, 200 000 jetons par jour.
+
+**Ce que l'IA a le droit de remplacer (`scope`).** `empty_only` : le champ est vide dans Shopify. `failing` : vide, ou l'analyse juge la valeur affichée en défaut (`audit.*Status` différent de `pass`). `any` : toute valeur. Une proposition hors règle est refusée par `automation_not_allowed` et n'entre pas dans le lot.
+
+**Budget.** Chaque appel à l'IA pour préparer des corrections est compté en jetons (entrée + sortie) ; au-delà de `aiTokensPerDay`, la préparation s'arrête avec `budget_exceeded` et le lot garde ce qui a été préparé. Les écritures automatiques sont comptées contre `maxAutoChangesPerDay` ; au-delà, le reste du lot attend une validation humaine (le lot repasse en `draft`). Les compteurs repartent à minuit UTC (`usage.resetsAt`).
+
+**`optimize`.** Le serveur choisit les éléments que la règle autorise pour le champ demandé (d'abord ceux dont la page analysée est en défaut, puis les champs vides), demande à l'IA une proposition par élément à partir du nom, du texte de l'élément et des repères de la grille (titre 30 à 60 caractères, description 70 à 160), valide chaque proposition comme une saisie humaine, et crée le lot. Texte alternatif : l'IA décrit l'image à partir du nom du produit et de l'image elle-même.
+
+**L'assistant.** Il dispose d'un outil pour proposer des corrections : il crée un lot (`ChatMessage.batchIds`). En `propose`, le lot attend la validation dans la section Boutique Shopify ; en `auto` avec les quatre verrous, il est appliqué et l'assistant le dit. L'assistant n'a aucun autre moyen d'écrire.
+
+**Le contenu de la boutique est une donnée, jamais une consigne.** Un texte de produit qui « demande » une action ne change ni la règle ni les plafonds : ils sont vérifiés par le serveur, hors de portée de l'IA.
+
+**Traçabilité.** Tout ce que l'IA écrit est dans l'historique, avec son lot (`origin`, `autoApplied`), et reste annulable.
+
+**Précisions.**
+
+- Statuts : `automation_off` 409 ; `automation_not_allowed` 403 ; `budget_exceeded` 429 avec `details.resetsAt` ; `batch_not_editable` 409 ; un lot déjà en cours d'écriture sur le site : `limit_reached` 409 ; `search_console_not_configured` 503 ; `search_console_no_access` 403 avec `details.account` ; `search_console_unavailable` 502 avec `details.retryable`.
+- Bornes des plafonds : 1 à 50 lignes par lot ; 0 à 200 écritures automatiques par jour (0 : aucune, même en `auto`) ; 10 000 à 2 000 000 jetons par jour.
+- `scope: "failing"` ne peut rien juger pour une traduction ni pour une image : dans ces deux cas le champ doit être vide pour être remplacé.
+- Pendant une annulation de lot, l'état est `applying`. `apply` accepte aussi un lot `partial` qui a encore des lignes retenues en attente (après un arrêt du serveur). Une préparation interrompue par un arrêt laisse un brouillon s'il y a déjà des lignes, sinon `failed`.
+- L'outil de l'assistant ne propose que des titres et descriptions pour Google, pas de texte alternatif.
+- `aiTokensPerDay` ne compte et ne limite que la préparation (`optimize`), pas la conversation avec l'assistant. Ce n'est pas un des quatre verrous : il empêche de préparer, pas d'écrire.
+- Un seul lot en écriture ou en annulation par site : la place est réservée avant tout appel à Shopify ; une seconde demande répond `limit_reached`. Une ligne déjà écrite ou annulée ne change plus d'état.
+- Limites de débit : 10 créations de lot, 5 préparations par l'IA et 10 enregistrements de règle par minute (`rate_limited`).
+- Vider un champ (`metafieldsDelete`) n'est pas conditionnel chez Shopify : la valeur est relue juste avant, mais une modification faite dans l'administration Shopify dans la même seconde serait effacée.
+- Search Console : la période lue se termine deux jours avant la date du jour (retard de publication de Google). Avec `source: "google"`, `PageDetail.queries` vaut `[]` pour une page sans requête ; avec un export déposé, `null`.
+
+## Search Console
+
+Deux sources, la plus récente remplace l'autre : l'export déposé (`source: "file"`) ou la lecture directe (`source: "google"`). La lecture directe utilise un compte de service Google dont le fichier JSON est sur le serveur (`GOOGLE_SERVICE_ACCOUNT_FILE`, par défaut `secrets/google-service-account.json` à la racine du dépôt, dossier ignoré par git). Accès en lecture seule (`webmasters.readonly`). La propriété lue est celle de `GSC_PROPERTY`, sinon celle du compte de service qui correspond à l'hôte du site (`sc-domain:hôte`, puis `https://hôte/`). La lecture directe relie les requêtes aux pages : `PageDetail.queries` est alors renseigné. Une lecture par minute au plus.
+
 ## Flux en direct
 
 ### `GET /api/sites/:siteId/events`
@@ -107,7 +174,7 @@ data: {"type":"audit","audit":{…AuditStatus},"score":71}
 - `audit` : à chaque changement réel (page terminée, page mise en file, changement d'état), au plus 4 par seconde.
 - `page` : une page vient d'être notée (`PageSummary`).
 - `search_console` : un import a été ajouté ou supprimé.
-- `shopify` : la boutique a été relue ou modifiée.
+- `shopify` : la boutique a été relue ou modifiée, ou un lot de corrections a avancé.
 - Un commentaire `: ping` toutes les 20 secondes pour garder la connexion.
 
 **Progression réelle.** L'interface affiche `pagesDone`, `pagesQueued`, `pagesFailed` et `currentUrl`. Le total final n'est pas connu d'avance : aucun pourcentage n'est calculé tant que `state` n'est pas `done`.
@@ -129,7 +196,7 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 
 ## Protection du serveur
 
-- Toute requête `/api` dont l'en-tête `Host` n'est pas `localhost`, `127.0.0.1` ou `[::1]` (sur le port du serveur), ni un hôte déclaré dans `ALLOWED_HOSTS`, est refusée (statut 403) : une page web tierce ne peut pas atteindre le serveur par rebond DNS.
+- Toute requête `/api` dont l'en-tête `Host` n'est pas `localhost`, `127.0.0.1` ou `[::1]` (sur le port du serveur, ou 5173 pour le relais de l'interface en développement), ni un hôte déclaré dans `ALLOWED_HOSTS`, est refusée (statut 403) : une page web tierce ne peut pas atteindre le serveur par rebond DNS.
 - Les routes qui modifient (POST, PATCH, DELETE) exigent `content-type: application/json` (ou multipart pour le dépôt de fichier) et refusent un en-tête `Origin` qui n'est pas celui du serveur.
 - Le corps d'une requête est limité au fil de la lecture : 64 Ko en JSON, 21 Mo pour le dépôt.
 - Limites : nombre de sites, analyses simultanées (les suivantes attendent en `queued`), demandes par minute à l'assistant et au relevé des concurrents. Dépassement : `rate_limited` (statut 429) ou `limit_reached` (statut 409).
@@ -152,3 +219,7 @@ La réponse est un flux `text/event-stream` : un `start` (le message de l'utilis
 | `SHOPIFY_CLIENT_SECRET` | Secret de l'application Shopify | non |
 | `SHOPIFY_WRITES_ENABLED` | `1` pour autoriser le serveur à écrire dans la boutique | non — sans elle, la boutique est en lecture seule |
 | `ALLOWED_HOSTS` | Hôtes publics acceptés dans l'en-tête `Host`, séparés par des virgules (ex. `seo.exemple.fr`) | non — à renseigner chez un hébergeur |
+| `SHOPIFY_AUTO_APPLY` | `1` pour autoriser le mode d'automatisation « auto » (écritures sans validation humaine) | non — sans elle, l'IA propose, un humain valide |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | Chemin du fichier JSON du compte de service Google | non — par défaut `secrets/google-service-account.json` s'il existe |
+| `GSC_PROPERTY` | Propriété Search Console à lire, ex. `sc-domain:exemple.fr` | non — déduite de l'hôte du site |
+| `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD` | Identifiants de l'API DataForSEO | non — aucune fonctionnalité ne s'en sert encore |

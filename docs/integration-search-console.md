@@ -1,6 +1,8 @@
 # Connexion directe à Google Search Console : préparation
 
-État au 27 novembre 2026 : **rien de ceci n'est codé.** Aujourd'hui, les données de la Search Console entrent par le dépôt manuel de l'export (`POST /api/sites/:siteId/search-console`, `server/src/gsc/import.ts`). Ce document fixe ce qu'il faut pour les lire directement chez Google, afin que le travail puisse démarrer dès que les accès existent.
+État au 27 novembre 2026 (soir) : **la lecture directe est codée (`server/src/gsc/google.ts`) et testée contre un faux Google ; elle n'a jamais été essayée chez Google**, faute de compte de service. Le dépôt manuel de l'export reste disponible. La description du contrat est dans `docs/format-echange.md`, section « Search Console ».
+
+**Où placer le fichier du compte de service :** `secrets/google-service-account.json` à la racine du dépôt (le dossier `secrets/` existe, il est ignoré par git et lisible par le seul propriétaire de la machine). Aucun autre réglage n'est nécessaire ; `GOOGLE_SERVICE_ACCOUNT_FILE` ne sert que pour un autre emplacement.
 
 Cela revient sur une décision du client notée dans `docs/etat-du-projet.md` (« pas de connexion automatique »). Le dépôt manuel reste disponible : la connexion directe s'y ajoute, elle ne le remplace pas.
 
@@ -30,18 +32,17 @@ Même principe que Shopify : un identifiant rangé côté serveur, pas de fenêt
 1. Dans Google Cloud (console.cloud.google.com) : créer un projet, activer l'API « Google Search Console API ».
 2. Créer un compte de service, puis une clé au format JSON. Le fichier téléchargé est un secret.
 3. Dans la Search Console du site : Paramètres → Utilisateurs et autorisations → ajouter l'adresse e-mail du compte de service avec le droit **Limité** (lecture seule).
-4. Ranger le fichier JSON hors du dépôt et donner son chemin au serveur dans `.env`.
+4. Renommer le fichier JSON en `google-service-account.json` et le déposer dans le dossier `secrets/` du projet, puis redémarrer le serveur.
 
 Aucune de ces étapes ne peut être faite par le logiciel ni par un agent : elles engagent le compte Google du propriétaire.
 
-### Variables prévues (à ajouter à `.env.example` quand le code existera)
+### Variables (facultatives)
 
 | Variable | Rôle |
 |---|---|
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | Chemin du fichier JSON du compte de service |
 | `GSC_PROPERTY` | Propriété à lire, ex. `sc-domain:orluxjewelry.com` ou `https://orluxjewelry.com/` |
 
-Elles ne figurent pas encore dans `.env.example` : aucune variable n'y est listée tant que le serveur ne la lit pas.
 
 ## Plan technique
 
@@ -73,6 +74,6 @@ Elles ne figurent pas encore dans `.env.example` : aucune variable n'y est list�
 
 Les deux connexions se complètent : la Search Console dit quelles pages reçoivent des impressions sans clics (titre ou description à revoir en priorité), la boutique Shopify permet de corriger ces champs. Le tri « par où commencer » de la section Boutique Shopify pourra alors s'appuyer sur les impressions réelles au lieu du seul nombre de champs vides.
 
-## Ce qui bloque aujourd'hui
+## Ce qui reste
 
-Uniquement les quatre étapes du propriétaire ci-dessus. Sans le fichier du compte de service, rien ne peut être testé en réel ; l'authentification et la conversion peuvent en revanche être écrites et testées avec un faux Google.
+Les quatre étapes du propriétaire ci-dessus, puis un premier essai réel : Mots-clés et trafic organique → « Lire depuis Google ». L'inspection d'URL et la lecture des sitemaps déclarés ne sont pas codées.

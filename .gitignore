@@ -6,3 +6,5 @@ node_modules/
 *.sqlite-journal
 data/
 .DS_Store
+secrets/
+themes/

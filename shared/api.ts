@@ -34,6 +34,13 @@ export type ErrorCode =
   | "shopify_missing_scope" // l'application Shopify n'a pas la permission nécessaire ; details.scope
   | "shopify_conflict" // la valeur a changé dans Shopify depuis sa dernière lecture ; rien n'a été écrit
   | "shopify_invalid_value" // la valeur demandée est refusée telle quelle (trop longue, caractères < ou >) ; rien n'a été écrit
+  | "search_console_not_configured" // pas de compte de service Google côté serveur
+  | "search_console_no_access" // le compte de service n'a accès à aucune propriété de ce site ; details.account = son adresse e-mail
+  | "search_console_unavailable" // Google est injoignable ou a refusé ; details.retryable
+  | "automation_off" // l'automatisation est sur « arrêtée » pour ce site
+  | "automation_not_allowed" // la règle d'autorisation refuse cette correction ; le message dit laquelle
+  | "budget_exceeded" // plafond du jour atteint (modifications ou jetons d'IA) ; details.resetsAt
+  | "batch_not_editable" // ce lot n'est plus un brouillon
   | "bad_request"
   | "internal";
 
@@ -69,6 +76,11 @@ export interface AuditStatus {
   pagesQueued: number;
   /** Adresse en cours de lecture : une page, ou pendant l'inventaire un sitemap ou le catalogue. null si aucune. */
   currentUrl: string | null;
+  /**
+   * Le site limite les demandes : le parcours est en pause jusqu'à cette date, puis reprend plus lentement.
+   * null hors pause. L'interface le dit au lieu de laisser croire que l'analyse est figée.
+   */
+  pausedUntil: string | null;
   /** Renseigné quand state vaut "failed". */
   error: ApiError["error"] | null;
 }
@@ -318,6 +330,8 @@ export type SearchConsoleData =
   | {
       available: true;
       importedAt: string;
+      /** "file" : export déposé. "google" : lu directement dans la Search Console. */
+      source: "file" | "google";
       /**
        * Rapprochement avec l'analyse : pages de l'export retrouvées parmi les pages notées.
        * null si l'export ne contient pas le fichier des pages. Les adresses d'un autre site sont écartées à l'import.
@@ -456,6 +470,11 @@ export interface ShopifyState {
     counts: Record<ShopifyResourceType, number>;
     /** Sur l'ensemble des éléments lus. */
     missing: { seoTitle: number; seoDescription: number; imagesWithoutAlt: number; images: number };
+    /**
+     * Parmi les `audited` éléments dont la page a été ouverte par l'analyse affichée : ceux dont le titre ou la
+     * description réellement affichés ne valident pas la grille ("warn" ou "fail").
+     */
+    toFix: { audited: number; title: number; description: number };
   } | null;
 }
 
@@ -479,6 +498,17 @@ export interface ShopifyResourceSummary {
   pageScore: number | null;
   /** Nombre de modifications faites par le logiciel sur cet élément. */
   changes: number;
+  /**
+   * Ce que l'analyse a constaté sur la page réellement affichée aux visiteurs et à Google ; null si la page
+   * n'a pas été ouverte. C'est ce verdict, et non le fait qu'un champ soit vide dans Shopify, qui dit s'il y a
+   * un problème : un titre vide dans Shopify est remplacé par le nom de l'élément, souvent correct.
+   */
+  audit: {
+    renderedTitle: string | null;
+    titleStatus: CheckStatus;
+    renderedDescription: string | null;
+    descriptionStatus: CheckStatus;
+  } | null;
 }
 
 export interface ShopifyImage {
@@ -545,6 +575,8 @@ export interface ShopifyChange {
   restoresChangeId: string | null;
   /** Modification qui a annulé celle-ci ; null si elle est toujours en place. */
   restoredByChangeId: string | null;
+  /** Lot de corrections auquel cette modification appartient ; null pour une modification isolée. */
+  batchId: string | null;
   /**
    * true si cette modification peut être annulée : c'est la dernière faite sur ce champ (même élément,
    * même image, même langue) et elle n'a pas déjà été annulée.
@@ -576,6 +608,130 @@ export interface ShopifyChangeRequest {
 export interface ShopifyChangeResponse { change: ShopifyChange; resource: ShopifyResourceDetail }
 /** GET /api/sites/:siteId/shopify/changes?offset=&limit= — la plus récente d'abord. */
 export interface ShopifyChangesResponse { changes: ShopifyChange[]; total: number; offset: number; limit: number }
+
+// ───────────────────────── Lots de corrections ─────────────────────────
+
+/** Qui a préparé une proposition : l'utilisateur, l'assistant dans la conversation, ou l'optimisation automatique. */
+export type ProposalOrigin = "manual" | "assistant" | "automation";
+
+export interface ShopifyBatchItem {
+  id: string;
+  resourceId: string;
+  resourceType: ShopifyResourceType;
+  resourceTitle: string;
+  path: string;
+  field: ShopifyField;
+  image: { id: string; url: string } | null;
+  locale: string | null;
+  /** Valeur lue dans Shopify quand la proposition a été préparée. C'est elle qui sera comparée avant d'écrire. */
+  before: string | null;
+  /** Valeur proposée, modifiable tant que le lot est un brouillon. */
+  proposed: string;
+  /** Pourquoi cette proposition, en une phrase (rédigée par l'IA pour "assistant" et "automation") ; null sinon. */
+  note: string | null;
+  /** false : l'utilisateur a écarté cette ligne, elle ne sera pas écrite. */
+  selected: boolean;
+  /**
+   * "pending" : pas encore écrite. "applied" : écrite (voir changeId). "conflict" : la valeur avait changé dans
+   * Shopify, rien n'a été écrit. "failed" : Shopify a refusé (voir error). "skipped" : écartée. "restored" : écrite puis annulée.
+   */
+  state: "pending" | "applied" | "conflict" | "failed" | "skipped" | "restored";
+  changeId: string | null;
+  error: string | null;
+  /** true si cette ligne a été écrite sans validation humaine, par la règle d'automatisation. */
+  autoApplied: boolean;
+}
+
+export interface ShopifyBatchSummary {
+  id: string;
+  title: string;
+  origin: ProposalOrigin;
+  createdAt: string;
+  /**
+   * "preparing" : l'IA rédige les propositions. "draft" : à relire et valider. "applying" : écriture en cours,
+   * une valeur après l'autre. "applied" : toutes les lignes retenues sont écrites. "partial" : certaines lignes
+   * sont en conflit ou en échec. "cancelled" : abandonné sans rien écrire. "restored" : tout a été annulé.
+   * "failed" : la préparation a échoué (voir error).
+   */
+  state: "preparing" | "draft" | "applying" | "applied" | "partial" | "cancelled" | "restored" | "failed";
+  /** true si au moins une ligne du lot a été écrite sans validation humaine (voir `ShopifyBatchItem.autoApplied`). */
+  autoApplied: boolean;
+  counts: { total: number; selected: number; applied: number; conflict: number; failed: number; restored: number };
+  error: ApiError["error"] | null;
+  finishedAt: string | null;
+}
+
+export interface ShopifyBatch extends ShopifyBatchSummary {
+  /** Au plus 50 lignes. */
+  items: ShopifyBatchItem[];
+}
+
+/** GET /api/sites/:siteId/shopify/batches — le plus récent d'abord. */
+export interface ShopifyBatchesResponse { batches: ShopifyBatchSummary[] }
+export interface ShopifyBatchResponse { batch: ShopifyBatch }
+/** POST /api/sites/:siteId/shopify/batches — crée un brouillon ; le serveur lit lui-même les valeurs actuelles. */
+export interface CreateBatchRequest {
+  title?: string;
+  items: Array<{ resourceId: string; field: ShopifyField; imageId?: string; locale?: string | null; value: string }>;
+}
+/** PATCH /api/sites/:siteId/shopify/batches/:batchId/items/:itemId — brouillon seulement. */
+export interface UpdateBatchItemRequest { proposed?: string; selected?: boolean }
+/**
+ * POST /api/sites/:siteId/shopify/optimize — demande à l'IA de préparer un lot pour un champ.
+ * Répond tout de suite (202) avec le lot en "preparing" ; la suite arrive par l'événement `shopify`.
+ */
+export interface OptimizeRequest {
+  field: "seo_title" | "seo_description" | "image_alt";
+  resourceType?: ShopifyResourceType;
+  /** Nombre de propositions demandé ; borné par la règle d'automatisation. */
+  limit?: number;
+}
+
+// ───────────────────────── Automatisation ─────────────────────────
+
+/** Règle d'autorisation de tout ce que l'IA prépare ou applique (assistant et optimisation automatique). */
+export interface AutomationPolicy {
+  /**
+   * "off" : l'IA ne prépare aucune correction. "propose" : elle prépare des lots, un humain les valide.
+   * "auto" : les lots de « Préparer des corrections avec l'IA » (`optimize`) sont appliqués seuls, dans les
+   * limites ci-dessous ; exige en plus l'accord du serveur (`autoAllowed`). Les lots préparés par l'assistant
+   * dans la conversation attendent toujours une validation humaine, quel que soit le mode.
+   */
+  mode: "off" | "propose" | "auto";
+  /** Champs que l'IA a le droit de proposer. */
+  fields: ShopifyField[];
+  resourceTypes: ShopifyResourceType[];
+  /**
+   * Ce que l'IA a le droit de remplacer. "empty_only" : seulement un champ vide. "failing" : un champ vide ou
+   * jugé en défaut par l'analyse. "any" : n'importe quelle valeur.
+   */
+  scope: "empty_only" | "failing" | "any";
+  /** L'IA peut-elle proposer des traductions. */
+  translations: boolean;
+  /** Lignes au plus par lot préparé par l'IA. */
+  maxChangesPerRun: number;
+  /** Écritures au plus par jour appliquées sans validation humaine (mode "auto"). */
+  maxAutoChangesPerDay: number;
+  /** Jetons d'IA au plus par jour pour « Préparer des corrections avec l'IA » (entrée + sortie). Ne limite pas la conversation avec l'assistant. */
+  aiTokensPerDay: number;
+}
+
+/** GET /api/sites/:siteId/automation */
+export interface AutomationState {
+  policy: AutomationPolicy;
+  /** Bornes acceptées pour les trois plafonds. */
+  limits: { maxChangesPerRun: { min: number; max: number }; maxAutoChangesPerDay: { min: number; max: number }; aiTokensPerDay: { min: number; max: number } };
+  /** Le serveur autorise le mode "auto" (SHOPIFY_AUTO_APPLY=1). Sans lui, "auto" se comporte comme "propose". */
+  autoAllowed: boolean;
+  /** Le serveur accepte d'écrire dans la boutique (SHOPIFY_WRITES_ENABLED=1). */
+  writesEnabled: boolean;
+  /** Une clé d'API Claude est configurée : sans elle, l'IA ne peut rien préparer. */
+  aiConfigured: boolean;
+  /** Consommation du jour (jour UTC). */
+  usage: { day: string; autoChanges: number; aiTokens: number; resetsAt: string };
+}
+/** PUT /api/sites/:siteId/automation */
+export interface UpdateAutomationRequest { policy: AutomationPolicy }
 
 // ───────────────────────── Vue d'ensemble ─────────────────────────
 
@@ -618,6 +774,8 @@ export interface ChatMessage {
   createdAt: string;
   /** Données consultées par l'assistant pour répondre, ex. ["Problèmes du site", "Page /collections/all"]. */
   sources: string[];
+  /** Lots de corrections que l'assistant a préparés (ou appliqués) dans cette réponse. Vide le plus souvent. */
+  batchIds: string[];
 }
 
 export interface ChatState {
@@ -641,6 +799,10 @@ export interface Settings {
     competitors: { configured: boolean };
     /** `writesEnabled` : le serveur accepte d'écrire dans la boutique (SHOPIFY_WRITES_ENABLED=1). */
     shopify: { configured: boolean; writesEnabled: boolean };
+    /** Compte de service Google présent côté serveur : la Search Console peut être lue directement. */
+    searchConsole: { configured: boolean };
+    /** Identifiants DataForSEO présents côté serveur. Aucune fonctionnalité ne s'en sert encore. */
+    dataForSeo: { configured: boolean };
   };
   version: string;
 }

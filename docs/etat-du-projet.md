@@ -31,6 +31,25 @@ Note de passage pour reprendre le travail dans une nouvelle session. Les règles
 - Permission absente : `write_themes` (corriger le double H1 dans le thème). Shopify ne l'accorde que sur demande d'exemption.
 - Les deux défauts du parcours trouvés le matin restent à corriger : catalogue public déclaré inaccessible à tort, pages refusées (429) sans nouvelle tentative. La connexion Shopify permettrait de lire le catalogue par l'API au lieu de `/products.json`.
 
+## Ajouté le 27 novembre (soir) : vers une optimisation autonome
+
+- **Parcours** : un refus passager (429, 503) est retenté avec ralentissement, le catalogue aussi ; l'analyse réelle donne 100 pages, 0 échec, catalogue lu. La nouvelle tentative n'a pas été observée en réel (aucun 429 pendant les essais).
+- **Ce que voit Google** : la section Boutique s'appuie sur le verdict de l'analyse de la page affichée, pas sur les champs vides. Constats et origine des H1 dans `docs/analyse-titres-et-h1.md`.
+- **Lots de corrections** : jusqu'à 50 propositions, aperçu avant/après, validation, écriture ligne par ligne, arrêt, annulation du lot.
+- **Automatisation** : règle par site (niveau, champs, types, ce que l'IA peut remplacer, plafonds), « Préparer des corrections avec l'IA », outil de l'assistant qui prépare des lots. Quatre verrous pour une écriture sans validation humaine ; `SHOPIFY_AUTO_APPLY` est vide. Les lots de l'assistant sont toujours à valider.
+- **Search Console directe** : codée, jamais essayée chez Google. Fichier attendu : `secrets/google-service-account.json`.
+- **Préparé, non exécuté** : premier test d'écriture (`docs/premier-test-ecriture.md`), Theme Access (`docs/theme-access.md`, `scripts/theme.sh`), DataForSEO (`docs/integration-dataforseo.md`).
+- **Sauvegarde** de la boutique en lecture seule : `npm --prefix server run shopify:sauvegarde` → `data/sauvegardes/`.
+
+**Toujours vrai : aucune écriture n'a été envoyée à la vraie boutique.** Lots, automatisation et annulation ne sont vérifiés que contre un faux Shopify et un client Claude simulé (trois appels réels à Claude ont seulement produit des propositions, non écrites).
+
+### Prochaines corrections proposées, non faites
+
+- H1 : `sections/faq.liquid` et `sections/contact-form.liquid` (`h1` → `h2`), H1 de l'accueil et des collections, sur une copie du thème.
+- 19 articles dont le texte commence par un `<h1>` en double : demande un outil de modification du texte des articles, avec aperçu et restauration.
+- Texte alternatif des images de collection et d'article : à vérifier sur une boutique d'essai.
+- Le site public a renvoyé une page de vérification anti-robot après de nombreux chargements le 27 novembre : espacer les analyses.
+
 ## Vérifié
 
 - `npm --prefix server run typecheck` et `npm --prefix server run test` : 108 tests réussis.
