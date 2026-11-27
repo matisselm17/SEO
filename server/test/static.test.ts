@@ -18,7 +18,7 @@ test("sert web/dist avec repli sur index.html, sans sortir du dossier", async ()
   const store = new Store(openDb(":memory:"));
   const hub = new EventHub();
   const app = createApp({
-    config: { port: 0, host: "127.0.0.1", limits: DEFAULT_LIMITS, dataDir: ":memory:", anthropicApiKey: null, anthropicModel: "m", firecrawlApiKey: null, shopify: null, shopifyWritesEnabled: false, shopifyAutoApply: false, googleServiceAccountFile: "/nonexistent/compte.json", gscProperty: null, dataForSeo: null, allowedHosts: [], allowPrivateHosts: false, version: "0.1.0", webDist: dir },
+    config: { port: 0, host: "127.0.0.1", limits: DEFAULT_LIMITS, dataDir: ":memory:", anthropicApiKey: null, anthropicModel: "m", firecrawlApiKey: null, shopify: null, shopifyWritesEnabled: false, shopifyAutoApply: false, googleServiceAccountFile: "/nonexistent/compte.json", gscProperty: null, ga4PropertyId: null, pageSpeedApiKey: null, dataForSeo: null, allowedHosts: [], allowPrivateHosts: false, version: "0.1.0", webDist: dir },
     store, hub, crawler: new Crawler(store, hub), chatClient: null, searchProvider: null,
   });
   const home = await app.request("/");

@@ -211,3 +211,15 @@ test("conversion : textes bornés, dates invalides écartées, totaux pondérés
   assert.equal(empty.series, null);
   assert.ok(new SearchConsoleClient({ file: FILE, property: null }).configured);
 });
+
+test("API Search Console non activée (403 SERVICE_DISABLED) : search_console_unavailable, pas « aucun accès »", async () => {
+  const impl = (async (url: string) => {
+    if (url === "https://oauth2.googleapis.com/token") return Response.json({ access_token: "jeton-google-1", expires_in: 3599 });
+    return Response.json({ error: { code: 403, status: "PERMISSION_DENIED", message: `détail ${EMAIL}`, details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "SERVICE_DISABLED" }] } }, { status: 403 });
+  }) as unknown as typeof fetch;
+  const client = new SearchConsoleClient({ file: FILE, property: null, fetchImpl: impl });
+  await assert.rejects(client.read(HOST, 28), (err: any) => err.code === "search_console_unavailable" && err.details.retryable === false && !String(err.message).includes("détail"));
+  // Sans motif : toujours « aucun accès », avec l'adresse du compte.
+  const plain = (async (url: string) => (url === "https://oauth2.googleapis.com/token" ? Response.json({ access_token: "jeton-google-1", expires_in: 3599 }) : new Response("{}", { status: 403 }))) as unknown as typeof fetch;
+  await assert.rejects(new SearchConsoleClient({ file: FILE, property: null, fetchImpl: plain }).read(HOST, 28), (err: any) => err.code === "search_console_no_access" && err.details.account === EMAIL);
+});

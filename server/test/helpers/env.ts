@@ -13,6 +13,9 @@ import { FAKE_CREDS } from "./fake-shopify.ts";
 import { BatchService } from "../../src/shopify/batches.ts";
 import { Optimizer } from "../../src/automation/optimize.ts";
 import { SearchConsoleClient } from "../../src/gsc/google.ts";
+import { AnalyticsClient } from "../../src/google/analytics.ts";
+import { PageSpeedClient } from "../../src/google/pagespeed.ts";
+import { PageSpeedService } from "../../src/speed/service.ts";
 
 /** Conduite face aux refus passagers, en millisecondes, pour des tests rapides. */
 export const FAST_RETRY: RetryPolicy = {
@@ -33,7 +36,9 @@ export function testEnv(
     /** Boutique Shopify simulée (faux fetch) ; sans elle, la boutique n'est pas configurée. */
     shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number; autoApply?: boolean; sleep?: (ms: number) => Promise<void> };
     /** Search Console simulée : fichier du compte de service et faux fetch de Google. */
-    google?: { file: string; fetchImpl: typeof fetch; property?: string | null; now?: () => number };
+    google?: { file: string; fetchImpl: typeof fetch; property?: string | null; now?: () => number; ga4PropertyId?: string | null };
+    /** PageSpeed Insights simulé : clé d'essai et faux fetch de Google. */
+    pagespeed?: { apiKey: string | null; fetchImpl: typeof fetch; now?: () => number; timeoutMs?: number };
   } = {},
 ) {
   const limits = { ...DEFAULT_LIMITS, ...opts.limits };
@@ -50,6 +55,8 @@ export function testEnv(
     shopifyAutoApply: opts.shopify?.autoApply ?? false,
     googleServiceAccountFile: opts.google?.file ?? "/nonexistent/google-service-account.json",
     gscProperty: opts.google?.property ?? null,
+    ga4PropertyId: opts.google?.ga4PropertyId ?? null,
+    pageSpeedApiKey: opts.pagespeed?.apiKey ?? null,
     dataForSeo: null,
     allowedHosts: [],
     allowPrivateHosts: true,
@@ -77,8 +84,17 @@ export function testEnv(
     }),
     now: opts.google?.now,
   });
-  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify, batches, optimizer, searchConsole });
-  return { app, store, hub, crawler, config, shopify, batches, optimizer, searchConsole };
+  const analytics = new AnalyticsClient({ auth: searchConsole.auth, propertyId: config.ga4PropertyId });
+  const pagespeed = new PageSpeedService(store, hub, new PageSpeedClient({
+    apiKey: config.pageSpeedApiKey,
+    fetchImpl: opts.pagespeed?.fetchImpl ?? (async () => {
+      throw new Error("aucun appel réseau à PageSpeed Insights dans ce test");
+    }),
+    now: opts.pagespeed?.now,
+    timeoutMs: opts.pagespeed?.timeoutMs,
+  }));
+  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify, batches, optimizer, searchConsole, analytics, pagespeed });
+  return { app, store, hub, crawler, config, shopify, batches, optimizer, searchConsole, analytics, pagespeed };
 }
 
 /** Lit un flux SSE complet et renvoie les événements { event, data }. */

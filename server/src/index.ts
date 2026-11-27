@@ -13,6 +13,9 @@ import { setAllowPrivateHosts } from "./net/fetch.ts";
 import { Store } from "./store.ts";
 import { ShopifyService } from "./shopify/service.ts";
 import { BatchService, recoverInterruptedBatches } from "./shopify/batches.ts";
+import { PageSpeedClient } from "./google/pagespeed.ts";
+import { PageSpeedService } from "./speed/service.ts";
+import { parseGa4PropertyId } from "./config.ts";
 
 const config = loadConfig();
 setAllowPrivateHosts(config.allowPrivateHosts);
@@ -23,6 +26,8 @@ const crawler = new Crawler(store, hub, DEFAULT_CRAWL, config.limits.maxConcurre
 
 const shopify = new ShopifyService(store, hub, { creds: config.shopify, writesEnabled: config.shopifyWritesEnabled });
 const batches = new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply });
+// L'état « en cours » des mesures de vitesse vit en mémoire : une mesure interrompue par un arrêt n'est pas reprise.
+const pagespeed = new PageSpeedService(store, hub, new PageSpeedClient({ apiKey: config.pageSpeedApiKey }));
 
 const app = createApp({
   config,
@@ -31,6 +36,7 @@ const app = createApp({
   crawler,
   shopify,
   batches,
+  pagespeed,
   chatClient: config.anthropicApiKey ? createClient(config.anthropicApiKey) : null,
   searchProvider: config.firecrawlApiKey ? new FirecrawlSearch(config.firecrawlApiKey) : null,
 });
@@ -59,6 +65,10 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   // Le domaine myshopify.com n'est jamais journalisé.
   console.log(`[serveur] Shopify : ${config.shopify ? `configuré, ${config.shopifyWritesEnabled ? "écritures ACTIVÉES (SHOPIFY_WRITES_ENABLED=1)" : "lecture seule"}` : "non configuré (SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET)"}`);
   console.log(`[serveur] Écritures automatiques (SHOPIFY_AUTO_APPLY) : ${config.shopifyAutoApply ? "autorisées par le serveur" : "non autorisées"}`);
+  // Ni le chemin du compte de service, ni l'identifiant de propriété, ni la clé ne sont journalisés.
+  const gaRaw = process.env.GA4_PROPERTY_ID?.trim();
+  console.log(`[serveur] Google Analytics : ${config.ga4PropertyId ? "identifiant de propriété présent" : gaRaw && !parseGa4PropertyId(gaRaw) ? "GA4_PROPERTY_ID ignoré (identifiant numérique attendu)" : "non configuré (GA4_PROPERTY_ID)"}`);
+  console.log(`[serveur] Vitesse des pages : ${config.pageSpeedApiKey ? "clé présente" : "non configurée (GOOGLE_PAGESPEED_API_KEY)"}`);
   console.log(`[serveur] Concurrents : ${config.firecrawlApiKey ? "activé" : "désactivé (pas de clé FIRECRAWL_API_KEY)"}`);
   if (config.allowPrivateHosts) {
     console.warn("[serveur] ATTENTION : ALLOW_PRIVATE_HOSTS=1 autorise le chargement d'adresses internes. Réservé au développement et aux tests.");
@@ -84,7 +94,7 @@ function shutdown(): void {
   stopping = true;
   // Arrêt du serveur : les analyses en cours passent en « failed » avec un message qui le dit.
   crawler.stopAllForShutdown();
-  void Promise.all([crawler.waitAll(), batches.stopAll()]).finally(() => {
+  void Promise.all([crawler.waitAll(), batches.stopAll(), pagespeed.stopAll()]).finally(() => {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2_000).unref();
   });

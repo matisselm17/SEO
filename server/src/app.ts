@@ -12,6 +12,7 @@ import type {
   ChatEvent,
   ChatRequest,
   CreateBatchRequest,
+  MeasureSpeedRequest,
   OptimizeRequest,
   ShopifyBatchesResponse,
   ShopifyBatchResponse,
@@ -61,6 +62,9 @@ import { BatchService } from "./shopify/batches.ts";
 import { Optimizer } from "./automation/optimize.ts";
 import { getPolicy, getUsage, parsePolicy, POLICY_LIMITS, setPolicy } from "./automation/policy.ts";
 import { ALLOWED_DAYS, SearchConsoleClient, gscErrors } from "./gsc/google.ts";
+import { ANALYTICS_DAYS, AnalyticsClient, analyticsErrors } from "./google/analytics.ts";
+import { PageSpeedClient } from "./google/pagespeed.ts";
+import { PageSpeedService } from "./speed/service.ts";
 
 export interface AppDeps {
   config: Config;
@@ -79,6 +83,10 @@ export interface AppDeps {
   optimizer?: Optimizer;
   /** Search Console en lecture directe ; construite depuis `config` si absente (les tests y passent un faux Google). */
   searchConsole?: SearchConsoleClient;
+  /** Google Analytics ; construit depuis `config` (même compte de service que la Search Console) si absent. */
+  analytics?: AnalyticsClient;
+  /** Mesures de vitesse ; construites depuis `config` si absentes (les tests y passent un faux PageSpeed). */
+  pagespeed?: PageSpeedService;
 }
 
 const SHOPIFY_TYPES: ShopifyResourceType[] = ["product", "collection", "page", "article"];
@@ -125,11 +133,16 @@ export function createApp(deps: AppDeps): Hono {
   const batches = deps.batches ?? new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply });
   const optimizer = deps.optimizer ?? new Optimizer({ store, shopify, batches, client: deps.chatClient, model: config.anthropicModel });
   const gsc = deps.searchConsole ?? new SearchConsoleClient({ file: config.googleServiceAccountFile, property: config.gscProperty });
+  // Un seul compte de service : la Search Console et Google Analytics partagent l'authentification (un jeton par portée).
+  const ga = deps.analytics ?? new AnalyticsClient({ auth: gsc.auth, propertyId: config.ga4PropertyId });
+  const speed = deps.pagespeed ?? new PageSpeedService(store, hub, new PageSpeedClient({ apiKey: config.pageSpeedApiKey }));
   const app = new Hono();
   /** 30 écritures par minute au plus dans la boutique (partagées avec les lots, qui attendent leur tour). */
   const shopifyWriteLimiter = shopify.writeLimiter;
   /** Une lecture de la Search Console chez Google par minute et par site. */
   const gscSyncLimiter = new RateLimiter(1);
+  /** Une lecture de Google Analytics par minute et par site. */
+  const analyticsSyncLimiter = new RateLimiter(1);
   /** Une lecture complète de la boutique par minute au plus. */
   const shopifySyncLimiter = new RateLimiter(1);
   const chatLimiter = new RateLimiter(config.limits.chatPerMinute);
@@ -157,6 +170,8 @@ export function createApp(deps: AppDeps): Hono {
       shopify: { configured: shopify.configured, writesEnabled: shopify.writesEnabled },
       searchConsole: { configured: gsc.configured },
       dataForSeo: { configured: !!config.dataForSeo },
+      analytics: { configured: ga.configured },
+      pageSpeed: { configured: speed.configured },
     },
     version: config.version,
   });
@@ -292,6 +307,7 @@ export function createApp(deps: AppDeps): Hono {
   app.delete("/api/sites/:siteId", async (c) => {
     const s = site(c);
     if (crawler.cancel(s.id)) await crawler.wait(s.id);
+    await speed.cancel(s.id);
     hub.forget(s.id);
     store.deleteSite(s.id);
     hub.close(s.id);
@@ -425,6 +441,41 @@ export function createApp(deps: AppDeps): Hono {
     store.deleteGsc(s.id);
     hub.emit(s.id, { type: "search_console", available: false });
     return new Response(null, { status: 204 });
+  });
+
+  // ───────── Google Analytics
+
+  app.get("/api/sites/:siteId/analytics", (c) => getJson(c, store.analytics(site(c).id, ga.configured)));
+  app.post("/api/sites/:siteId/analytics/sync", async (c) => {
+    const s = site(c);
+    const body = await readJson<{ days: number }>(c, true);
+    const extra = Object.keys(body).filter((k) => k !== "days");
+    if (extra.length) throw errors.badRequest("Paramètre inconnu.", "Seul « days » est accepté.");
+    const days = body.days === undefined ? 28 : body.days;
+    if (!(ANALYTICS_DAYS as readonly unknown[]).includes(days)) throw errors.badRequest("La période doit être de 28 ou 90 jours.", "Choisissez 28 ou 90.");
+    if (!ga.configured) throw analyticsErrors.notConfigured();
+    analyticsSyncLimiter.take(`analytics:${s.id}`, "de lecture de Google Analytics");
+    const data = await ga.read(s.host, days as number);
+    if (!store.getSite(s.id)) throw errors.siteNotFound();
+    store.setAnalytics(s.id, data);
+    hub.emit(s.id, { type: "analytics" });
+    return json(store.analytics(s.id, ga.configured));
+  });
+
+  // ───────── Vitesse des pages
+
+  app.get("/api/sites/:siteId/pagespeed", (c) => getJson(c, speed.state(site(c))));
+  app.post("/api/sites/:siteId/pagespeed", async (c) => {
+    const s = site(c);
+    const body = await readJson<MeasureSpeedRequest>(c, true);
+    const extra = Object.keys(body).filter((k) => k !== "pageIds");
+    if (extra.length) throw errors.badRequest("Paramètre inconnu.", "Seul « pageIds » est accepté.");
+    return json(speed.start(s, body), 202);
+  });
+  app.post("/api/sites/:siteId/pagespeed/cancel", async (c) => {
+    const s = site(c);
+    await speed.cancel(s.id);
+    return json(speed.state(s));
   });
 
   // ───────── Concurrents

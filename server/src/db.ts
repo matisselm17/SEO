@@ -216,6 +216,33 @@ CREATE TABLE IF NOT EXISTS automation_usage (
   PRIMARY KEY (site_host, day)
 );
 
+-- Dernière lecture de Google Analytics, par site (remplacée à chaque lecture). Les pages d'arrivée sont gardées
+-- par chemin : le rapprochement avec les pages analysées est refait à l'affichage.
+CREATE TABLE IF NOT EXISTS analytics (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  synced_at TEXT NOT NULL,
+  data_json TEXT NOT NULL
+);
+
+-- Dernières mesures de vitesse (PageSpeed Insights), par site et par chemin (clé de rapprochement).
+CREATE TABLE IF NOT EXISTS pagespeed_pages (
+  site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  path_key TEXT NOT NULL,
+  url TEXT NOT NULL,
+  path TEXT NOT NULL,
+  page_type TEXT,
+  mobile_json TEXT,
+  desktop_json TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (site_id, path_key)
+);
+-- Dernière demande de mesure : erreur qui l'a arrêtée (clé, quota) et échecs page par page (JSON).
+CREATE TABLE IF NOT EXISTS pagespeed_status (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  last_error_json TEXT,
+  failures_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -250,6 +277,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, type: string]> = [
   ["audits", "paused_until", "TEXT"],
   ["search_console", "source", "TEXT NOT NULL DEFAULT 'file'"],
   ["shopify_batch_items", "auto_applied", "INTEGER NOT NULL DEFAULT 0"],
+  ["pagespeed_status", "failures_json", "TEXT"],
 ];
 
 /**

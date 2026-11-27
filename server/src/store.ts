@@ -2,6 +2,7 @@
  * Accès aux données et construction des réponses au format de shared/api.ts.
  */
 import type {
+  AnalyticsData,
   ApiError,
   AuditState,
   AuditStatus,
@@ -13,9 +14,13 @@ import type {
   PageDetail,
   PageSummary,
   PageType,
+  PageVisits,
   SearchConsoleData,
   SiteSummary,
+  SpeedMeasure,
 } from "../../shared/api.ts";
+import { mergeLandingPages, MAX_LANDING_PAGES, type StoredAnalytics } from "./google/analytics.ts";
+import { pathKey } from "./shopify/repo.ts";
 import { aggregate, type PageRecord, type SiteAggregate } from "./analyse/aggregate.ts";
 import type { PageFacts } from "./analyse/grille.ts";
 import { cut } from "./analyse/grille.ts";
@@ -81,6 +86,22 @@ export function pageTypeOf(r: { page_type: string | null; path: string }): PageT
 }
 
 const now = () => new Date().toISOString();
+
+/**
+ * Mesure de vitesse enregistrée ; null si absente ou illisible. Une ligne corrompue est ignorée et journalisée
+ * sans son contenu : elle ne fait pas échouer le reste de l'état.
+ */
+export function parseSpeedMeasure(v: unknown, siteId: string): SpeedMeasure | null {
+  if (typeof v !== "string" || !v) return null;
+  try {
+    const m = JSON.parse(v) as SpeedMeasure;
+    if (m && typeof m === "object" && typeof m.score === "number" && m.lab && typeof m.lab === "object") return m;
+  } catch {
+    /* journalisé ci-dessous */
+  }
+  console.warn(`[vitesse] Mesure enregistrée illisible, ignorée (site ${siteId}).`);
+  return null;
+}
 
 export class Store {
   /** Cache des agrégats par analyse, invalidé à chaque page ajoutée. */
@@ -372,6 +393,100 @@ export class Store {
     return r ? (r.imported_at as string) : null;
   }
 
+  // ───────── Google Analytics
+
+  getAnalytics(siteId: string): StoredAnalytics | null {
+    const r = this.db.prepare("SELECT synced_at, data_json FROM analytics WHERE site_id = ?").get(siteId) as Row | undefined;
+    if (!r) return null;
+    let a: Partial<Omit<StoredAnalytics, "syncedAt">>;
+    try {
+      a = JSON.parse(r.data_json as string) as Partial<Omit<StoredAnalytics, "syncedAt">>;
+    } catch {
+      console.warn(`[analytics] Lecture Google Analytics enregistrée illisible, ignorée (site ${siteId}).`);
+      return null;
+    }
+    if (!a || typeof a !== "object" || !a.period || !a.totals) return null;
+    const stored = Array.isArray(a.landingPages) ? a.landingPages : [];
+    // Lectures enregistrées avant l'addition des chemins de même clé : additionnées ici, comme à la lecture.
+    const landingPages = mergeLandingPages(stored).sort((x, y) => y.organicSessions - x.organicSessions || y.sessions - x.sessions);
+    return {
+      period: a.period,
+      currency: a.currency ?? null,
+      totals: a.totals,
+      organic: a.organic ?? a.totals,
+      channels: a.channels ?? [],
+      series: a.series ?? [],
+      landingPages,
+      landingPagesTruncated: a.landingPagesTruncated ?? stored.length >= MAX_LANDING_PAGES,
+      revenueStatus: a.revenueStatus ?? (a.totals.revenue === null ? "not_measured" : "measured"),
+      syncedAt: r.synced_at as string,
+    };
+  }
+  /** Enregistre une lecture de Google Analytics ; remplace la précédente. */
+  setAnalytics(siteId: string, data: Omit<StoredAnalytics, "syncedAt">): string {
+    const at = now();
+    this.db
+      .prepare("INSERT INTO analytics (site_id, synced_at, data_json) VALUES (?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET synced_at = excluded.synced_at, data_json = excluded.data_json")
+      .run(siteId, at, JSON.stringify(data));
+    return at;
+  }
+  /**
+   * Lecture au format de l'API ; pages d'arrivée rapprochées des pages de l'analyse affichée par leur chemin
+   * (même clé que le rapprochement Shopify : sans paramètres, sans slash final, en minuscules), à chaque affichage.
+   */
+  analytics(siteId: string, configured: boolean): AnalyticsData {
+    const a = this.getAnalytics(siteId);
+    if (!a) return { available: false, reason: configured ? "not_run" : "not_configured" };
+    const byKey = this.pagesByPathKey(siteId);
+    return {
+      available: true,
+      syncedAt: a.syncedAt,
+      period: a.period,
+      currency: a.currency,
+      totals: a.totals,
+      organic: a.organic,
+      channels: a.channels,
+      series: a.series,
+      landingPages: a.landingPages.map((p) => {
+        const row = byKey.get(pathKey(p.path));
+        return { ...p, pageId: row?.id ?? null, score: row?.score ?? null };
+      }),
+      landingPagesTruncated: a.landingPagesTruncated,
+      revenueStatus: a.revenueStatus,
+    };
+  }
+  /** Pages de l'analyse affichée, par clé de chemin (la première analysée l'emporte). */
+  pagesByPathKey(siteId: string): Map<string, PageRow> {
+    const out = new Map<string, PageRow>();
+    const audit = this.resultsAudit(siteId);
+    if (audit) for (const p of this.pageRows(audit.id)) if (!out.has(pathKey(p.path))) out.set(pathKey(p.path), p);
+    return out;
+  }
+  /**
+   * Visites d'une page d'après la dernière lecture de Google Analytics ; null sans lecture ou sans correspondance.
+   * Les pages d'arrivée sont déjà additionnées par clé de chemin (getAnalytics) : même chiffre que la liste.
+   */
+  visitsFor(siteId: string, path: string): PageVisits | null {
+    const a = this.getAnalytics(siteId);
+    if (!a) return null;
+    const key = pathKey(path);
+    const hit = a.landingPages.find((p) => pathKey(p.path) === key);
+    if (!hit) return null;
+    const { path: _p, ...visits } = hit;
+    return visits;
+  }
+
+  // ───────── Vitesse des pages
+
+  /** Dernières mesures de vitesse d'une page (par chemin) ; null si elle n'a jamais été mesurée. */
+  speedFor(siteId: string, path: string): { mobile: SpeedMeasure | null; desktop: SpeedMeasure | null } | null {
+    const r = this.db.prepare("SELECT mobile_json, desktop_json FROM pagespeed_pages WHERE site_id = ? AND path_key = ?").get(siteId, pathKey(path)) as Row | undefined;
+    if (!r || (!r.mobile_json && !r.desktop_json)) return null;
+    const mobile = parseSpeedMeasure(r.mobile_json, siteId);
+    const desktop = parseSpeedMeasure(r.desktop_json, siteId);
+    return mobile || desktop ? { mobile, desktop } : null;
+  }
+
   // ───────── Assistant
 
   chatMessages(siteId: string): ChatMessage[] {
@@ -490,6 +605,8 @@ export class Store {
       },
       // L'export « Performances » ne relie pas les requêtes aux pages ; la lecture directe chez Google, si.
       queries: this.gscQueriesFor(r.site_id, r.url_key),
+      visits: this.visitsFor(r.site_id, r.path),
+      speed: this.speedFor(r.site_id, r.path),
       // Renseigné par la route (ShopifyService.resourceIdForPage) : dépend de la boutique configurée et lue.
       shopifyResourceId: null,
     };

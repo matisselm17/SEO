@@ -1,27 +1,22 @@
 /**
  * Search Console en lecture directe, par un compte de service Google (docs/integration-search-console.md).
  *
- * - Jeton OAuth 2.0 obtenu par assertion JWT signée RS256 avec `node:crypto` (aucune dépendance), portée
- *   `webmasters.readonly`, valable une heure, gardé en mémoire et renouvelé avant expiration ou après un refus 401,
- *   une seule demande à la fois (comme server/src/shopify/auth.ts).
+ * - Authentification commune (server/src/google/auth.ts) : jeton de portée `webmasters.readonly`, gardé en
+ *   mémoire et renouvelé avant expiration ou après un refus 401.
  * - Le fichier du compte de service est un secret : jamais journalisé ni renvoyé ; seule l'adresse e-mail du
  *   compte (`client_email`) peut apparaître dans une erreur (`details.account`), pour dire qui ajouter à la propriété.
  * - Les appels ne partent que vers oauth2.googleapis.com et www.googleapis.com (le `token_uri` du fichier est ignoré).
  * - Le résultat est converti dans la structure de l'import de fichier (`GscImport`) et enregistré par le même chemin.
  */
-import { createSign } from "node:crypto";
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import type { OrganicPoint, OrganicQuery } from "../../../shared/api.ts";
 import { bareHost, urlKey } from "../crawl/url.ts";
 import { HttpError } from "../errors.ts";
+import { GOOGLE_BODY_LIMITS, GoogleAuthError, googleErrorReasons, googleFetch, GoogleServiceAuth, readJsonBounded, SCOPES, serviceDisabled } from "../google/auth.ts";
 import type { GscImport, ImportedPage } from "./import.ts";
 
-export const TOKEN_URL = "https://oauth2.googleapis.com/token";
 export const API_BASE = "https://www.googleapis.com/webmasters/v3";
-export const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
-const ALLOWED_HOSTS = new Set(["oauth2.googleapis.com", "www.googleapis.com"]);
-const RENEW_MARGIN_MS = 5 * 60 * 1000;
-const TIMEOUT_MS = 30_000;
+export const SCOPE = SCOPES.searchConsole;
+const API_HOSTS = new Set(["www.googleapis.com"]);
 const ROW_LIMIT = 25_000;
 /** Lignes au plus par dimension (pages × requêtes peut être très long sur 16 mois). */
 const MAX_ROWS: Record<string, number> = { date: 25_000, query: 50_000, page: 50_000, "page,query": 100_000 };
@@ -35,7 +30,7 @@ export const gscErrors = {
       503,
       "search_console_not_configured",
       "La lecture directe de la Search Console n'est pas configurée sur ce serveur.",
-      "La personne qui gère l'installation peut déposer le fichier JSON d'un compte de service Google (GOOGLE_SERVICE_ACCOUNT_FILE), puis redémarrer le serveur. En attendant, déposez l'export « Performances ».",
+      "La personne qui gère l'installation peut déposer le fichier JSON d'un compte de service Google (GOOGLE_APPLICATION_CREDENTIALS), puis redémarrer le serveur. En attendant, déposez l'export « Performances ».",
     ),
   noAccess: (host: string, account: string) =>
     new HttpError(
@@ -49,56 +44,11 @@ export const gscErrors = {
     new HttpError(502, "search_console_unavailable", message, retryable ? "Réessayez dans un instant." : "Vérifiez le compte de service et l'API « Google Search Console API » dans Google Cloud, puis réessayez.", { retryable }),
 };
 
-// ───────── Compte de service
-
-interface ServiceAccount {
-  clientEmail: string;
-  privateKey: string;
-}
-
-/** Le fichier existe et est lisible (Settings.integrations.searchConsole.configured). */
-export function serviceAccountReadable(file: string): boolean {
-  try {
-    if (!statSync(file).isFile()) return false;
-    accessSync(file, constants.R_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Lit le fichier du compte de service ; aucune partie de son contenu n'entre dans une erreur. */
-export function loadServiceAccount(file: string): ServiceAccount {
-  if (!serviceAccountReadable(file)) throw gscErrors.notConfigured();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    throw gscErrors.unavailable("Le fichier du compte de service Google est illisible (JSON attendu).", false);
-  }
-  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const clientEmail = typeof o.client_email === "string" && /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(o.client_email) ? o.client_email : null;
-  const privateKey = typeof o.private_key === "string" && o.private_key.includes("PRIVATE KEY") ? o.private_key : null;
-  if (!clientEmail || !privateKey) throw gscErrors.unavailable("Le fichier du compte de service Google est incomplet (client_email ou private_key manquant).", false);
-  return { clientEmail, privateKey };
-}
-
-const b64url = (b: Buffer | string) => Buffer.from(b).toString("base64url");
-
-/** Assertion JWT signée RS256 pour l'échange contre un jeton d'accès. */
-export function signAssertion(sa: ServiceAccount, nowMs: number): string {
-  const iat = Math.floor(nowMs / 1000);
-  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claims = b64url(JSON.stringify({ iss: sa.clientEmail, scope: SCOPE, aud: TOKEN_URL, iat, exp: iat + 3600 }));
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${claims}`);
-  let sig: Buffer;
-  try {
-    sig = signer.sign(sa.privateKey);
-  } catch {
-    throw gscErrors.unavailable("La clé privée du compte de service Google est invalide.", false);
-  }
-  return `${header}.${claims}.${b64url(sig)}`;
+/** Traduit une erreur d'authentification neutre en erreur de la Search Console. */
+function fromAuth(err: unknown): unknown {
+  if (!(err instanceof GoogleAuthError)) return err;
+  if (err.kind === "not_configured") return gscErrors.notConfigured();
+  return gscErrors.unavailable(err.message, err.retryable);
 }
 
 // ───────── Client
@@ -108,6 +58,8 @@ export interface GoogleOptions {
   property: string | null;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** Authentification partagée avec Google Analytics ; construite depuis `file` si absente. */
+  auth?: GoogleServiceAuth;
 }
 
 interface Row {
@@ -119,90 +71,60 @@ interface Row {
 }
 
 export class SearchConsoleClient {
-  private token: { value: string; expiresAt: number } | null = null;
-  private pending: Promise<string> | null = null;
-  private account: ServiceAccount | null = null;
-  private readonly fetchImpl: typeof fetch;
-  private readonly now: () => number;
+  readonly auth: GoogleServiceAuth;
 
   constructor(private opts: GoogleOptions) {
-    this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.now = opts.now ?? Date.now;
+    this.auth = opts.auth ?? new GoogleServiceAuth({ file: opts.file, fetchImpl: opts.fetchImpl, now: opts.now });
   }
 
   get configured(): boolean {
-    return serviceAccountReadable(this.opts.file);
-  }
-
-  private sa(): ServiceAccount {
-    // Relu tant qu'il n'a pas servi : un fichier déposé après le démarrage est pris en compte.
-    this.account ??= loadServiceAccount(this.opts.file);
-    return this.account;
+    return this.auth.readable;
   }
 
   /** Adresse e-mail du compte de service (la seule partie du fichier qui peut être montrée). */
   accountEmail(): string {
-    return this.sa().clientEmail;
-  }
-
-  /** Tout appel sortant passe ici : seuls les deux hôtes de Google sont permis. */
-  private async call(url: string, init: RequestInit): Promise<Response> {
-    const u = new URL(url);
-    if (u.protocol !== "https:" || !ALLOWED_HOSTS.has(u.hostname)) throw gscErrors.unavailable("Adresse Google inattendue : appel refusé.", false);
     try {
-      return await this.fetchImpl(url, { ...init, redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS) });
-    } catch {
-      throw gscErrors.unavailable("Google ne répond pas pour le moment.", true);
+      return this.auth.accountEmail();
+    } catch (err) {
+      throw fromAuth(err);
     }
   }
 
   async getToken(): Promise<string> {
-    if (this.token && this.token.expiresAt - RENEW_MARGIN_MS > this.now()) return this.token.value;
-    this.pending ??= this.requestToken().finally(() => {
-      this.pending = null;
-    });
-    return this.pending;
-  }
-
-  private async requestToken(): Promise<string> {
-    const assertion = signAssertion(this.sa(), this.now());
-    const res = await this.call(TOKEN_URL, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }).toString(),
-    });
-    // Le corps n'est jamais recopié dans l'erreur.
-    if (res.status === 400 || res.status === 401 || res.status === 403) throw gscErrors.unavailable(`Google a refusé le compte de service (${res.status}). Vérifiez que la clé est active.`, false);
-    if (!res.ok) throw gscErrors.unavailable(`Google a répondu ${res.status} à la demande de jeton.`, res.status >= 500 || res.status === 429);
-    const o = ((await res.json().catch(() => null)) ?? {}) as Record<string, unknown>;
-    const value = typeof o.access_token === "string" ? o.access_token : "";
-    const expiresIn = typeof o.expires_in === "number" && o.expires_in > 0 ? o.expires_in : 0;
-    if (!value || !expiresIn) throw gscErrors.unavailable("Réponse inattendue de Google à la demande de jeton.", true);
-    this.token = { value, expiresAt: this.now() + expiresIn * 1000 };
-    return value;
+    try {
+      return await this.auth.getToken(SCOPE);
+    } catch (err) {
+      throw fromAuth(err);
+    }
   }
 
   /** Appel authentifié à l'API Search Console ; un refus 401 fait redemander un jeton une fois. */
   private async api<T>(path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       const token = await this.getToken();
-      const res = await this.call(`${API_BASE}${path}`, {
-        method: body === undefined ? "GET" : "POST",
-        headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+      let res: Response;
+      try {
+        res = await googleFetch(this.auth.fetchImpl, `${API_BASE}${path}`, {
+          method: body === undefined ? "GET" : "POST",
+          headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        }, API_HOSTS);
+      } catch (err) {
+        throw fromAuth(err);
+      }
       if (res.status === 401 && attempt === 0) {
-        if (this.token?.value === token) this.token = null;
+        this.auth.dropToken(SCOPE, token);
         continue;
+      }
+      if (res.status === 403 && serviceDisabled(await googleErrorReasons(res))) {
+        throw gscErrors.unavailable("L'API « Google Search Console API » n'est pas activée dans le projet Google Cloud du compte de service.", false);
       }
       if (res.status === 403 || res.status === 404) throw new NoAccess();
       if (res.status === 429) throw gscErrors.unavailable("Google demande de patienter : trop de demandes.", true);
       if (!res.ok) throw gscErrors.unavailable(`Google a répondu ${res.status}.`, res.status >= 500);
-      try {
-        return (await res.json()) as T;
-      } catch {
-        throw gscErrors.unavailable("Réponse illisible de Google.", true);
-      }
+      const read = await readJsonBounded(res, GOOGLE_BODY_LIMITS.searchConsole);
+      if (!read.ok) throw gscErrors.unavailable(read.reason === "too_large" ? "Réponse de Google trop volumineuse." : "Réponse illisible de Google.", read.reason !== "too_large");
+      return read.json as T;
     }
   }
 
@@ -246,7 +168,7 @@ export class SearchConsoleClient {
   /** Quatre lectures (date ; requête ; page ; page + requête) converties en `GscImport`. */
   async read(host: string, days: number): Promise<{ property: string; data: GscImport }> {
     const property = await this.resolveProperty(host);
-    const { start, end } = periodFor(days, this.now());
+    const { start, end } = periodFor(days, this.auth.now());
     const [dates, queries, pages, pairs] = [
       await this.query(property, ["date"], start, end),
       await this.query(property, ["query"], start, end),
