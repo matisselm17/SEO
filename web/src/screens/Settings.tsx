@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Bot, CircleCheck, CircleMinus, ShoppingBag, Trash2, Users } from "lucide-react";
+import { BarChart3, Bot, CircleCheck, CircleMinus, ShoppingBag, Trash2, Users } from "lucide-react";
 import type { Settings, SiteSummary, SitesResponse, UpdateSettingsRequest } from "../lib/types";
-import { keys, useSettings } from "../lib/queries";
+import { keys, useAutomation, useSettings } from "../lib/queries";
+import { autoActive } from "../lib/shopify";
 import { sendJSON, toAppError } from "../lib/api";
 import { removeQueries, setQueryData } from "../lib/cache";
-import { navigate, sitePath } from "../lib/router";
+import { navigate, shopPath, sitePath } from "../lib/router";
 import { fmtDate, fmtDateTime, fmtInt } from "../lib/format";
 import { PageHeader } from "../ui/Section";
 import { Button, Link } from "../ui/Button";
@@ -86,6 +87,9 @@ function MaxPagesForm({ s }: { s: Settings }) {
 
 export function SettingsScreen({ site }: { site: SiteSummary }) {
   const q = useSettings();
+  const shopWritable = !!q.data?.integrations.shopify.configured && !!q.data?.integrations.shopify.writesEnabled;
+  // Mode automatique réellement en vigueur : la phrase sur les corrections ne dit alors plus « toujours après confirmation ».
+  const auto = autoActive(useAutomation(site.id, shopWritable).data);
   const toast = useToast();
   const [deleting, setDeleting] = useState(false);
   const s = q.data;
@@ -146,15 +150,32 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
                 !s.integrations.shopify.configured ? (
                   <>Pour l'activer, ajoutez les variables <span className="mono">SHOPIFY_STORE_DOMAIN</span>, <span className="mono">SHOPIFY_CLIENT_ID</span> et <span className="mono">SHOPIFY_CLIENT_SECRET</span> dans l'environnement du serveur, puis redémarrez-le.</>
                 ) : s.integrations.shopify.writesEnabled ? (
-                  <>Les titres, descriptions et textes alternatifs se corrigent depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>, une valeur à la fois, après confirmation.</>
+                  auto ? (
+                  <>Les titres, descriptions et textes alternatifs se corrigent depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>. Vos corrections passent par une confirmation ; <strong>des écritures automatiques sont actives</strong> : les lots de « Préparer des corrections avec l'IA » peuvent être écrits sans votre validation, dans les limites de la <Link to={shopPath(site.id, "automation")} className="text-link">règle d'automatisation</Link>.</>
+                ) : (
+                  <>Les titres, descriptions et textes alternatifs se corrigent depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>, une valeur ou un lot à la fois, toujours après confirmation.</>
+                )
                 ) : (
                   <>Lecture seule : la boutique se consulte depuis la section <Link to={sitePath(site.id, "shopify")} className="text-link">Boutique Shopify</Link>, sans rien y modifier. Pour autoriser les modifications, ajoutez <span className="mono">SHOPIFY_WRITES_ENABLED=1</span> dans l'environnement du serveur, puis redémarrez-le.</>
                 )
               }
             >
               <span className="setting__icon" aria-hidden><ShoppingBag size={16} /></span>
-              {s.integrations.shopify.configured && <Tag>{s.integrations.shopify.writesEnabled ? "Modifications activées" : "Lecture seule"}</Tag>}
+              {s.integrations.shopify.configured && <Tag>{!s.integrations.shopify.writesEnabled ? "Lecture seule" : auto ? "Écritures automatiques actives" : "Modifications activées"}</Tag>}
               <Status on={s.integrations.shopify.configured} label={s.integrations.shopify.configured ? "Configurée" : "Non configurée"} />
+            </Row>
+            <Row
+              title="Lecture directe de la Search Console"
+              hint={
+                s.integrations.searchConsole.configured ? (
+                  <>Un compte de service Google est présent sur le serveur : vos clics et vos recherches se lisent directement chez Google, en lecture seule, depuis la section <Link to={sitePath(site.id, "traffic")} className="text-link">Mots-clés et trafic organique</Link>. Le dépôt de l'export reste possible.</>
+                ) : (
+                  <>Facultatif : sans lui, déposez l'export de la Search Console. Pour lire directement chez Google, placez le fichier du compte de service sur le serveur (<span className="mono">GOOGLE_SERVICE_ACCOUNT_FILE</span>), puis ajoutez son adresse comme utilisateur de votre propriété Search Console.</>
+                )
+              }
+            >
+              <span className="setting__icon" aria-hidden><BarChart3 size={16} /></span>
+              <Status on={s.integrations.searchConsole.configured} label={s.integrations.searchConsole.configured ? "Compte présent" : "Non configurée"} />
             </Row>
           </>
         )}
@@ -166,7 +187,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
           <div><dt>Adresse</dt><dd className="mono facts__mono">{site.url}</dd></div>
           <div><dt>Suivi depuis le</dt><dd>{fmtDate(site.createdAt)}</dd></div>
           <div><dt>Dernière analyse</dt><dd>{site.audit ? (site.audit.finishedAt ? `le ${fmtDateTime(site.audit.finishedAt)}` : "en cours") : "aucune"}</dd></div>
-          <div><dt>Search Console</dt><dd>{site.searchConsole.available && site.searchConsole.importedAt ? `export importé le ${fmtDateTime(site.searchConsole.importedAt)}` : "aucun export importé"}</dd></div>
+          <div><dt>Search Console</dt><dd>{site.searchConsole.available && site.searchConsole.importedAt ? `données importées le ${fmtDateTime(site.searchConsole.importedAt)}` : "aucune donnée importée"}</dd></div>
         </dl>
         <div className="settings-actions"><RelaunchButton site={site} /></div>
       </section>

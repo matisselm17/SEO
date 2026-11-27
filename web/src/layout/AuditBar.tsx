@@ -1,12 +1,12 @@
-import { useRef, useState } from "react";
-import { CircleAlert, RefreshCw, Square } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CircleAlert, Pause, RefreshCw, Square } from "lucide-react";
 import type { AuditResponse, SiteSummary } from "../lib/types";
 import { sendJSON, toAppError } from "../lib/api";
 import { keys } from "../lib/queries";
 import { patchSite } from "../lib/live";
 import { useToast } from "../ui/Toast";
 import { Button } from "../ui/Button";
-import { fmtDateTime, fmtInt, pl, plural } from "../lib/format";
+import { fmtClock, fmtDateTime, fmtInt, pl, plural } from "../lib/format";
 import { startAudit } from "../lib/actions";
 import { applyAudit, isNewerAudit, resultsOf } from "../lib/results";
 
@@ -42,8 +42,20 @@ function useLastUrl(auditId: string | undefined, url: string | null | undefined)
  * Chiffres réels reçus du serveur : pages notées, en attente, en échec, page en cours.
  * Aucun pourcentage : le total n'est pas connu d'avance.
  */
+/** Rafraîchit l'affichage chaque seconde jusqu'à l'heure de reprise (sans rien demander au serveur). */
+function useNow(until: string | null | undefined) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!until) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [until]);
+  return now;
+}
+
 export function AuditBar({ site }: { site: SiteSummary }) {
   const toast = useToast();
+  const now = useNow(site.audit?.state === "running" ? site.audit.pausedUntil : null);
   const [stopping, setStopping] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const a = site.audit;
@@ -102,17 +114,22 @@ export function AuditBar({ site }: { site: SiteSummary }) {
     }
   };
 
+  // Le site limite les demandes : pause réelle annoncée par le serveur, avec son heure de reprise.
+  const paused = a.state === "running" && !!a.pausedUntil;
+  const resumeIn = paused ? Math.max(0, Math.round((new Date(a.pausedUntil!).getTime() - now) / 1000)) : 0;
   // Avant la première page, le serveur lit le plan du site (sitemap) ou le catalogue de la boutique.
-  const inventorying = a.state === "running" && a.pagesDone === 0 && !!lastUrl && isInventoryUrl(lastUrl);
-  const title = a.state === "queued"
+  const inventorying = !paused && a.state === "running" && a.pagesDone === 0 && !!lastUrl && isInventoryUrl(lastUrl);
+  const title = paused
+    ? (older ? "Nouvelle analyse en pause" : "Analyse en pause")
+    : a.state === "queued"
     ? (older ? "Nouvelle analyse en file d'attente" : "Analyse en file d'attente")
     : inventorying
     ? "Inventaire du site en cours"
     : older ? "Nouvelle analyse en cours" : "Analyse en cours";
 
   return (
-    <div className="auditbar" role="status" aria-live="off">
-      <span className="live-dot" aria-hidden />
+    <div className={`auditbar ${paused ? "auditbar--paused" : ""}`} role="status" aria-live="off">
+      {paused ? <Pause size={14} aria-hidden className="auditbar__pause" /> : <span className="live-dot" aria-hidden />}
       <div className="auditbar__main">
         <p className="auditbar__title">
           {title}
@@ -123,7 +140,12 @@ export function AuditBar({ site }: { site: SiteSummary }) {
             <span className="auditbar__muted">plafond {fmtInt(a.maxPages)}</span>
           </span>}
         </p>
-        {olderLine ? (
+        {paused ? (
+          <p className="auditbar__url auditbar__url--wrap">
+            Le site limite le nombre de demandes : l'analyse reprend {resumeIn > 0 ? <>vers <strong>{fmtClock(a.pausedUntil!)}</strong></> : "dans un instant"}, plus lentement. Rien n'est perdu.
+            {olderLine ? ` ${olderLine}` : ""}
+          </p>
+        ) : olderLine ? (
           <p className="auditbar__url auditbar__url--wrap">{olderLine} Ils seront remplacés à la fin.</p>
         ) : (
           <p className={`auditbar__url ${inventorying ? "auditbar__url--wrap" : ""}`} title={lastUrl ?? undefined}>

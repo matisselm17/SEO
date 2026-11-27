@@ -3,7 +3,7 @@
  * Une seule valeur par confirmation ; l'avant et l'après sont toujours montrés.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, Image as ImageIcon, ImageOff, Info, RotateCcw, TriangleAlert, Undo2 } from "lucide-react";
+import { ArrowRight, Image as ImageIcon, ImageOff, Info, Layers, RotateCcw, TriangleAlert, Undo2, Zap } from "lucide-react";
 import { DEMO_ENABLED } from "../lib/transport";
 import type { ShopifyChange, ShopifyChangeRequest, ShopifyChangeResponse, ShopifyResourceType, SiteSummary } from "../lib/types";
 import { toAppError, type AppError } from "../lib/api";
@@ -16,7 +16,7 @@ import { Button, Link } from "../ui/Button";
 import { ErrorState, useRetryCountdown } from "../ui/States";
 import { Tag } from "../ui/Badge";
 import { useToast } from "../ui/Toast";
-import { sitePath } from "../lib/router";
+import { shopPath, sitePath } from "../lib/router";
 
 /** Vignette d'une image Shopify : affichée seulement si son adresse est en https, sinon une vignette neutre. */
 export function Thumb({ url, alt, size = 48 }: { url: string; alt?: string | null; size?: number }) {
@@ -44,7 +44,7 @@ export function Thumb({ url, alt, size = 48 }: { url: string; alt?: string | nul
   return <img className="thumb" src={safe} alt={alt ?? ""} style={style} loading="lazy" referrerPolicy="no-referrer" onError={() => setBroken(true)} />;
 }
 
-/** Une valeur affichée telle quelle (texte brut), ou « Vide ». */
+/** Une valeur affichée telle quelle (texte brut), ou « Vide ». */
 export function Value({ v, empty = "Vide" }: { v: string | null; empty?: string }) {
   return v ? <span className="value">{v}</span> : <span className="value value--empty">{empty}</span>;
 }
@@ -186,7 +186,7 @@ export function ConfirmWrite({ site, intent, onClose, onDone, onReload, onReread
           </>
         ) : (
           <>
-            {/* Focus initial sur « Ne rien modifier » : Entrée n'écrit jamais dans la boutique par réflexe. */}
+            {/* Focus initial sur « Ne rien modifier » : Entrée n'écrit jamais dans la boutique par réflexe. */}
             <Button variant="secondary" onClick={onClose} disabled={busy} data-autofocus>Ne rien modifier</Button>
             <Button variant="primary" loading={busy} disabled={blocked || wait > 0} onClick={() => void submit()}>
               {error && !blocked && wait === 0 ? "Réessayer" : isRestore ? "Remettre cette valeur" : "Enregistrer dans Shopify"}
@@ -251,16 +251,23 @@ function Compare({ beforeLabel, before, afterLabel, after, afterTone = "new", em
   );
 }
 
-/** Historique des modifications : quoi, où, avant, après, quand ; « Annuler » sur la dernière modification d'un champ. */
-export function ChangeList({ site, changes, onRestore, showResource = true, empty, blocked, onReread }: {
+/** Historique des modifications : quoi, où, avant, après, quand ; « Annuler » sur la dernière modification d'un champ. */
+export function ChangeList({ site, changes, onRestore, showResource = true, empty, blocked, onReread, batchTitles, highlight }: {
   site: SiteSummary;
+  /**
+   * Lots connus, pour dire de quel lot vient une modification, et si ce lot contient des lignes écrites sans
+   * validation humaine (le détail ligne par ligne est dans l'écran du lot : ShopifyBatchItem.autoApplied).
+   */
+  batchTitles?: Map<string, { title: string; auto: boolean }>;
+  /** Modification à mettre en évidence (lien depuis un lot). */
+  highlight?: string | null;
   changes: ShopifyChange[];
   onRestore: (c: ShopifyChange) => void;
   /** Relire l'élément (modification acceptée mais non relue). Sans elle, le lien ouvre la fiche de l'élément. */
   onReread?: () => void;
   showResource?: boolean;
   empty?: ReactNode;
-  /** Lecture seule : « Annuler » reste visible, désactivé, avec cette raison. */
+  /** Lecture seule : « Annuler » reste visible, désactivé, avec cette raison. */
   blocked?: string | null;
 }) {
   if (changes.length === 0) return <>{empty ?? null}</>;
@@ -268,13 +275,19 @@ export function ChangeList({ site, changes, onRestore, showResource = true, empt
   return (
     <ol className="changes">
       {changes.map((c) => (
-        <li key={c.id} className="change">
+        <li key={c.id} className={`change ${highlight === c.id ? "is-target" : ""}`} data-change={c.id}>
           <div className="change__head">
             <p className="change__what">
               {c.kind === "restore" ? <Undo2 size={14} aria-hidden className="change__kind-icon" /> : null}
               <span className="change__field">{FIELD_LABEL[c.field]}</span>
               {c.locale && <Tag>{localeLabel(c.locale)}</Tag>}
               {c.kind === "restore" && <Tag>Annulation</Tag>}
+              {c.batchId && (
+                <Link to={shopPath(site.id, "batches", c.batchId)} className="change__batch" title="Ouvrir le lot de corrections">
+                  {batchTitles?.get(c.batchId)?.auto ? <Zap size={12} aria-hidden /> : <Layers size={12} aria-hidden />}
+                  <span>{batchTitles?.get(c.batchId) ? `Lot « ${batchTitles.get(c.batchId)!.title} »` : "Lot de corrections"}{batchTitles?.get(c.batchId)?.auto ? " · lot avec des écritures sans validation humaine" : ""}</span>
+                </Link>
+              )}
               {showResource && (
                 <>
                   <Link to={sitePath(site.id, "shopify", c.resourceId)} className="change__res">{c.resourceTitle}</Link>

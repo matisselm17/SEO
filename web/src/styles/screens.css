@@ -607,6 +607,8 @@ td.query-cell { max-width: 280px; }
 .shop-limit strong { color: var(--text); font-weight: var(--weight-semibold); }
 .shop-limit__icon { flex: none; margin-top: 2px; color: var(--text-muted); }
 .shop-limit--warning .shop-limit__icon { color: var(--warning); }
+/* Écritures automatiques actives : signal permanent et sobre en tête de la section Boutique. */
+.shop-limit--auto .shop-limit__icon { color: var(--accent-text); }
 
 /* Chiffres de la dernière lecture ; les trois derniers filtrent la liste */
 .shopstats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); margin-bottom: var(--space-8); align-items: start; }

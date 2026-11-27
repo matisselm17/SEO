@@ -103,3 +103,13 @@ export async function sendFile<T>(path: string, file: File): Promise<T> {
   const res = await request(path, { method: "POST", body: form, headers: { accept: "application/json" } });
   return (await res.json()) as T;
 }
+
+/** PUT (remplacement complet, ex. la règle d'automatisation). */
+export async function sendPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await request(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as T;
+}

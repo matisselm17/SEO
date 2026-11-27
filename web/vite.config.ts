@@ -1,5 +1,8 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+
+const at = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 
 /**
  * Mode démonstration (`vite --mode demo`, script `npm run dev:demo`) : le faux serveur de src/demo répond
@@ -28,8 +31,14 @@ export default defineConfig(({ mode }) => {
   define: demo ? { "import.meta.env.VITE_DEMO": JSON.stringify("1") } : {},
   server: {
     port: 5173,
-    // Le mode démo lit docs/exemples/exemples.json, hors de web/.
-    fs: { allow: [".."] },
+    // Le serveur de développement ne sert que le strict nécessaire : l'application, les types partagés et,
+    // pour le mode démo, les exemples. Jamais la base SQLite, la sauvegarde de la boutique, les thèmes ni les
+    // secrets (compte de service Google, .env) : ils sont hors de `allow` et en plus explicitement refusés.
+    fs: {
+      strict: true,
+      allow: [at("./"), at("../shared"), at("../docs/exemples")],
+      deny: [".env", ".env.*", "*.{crt,pem,key}", "**/secrets/**", "**/data/**", "**/themes/**", "**/*.sqlite*", "**/*.db", "**/.git/**"],
+    },
     proxy: demo ? undefined : {
       "/api": {
         target: "http://localhost:8787",

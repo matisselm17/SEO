@@ -1,13 +1,15 @@
 /**
- * Section « Boutique Shopify » : état de la connexion, lecture de la boutique, liste des éléments avec
- * l'état de leurs champs, et historique des modifications avec annulation.
+ * Section « Boutique Shopify » : état de la connexion, lecture de la boutique, liste des éléments avec ce que
+ * l'analyse a réellement vu sur leur page, lots de corrections, historique des modifications, automatisation.
+ * Chaque onglet a sa propre adresse (/boutique, /boutique/lots, /boutique/historique, /boutique/automatisation).
  */
-import { useEffect, useRef, useState } from "react";
-import { ArrowRight, BookOpenCheck, CircleCheck, CircleMinus, KeyRound, Lock, RefreshCw, Search, ShoppingBag, Store, TriangleAlert } from "lucide-react";
-import type { ShopifyChange, ShopifyField, ShopifyResourceSummary, ShopifyResourceType, ShopifyState, SiteSummary } from "../lib/types";
-import { SHOPIFY_PAGE, useShopify, useShopifyChanges, useShopifyResources, useSites, type ShopifyResourceFilter } from "../lib/queries";
-import { navigate, sitePath } from "../lib/router";
-import { SECTION_INTRO, TYPE_LABEL, TYPE_ORDER, syncShopify, useShopifySyncing } from "../lib/shopify";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowRight, BookOpenCheck, CircleCheck, CircleMinus, Info, KeyRound, ListPlus, Lock, OctagonAlert, RefreshCw, Search, ShoppingBag, Store, TriangleAlert, X, Zap } from "lucide-react";
+import type { CheckStatus, ShopifyChange, ShopifyField, ShopifyResourceSummary, ShopifyResourceType, ShopifyState, SiteSummary } from "../lib/types";
+import { SHOPIFY_PAGE, useAutomation, useShopify, useShopifyBatches, useShopifyChanges, useShopifyResources, useSites, type ShopifyResourceFilter } from "../lib/queries";
+import { NEW_BATCH, navigate, shopPath, sitePath, type ShopifyView } from "../lib/router";
+import { autoActive, sectionIntro, TYPE_LABEL, TYPE_ORDER, VERDICT_LABEL, syncShopify, useShopifySyncing } from "../lib/shopify";
+import { addDraftLines, lineKey, useDraftLines, type DraftLine } from "../lib/batchDraft";
 import { toAppError } from "../lib/api";
 import { invalidateShopify } from "../lib/live";
 import { fmtDateTime, fmtInt, fmtRelative, pl, plural } from "../lib/format";
@@ -23,15 +25,10 @@ import { useToast } from "../ui/Toast";
 import { QueryError } from "./common";
 import { ShopifyResourceSheet } from "./ShopifyResource";
 import { ChangeList, ConfirmWrite, type WriteIntent } from "./ShopifyChanges";
+import { BatchDetail, BatchList, Composer, DraftBar } from "./ShopifyBatches";
+import { AutomationPanel } from "./ShopifyAutomation";
+import { READONLY_ID, useSticky } from "./shopShared";
 
-type View = "items" | "history";
-
-/** Garde la dernière donnée affichée pendant le chargement d'un nouveau filtre : pas de saut de mise en page. */
-function useSticky<T>(value: T | undefined): T | undefined {
-  const ref = useRef(value);
-  if (value !== undefined) ref.current = value;
-  return value ?? ref.current;
-}
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -66,12 +63,27 @@ function SyncButton({ site, variant = "secondary", label }: { site: SiteSummary;
   );
 }
 
-/** Champ renseigné ou vide : une icône et un mot, jamais la couleur seule. */
-function FieldState({ filled, label }: { filled: boolean; label: string }) {
+const VERDICT_ICON = { pass: CircleCheck, warn: TriangleAlert, fail: OctagonAlert } as const;
+
+/**
+ * Ce que l'analyse a vu sur la page affichée, pour un champ : un mot et une icône (jamais la couleur seule).
+ * Un champ vide dans Shopify est dit en information neutre, sous le verdict : ce n'est pas un défaut en soi.
+ */
+function Displayed({ status, empty, label }: { status: CheckStatus | null; empty: boolean; label: string }) {
+  if (status === null) {
+    return (
+      <span className="dstate dstate--na">
+        <span className="dstate__word">Non vérifié</span>
+        <span className="dstate__sub">{empty ? "Vide dans Shopify" : "Renseigné dans Shopify"}</span>
+        <span className="sr-only"> : {label}, page non ouverte par l'analyse</span>
+      </span>
+    );
+  }
+  const Icon = VERDICT_ICON[status];
   return (
-    <span className={`fstate ${filled ? "fstate--ok" : "fstate--empty"}`}>
-      {filled ? <CircleCheck size={14} aria-hidden /> : <CircleMinus size={14} aria-hidden />}
-      <span className="fstate__word">{filled ? "Renseigné" : "Vide"}</span>
+    <span className={`dstate dstate--${status}`}>
+      <span className="dstate__word"><Icon size={14} aria-hidden />{VERDICT_LABEL[status]}</span>
+      {empty && <span className="dstate__sub">Vide dans Shopify</span>}
       <span className="sr-only"> : {label}</span>
     </span>
   );
@@ -88,47 +100,125 @@ function ImagesState({ r }: { r: ShopifyResourceSummary }) {
   );
 }
 
-function ResourceRow({ r, siteId }: { r: ShopifyResourceSummary; siteId: string }) {
+function ResourceRow({ r, siteId, selected, onSelect }: { r: ShopifyResourceSummary; siteId: string; selected: boolean; onSelect: (on: boolean) => void }) {
+  const a = r.audit;
+  const issues: string[] = [];
+  if (a && a.titleStatus !== "pass") issues.push(a.titleStatus === "fail" ? "Titre absent" : "Titre à revoir");
+  if (a && a.descriptionStatus !== "pass") issues.push(a.descriptionStatus === "fail" ? "Description absente" : "Description à revoir");
+  if (r.imagesWithoutAlt > 0) issues.push(plural(r.imagesWithoutAlt, "image sans texte", "images sans texte"));
   return (
-    <li>
-      <Link to={sitePath(siteId, "shopify", r.id)} className="srow">
-        <span className="srow__main">
-          <span className="srow__title">{r.title}</span>
-          <span className="srow__path mono">{r.path}</span>
-        </span>
-        <span className="srow__type">{TYPE_LABEL[r.type].one}</span>
-        <span className="srow__cell" data-label="Titre pour Google"><FieldState filled={!!r.seoTitle} label="titre pour Google" /></span>
-        <span className="srow__cell" data-label="Description pour Google"><FieldState filled={!!r.seoDescription} label="description pour Google" /></span>
-        <span className="srow__cell" data-label="Images"><ImagesState r={r} /></span>
-        <span className="srow__score">{r.pageScore !== null ? <ScorePill score={r.pageScore} /> : <span className="subtle srow__na">Non analysée</span>}</span>
-        <ArrowRight size={16} className="row-arrow" aria-hidden />
-        {/* Sur écran étroit : un résumé des seuls champs à compléter. */}
-        <span className="srow__compact" aria-hidden>
-          <span className="srow__ctype">{TYPE_LABEL[r.type].one}</span>
-          {!r.seoTitle && <span className="srow__cmiss">Titre vide</span>}
-          {!r.seoDescription && <span className="srow__cmiss">Description vide</span>}
-          {r.imagesWithoutAlt > 0 && <span className="srow__cmiss">{plural(r.imagesWithoutAlt, "image sans texte", "images sans texte")}</span>}
-          {r.seoTitle && r.seoDescription && r.imagesWithoutAlt === 0 && <span className="srow__cok"><CircleCheck size={12} aria-hidden /> Tout est renseigné</span>}
-        </span>
-      </Link>
+    <li className={`srow ${selected ? "is-selected" : ""}`}>
+      <span className="srow__check">
+        <input type="checkbox" className="check" checked={selected} onChange={(e) => onSelect(e.target.checked)} aria-label={`Sélectionner ${r.title}`} />
+      </span>
+      <span className="srow__main">
+        <Link to={sitePath(siteId, "shopify", r.id)} className="srow__title srow__link">{r.title}</Link>
+        <span className="srow__path mono">{r.path}</span>
+      </span>
+      <span className="srow__type">{TYPE_LABEL[r.type].one}</span>
+      <span className="srow__cell"><Displayed status={a?.titleStatus ?? null} empty={!r.seoTitle} label="titre affiché dans Google" /></span>
+      <span className="srow__cell"><Displayed status={a?.descriptionStatus ?? null} empty={!r.seoDescription} label="description affichée dans Google" /></span>
+      <span className="srow__cell"><ImagesState r={r} /></span>
+      <span className="srow__score">{r.pageScore !== null ? <ScorePill score={r.pageScore} /> : <span className="subtle srow__na">Non analysée</span>}</span>
+      <ArrowRight size={16} className="row-arrow" aria-hidden />
+      {/* Sur écran étroit : un résumé de ce qui est réellement à corriger. */}
+      <span className="srow__compact" aria-hidden>
+        <span className="srow__ctype">{TYPE_LABEL[r.type].one}</span>
+        {!a && <span className="srow__cna">Page non ouverte par l'analyse</span>}
+        {issues.map((t) => <span key={t} className="srow__cmiss">{t}</span>)}
+        {a && issues.length === 0 && <span className="srow__cok"><CircleCheck size={12} aria-hidden /> Rien à corriger</span>}
+      </span>
     </li>
   );
 }
 
-const MISSING_LABEL: Record<ShopifyField, string> = {
-  seo_title: "Titre pour Google vide",
-  seo_description: "Description pour Google vide",
-  image_alt: "Images sans texte alternatif",
+/** Filtre de la liste : à corriger d'après l'analyse (fix), ou vide dans Shopify (missing). */
+type Show = "" | "fix:seo_title" | "fix:seo_description" | "missing:image_alt" | "missing:seo_title" | "missing:seo_description";
+const SHOW_LABEL: Record<Exclude<Show, "">, string> = {
+  "fix:seo_title": "Titre affiché à revoir",
+  "fix:seo_description": "Description affichée à revoir",
+  "missing:image_alt": "Images sans texte alternatif",
+  "missing:seo_title": "Titre pour Google vide",
+  "missing:seo_description": "Description pour Google vide",
 };
+
+function filterOf(show: Show): Pick<ShopifyResourceFilter, "fix" | "missing"> {
+  if (show.startsWith("fix:")) return { fix: show.slice(4) as "seo_title" | "seo_description", missing: null };
+  if (show.startsWith("missing:")) return { fix: null, missing: show.slice(8) as ShopifyField };
+  return { fix: null, missing: null };
+}
+
+function Stat({ label, value, of, unit, tone, active, disabled, onClick, sub }: {
+  label: string; value: number | null; of: number; unit: string; tone: "warning" | "good" | "neutral"; active: boolean; disabled: boolean; onClick: () => void; sub?: ReactNode;
+}) {
+  return (
+    <button type="button" className={`shopstats__item ${active ? "is-active" : ""}`} aria-pressed={active} onClick={onClick} disabled={disabled}>
+      <span className="shopstats__label">{label}</span>
+      <span className="shopstats__value tnum">
+        {value === null ? "—" : fmtInt(value)}
+        <span className="shopstats__of">{value === null ? " aucune page analysée" : ` sur ${fmtInt(of)} ${unit}`}</span>
+      </span>
+      {value !== null && <Meter value={value} max={Math.max(1, of)} tone={tone} />}
+      {sub && <span className="shopstats__sub">{sub}</span>}
+    </button>
+  );
+}
+
+/** Lignes ajoutées au lot en préparation depuis la liste : une ligne par élément, valeur à rédiger. */
+function toDraftLine(r: ShopifyResourceSummary, field: "seo_title" | "seo_description"): DraftLine {
+  const a = r.audit;
+  return {
+    key: lineKey(r.id, field, null, null), resourceId: r.id, resourceType: r.type, title: r.title, path: r.path, field,
+    imageId: null, imageUrl: null, imageIndex: null, locale: null,
+    current: field === "seo_title" ? r.seoTitle : r.seoDescription,
+    rendered: a ? (field === "seo_title" ? { text: a.renderedTitle, status: a.titleStatus } : { text: a.renderedDescription, status: a.descriptionStatus }) : null,
+    value: "",
+  };
+}
+
+function SelectionBar({ site, selected, onClear }: { site: SiteSummary; selected: Map<string, ShopifyResourceSummary>; onClear: () => void }) {
+  const toast = useToast();
+  const [field, setField] = useState<"seo_title" | "seo_description">("seo_description");
+  const n = selected.size;
+  if (n === 0) return null;
+  const add = () => {
+    const res = addDraftLines(site.id, [...selected.values()].map((r) => toDraftLine(r, field)));
+    const parts = [res.added ? plural(res.added, "ligne ajoutée", "lignes ajoutées") : null, res.refused ? `${plural(res.refused, "ligne refusée", "lignes refusées")} (50 au plus par lot)` : null].filter(Boolean);
+    toast.show({
+      tone: res.refused ? "error" : "success",
+      title: res.added ? "Ajouté au lot en préparation" : "Déjà dans le lot en préparation",
+      text: parts.length ? `${parts.join(", ")}. Rédigez une valeur pour chacune, puis créez le brouillon.` : "Ces lignes y figuraient déjà.",
+      action: { label: "Rédiger", onClick: () => navigate(shopPath(site.id, "batches", NEW_BATCH)) },
+    });
+    onClear();
+  };
+  return (
+    <div className="selbar" role="region" aria-label="Sélection">
+      <p className="selbar__count"><strong className="tnum">{fmtInt(n)}</strong> {pl(n, "élément sélectionné", "éléments sélectionnés")}</p>
+      <label className="selbar__field">
+        <span className="selbar__label">Champ à corriger</span>
+        <select className="select" value={field} onChange={(e) => setField(e.target.value as typeof field)}>
+          <option value="seo_title">Titre pour Google</option>
+          <option value="seo_description">Description pour Google</option>
+        </select>
+      </label>
+      <div className="selbar__actions">
+        <Button variant="primary" size="sm" icon={<ListPlus size={15} aria-hidden />} onClick={add}>Ajouter au lot</Button>
+        <Button variant="ghost" size="sm" icon={<X size={14} aria-hidden />} onClick={onClear}>Désélectionner</Button>
+      </div>
+    </div>
+  );
+}
 
 function Items({ site, sync }: { site: SiteSummary; sync: NonNullable<ShopifyState["sync"]> }) {
   const [type, setType] = useState<ShopifyResourceType | null>(null);
-  const [missing, setMissing] = useState<ShopifyField | null>(null);
+  const [show, setShow] = useState<Show>("");
   const [text, setText] = useState("");
   const [offset, setOffset] = useState(0);
+  const [selected, setSelected] = useState<Map<string, ShopifyResourceSummary>>(() => new Map());
   const q = useDebounced(text.trim(), 250);
-  useEffect(() => setOffset(0), [type, missing, q]);
-  const filter: ShopifyResourceFilter = { type, missing, q, offset };
+  useEffect(() => setOffset(0), [type, show, q]);
+  const filter: ShopifyResourceFilter = { type, q, offset, ...filterOf(show) };
   const res = useShopifyResources(site.id, filter);
   const data = useSticky(res.data);
   const total = Object.values(sync.counts).reduce((a, b) => a + b, 0);
@@ -137,33 +227,70 @@ function Items({ site, sync }: { site: SiteSummary; sync: NonNullable<ShopifySta
     setOffset(o);
     listTop.current?.scrollIntoView({ block: "start", behavior: "smooth" });
   };
-
-  const stats: { id: ShopifyField; label: string; n: number; of: number; unit: string }[] = [
-    { id: "seo_title", label: "Sans titre pour Google", n: sync.missing.seoTitle, of: total, unit: pl(total, "élément", "éléments") },
-    { id: "seo_description", label: "Sans description pour Google", n: sync.missing.seoDescription, of: total, unit: pl(total, "élément", "éléments") },
-    { id: "image_alt", label: "Images sans texte alternatif", n: sync.missing.imagesWithoutAlt, of: sync.missing.images, unit: pl(sync.missing.images, "image", "images") },
-  ];
+  const toggleShow = (s: Show) => setShow((cur) => (cur === s ? "" : s));
+  const t = sync.toFix;
+  const notAudited = Math.max(0, total - t.audited);
+  const pageIds = data?.resources.map((r) => r.id) ?? [];
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const someOnPage = pageIds.some((id) => selected.has(id));
+  const select = (r: ShopifyResourceSummary, on: boolean) =>
+    setSelected((m) => {
+      const n = new Map(m);
+      if (on) n.set(r.id, r);
+      else n.delete(r.id);
+      return n;
+    });
+  const selectPage = (on: boolean) =>
+    setSelected((m) => {
+      const n = new Map(m);
+      data?.resources.forEach((r) => (on ? n.set(r.id, r) : n.delete(r.id)));
+      return n;
+    });
 
   return (
     <>
-      <div className="shopstats" role="group" aria-label="Champs vides dans la boutique (filtrer la liste)">
+      <div className="shopstats" role="group" aria-label="À corriger d'après l'analyse (filtrer la liste)">
         <div className="shopstats__item shopstats__item--static">
           <span className="shopstats__label">Éléments lus</span>
           <span className="shopstats__value tnum">{fmtInt(total)}</span>
           <span className="shopstats__sub">
-            {TYPE_ORDER.filter((t) => sync.counts[t] > 0).map((t) => `${fmtInt(sync.counts[t])} ${TYPE_LABEL[t][sync.counts[t] > 1 ? "many" : "one"].toLowerCase()}`).join(" · ") || "Aucun élément"}
+            {TYPE_ORDER.filter((x) => sync.counts[x] > 0).map((x) => `${fmtInt(sync.counts[x])} ${TYPE_LABEL[x][sync.counts[x] > 1 ? "many" : "one"].toLowerCase()}`).join(" · ") || "Aucun élément"}
           </span>
         </div>
-        {stats.map((s) => {
-          const active = missing === s.id;
-          return (
-            <button key={s.id} type="button" className={`shopstats__item ${active ? "is-active" : ""}`} aria-pressed={active} onClick={() => setMissing(active ? null : s.id)} disabled={s.n === 0 && !active}>
-              <span className="shopstats__label">{s.label}</span>
-              <span className="shopstats__value tnum">{fmtInt(s.n)}<span className="shopstats__of"> sur {fmtInt(s.of)} {s.unit}</span></span>
-              <Meter value={s.n} max={Math.max(1, s.of)} tone={s.n > 0 ? "warning" : "good"} />
-            </button>
-          );
-        })}
+        <Stat
+          label="Titre affiché à revoir" value={t.audited ? t.title : null} of={t.audited} unit={pl(t.audited, "page analysée", "pages analysées")}
+          tone={t.title > 0 ? "warning" : "good"} active={show === "fix:seo_title"} disabled={!t.audited || (t.title === 0 && show !== "fix:seo_title")}
+          onClick={() => toggleShow("fix:seo_title")}
+        />
+        <Stat
+          label="Description affichée à revoir" value={t.audited ? t.description : null} of={t.audited} unit={pl(t.audited, "page analysée", "pages analysées")}
+          tone={t.description > 0 ? "warning" : "good"} active={show === "fix:seo_description"} disabled={!t.audited || (t.description === 0 && show !== "fix:seo_description")}
+          onClick={() => toggleShow("fix:seo_description")}
+        />
+        <Stat
+          label="Images sans texte alternatif" value={sync.missing.imagesWithoutAlt} of={sync.missing.images} unit={pl(sync.missing.images, "image", "images")}
+          tone={sync.missing.imagesWithoutAlt > 0 ? "warning" : "good"} active={show === "missing:image_alt"} disabled={sync.missing.imagesWithoutAlt === 0 && show !== "missing:image_alt"}
+          onClick={() => toggleShow("missing:image_alt")}
+        />
+      </div>
+
+      <div className="shop-facts">
+        <Info size={15} aria-hidden className="shop-facts__icon" />
+        <div className="shop-facts__body">
+          <p>
+            <strong>Champs vides dans Shopify :</strong>{" "}
+            <button type="button" className="link-btn" onClick={() => toggleShow("missing:seo_title")} aria-pressed={show === "missing:seo_title"}>{plural(sync.missing.seoTitle, "titre pour Google", "titres pour Google")}</button>{" "}
+            (Shopify affiche alors le nom de l'élément) et{" "}
+            <button type="button" className="link-btn" onClick={() => toggleShow("missing:seo_description")} aria-pressed={show === "missing:seo_description"}>{plural(sync.missing.seoDescription, "description", "descriptions")}</button>{" "}
+            (Shopify affiche alors le début du texte).
+          </p>
+          <p className="shop-facts__muted">
+            Un champ vide n'est pas un défaut en soi : seul compte le texte réellement affiché, que l'analyse vérifie page par page.
+            {t.audited === 0
+              ? " Aucune page de la boutique n'a été ouverte par l'analyse affichée : relancez l'analyse pour savoir lesquels sont réellement à corriger."
+              : notAudited > 0 ? ` ${plural(notAudited, "élément n'a pas sa page ouverte", "éléments n'ont pas leur page ouverte")} par l'analyse : leur affichage n'est pas vérifié.` : ""}
+          </p>
+        </div>
       </div>
 
       <div className="toolbar shop-toolbar" ref={listTop}>
@@ -178,18 +305,27 @@ function Items({ site, sync }: { site: SiteSummary; sync: NonNullable<ShopifySta
           onChange={(v) => setType(v === "all" ? null : v)}
           items={[
             { id: "all", label: "Tous", count: total },
-            ...TYPE_ORDER.filter((t) => sync.counts[t] > 0).map((t) => ({ id: t, label: TYPE_LABEL[t].many, count: sync.counts[t] })),
+            ...TYPE_ORDER.filter((x) => sync.counts[x] > 0).map((x) => ({ id: x, label: TYPE_LABEL[x].many, count: sync.counts[x] })),
           ]}
         />
-        <select className="select" aria-label="Filtrer par champ vide" value={missing ?? ""} onChange={(e) => setMissing((e.target.value || null) as ShopifyField | null)}>
-          <option value="">Tous les champs</option>
-          {(Object.keys(MISSING_LABEL) as ShopifyField[]).map((f) => <option key={f} value={f}>{MISSING_LABEL[f]}</option>)}
+        <select className="select" aria-label="Afficher" value={show} onChange={(e) => setShow(e.target.value as Show)}>
+          <option value="">Tous les éléments</option>
+          <optgroup label="À corriger d'après l'analyse">
+            <option value="fix:seo_title">{SHOW_LABEL["fix:seo_title"]}</option>
+            <option value="fix:seo_description">{SHOW_LABEL["fix:seo_description"]}</option>
+            <option value="missing:image_alt">{SHOW_LABEL["missing:image_alt"]}</option>
+          </optgroup>
+          <optgroup label="Vide dans Shopify (information)">
+            <option value="missing:seo_title">{SHOW_LABEL["missing:seo_title"]}</option>
+            <option value="missing:seo_description">{SHOW_LABEL["missing:seo_description"]}</option>
+          </optgroup>
         </select>
       </div>
 
       <div className="pages__count">
         <p aria-live="polite">
-          {data ? (data.total === total && !missing && !type && !q ? plural(total, "élément", "éléments") : `${fmtInt(data.total)} sur ${plural(total, "élément", "éléments")}`) : " "}
+          {data ? (data.total === total && !show && !type && !q ? plural(total, "élément", "éléments") : `${fmtInt(data.total)} sur ${plural(total, "élément", "éléments")}`) : " "}
+          {show && <span className="subtle"> · {SHOW_LABEL[show]}{show.startsWith("missing:seo") ? " (le texte affiché peut être correct)" : ""}</span>}
           {res.fetching && data && <span className="subtle"> · mise à jour…</span>}
         </p>
       </div>
@@ -198,27 +334,41 @@ function Items({ site, sync }: { site: SiteSummary; sync: NonNullable<ShopifySta
       {!data && !res.error && (<><LoadingLabel /><SkeletonRows rows={8} height={60} /></>)}
       {data && (
         <div className={`stable ${res.fetching && res.data === undefined ? "is-loading" : ""}`}>
-          <div className="stable__head" aria-hidden>
-            <span>Élément</span>
-            <span>Type</span>
-            <span>Titre pour Google</span>
-            <span>Description pour Google</span>
-            <span>Images</span>
-            <span>Note de la page</span>
+          <div className="stable__head">
+            <span className="srow__check">
+              <input
+                type="checkbox"
+                className="check"
+                checked={allOnPage}
+                ref={(el) => { if (el) el.indeterminate = !allOnPage && someOnPage; }}
+                onChange={(e) => selectPage(e.target.checked)}
+                aria-label="Sélectionner les éléments de cette page de la liste"
+                disabled={pageIds.length === 0}
+                id="shop-select-page"
+              />
+              <label htmlFor="shop-select-page" className="stable__alllabel" aria-hidden>Sélectionner cette page de la liste</label>
+            </span>
+            <span aria-hidden>Élément</span>
+            <span aria-hidden>Type</span>
+            <span aria-hidden title="Le titre que Google lit sur la page, vérifié par l'analyse">Titre affiché</span>
+            <span aria-hidden title="La description que Google lit sur la page, vérifiée par l'analyse">Description affichée</span>
+            <span aria-hidden>Images</span>
+            <span aria-hidden>Note de la page</span>
             <span />
           </div>
           {data.resources.length > 0 ? (
             <ul className="stable__body" aria-label="Éléments de la boutique">
-              {data.resources.map((r) => <ResourceRow key={r.id} r={r} siteId={site.id} />)}
+              {data.resources.map((r) => <ResourceRow key={r.id} r={r} siteId={site.id} selected={selected.has(r.id)} onSelect={(on) => select(r, on)} />)}
             </ul>
           ) : (
             <EmptyState title="Aucun élément ne correspond">
-              <button type="button" className="link-btn" onClick={() => { setText(""); setType(null); setMissing(null); }}>Retirer les filtres</button>
+              <button type="button" className="link-btn" onClick={() => { setText(""); setType(null); setShow(""); }}>Retirer les filtres</button>
             </EmptyState>
           )}
           <Pagination offset={data.offset} limit={SHOPIFY_PAGE} total={data.total} onChange={goTo} label="Pages de la liste des éléments" />
         </div>
       )}
+      <SelectionBar site={site} selected={selected} onClear={() => setSelected(new Map())} />
     </>
   );
 }
@@ -226,10 +376,12 @@ function Items({ site, sync }: { site: SiteSummary; sync: NonNullable<ShopifySta
 function History({ site, onRestore, blocked }: { site: SiteSummary; onRestore: (c: ShopifyChange) => void; blocked: string | null }) {
   const [offset, setOffset] = useState(0);
   const q = useShopifyChanges(site.id, offset);
+  const batches = useShopifyBatches(site.id).data?.batches;
+  const batchTitles = useMemo(() => new Map((batches ?? []).map((b) => [b.id, { title: b.title, auto: b.autoApplied }])), [batches]);
   const data = useSticky(q.data);
   return (
     <>
-      <p className="shop-history__lead">Chaque modification faite depuis Chat SEO, la plus récente d'abord. Rien n'est jamais effacé de cet historique. Seule la dernière modification d'un champ peut être annulée : la valeur d'avant est alors remise dans la boutique.</p>
+      <p className="shop-history__lead">Chaque modification faite depuis Chat SEO, la plus récente d'abord, seule ou au sein d'un lot de corrections. Rien n'est jamais effacé de cet historique. Seule la dernière modification d'un champ peut être annulée : la valeur d'avant est alors remise dans la boutique.</p>
       <QueryError q={q} />
       {!data && !q.error && (<><LoadingLabel /><SkeletonRows rows={5} height={96} /></>)}
       {data && (
@@ -239,7 +391,8 @@ function History({ site, onRestore, blocked }: { site: SiteSummary; onRestore: (
             changes={data.changes}
             onRestore={onRestore}
             blocked={blocked}
-            empty={<EmptyState title="Aucune modification pour l'instant">Les modifications faites depuis la fiche d'un élément apparaîtront ici, avec la possibilité de les annuler.</EmptyState>}
+            batchTitles={batchTitles}
+            empty={<EmptyState title="Aucune modification pour l'instant">Les modifications faites depuis la fiche d'un élément ou par un lot de corrections apparaîtront ici, avec la possibilité de les annuler.</EmptyState>}
           />
           <Pagination offset={data.offset} limit={SHOPIFY_PAGE} total={data.total} onChange={setOffset} label="Pages de l'historique" />
         </>
@@ -248,45 +401,60 @@ function History({ site, onRestore, blocked }: { site: SiteSummary; onRestore: (
   );
 }
 
-function Connected({ site, state, resourceId }: { site: SiteSummary; state: ShopifyState; resourceId: string | null }) {
+const WRITES_OFF = "Lecture seule : les modifications sont désactivées sur ce serveur.";
+
+function Connected({ site, state, resourceId, view, batchId }: { site: SiteSummary; state: ShopifyState; resourceId: string | null; view: ShopifyView; batchId: string | null }) {
   const c = state.connection;
-  const [view, setView] = useState<View>("items");
   const [intent, setIntent] = useState<WriteIntent | null>(null);
   const changes = useShopifyChanges(site.id, state.sync ? 0 : null);
+  const batches = useShopifyBatches(site.id, !!state.sync);
+  const draftLines = useDraftLines(site.id);
   const syncing = useShopifySyncing(site.id);
   const listPath = sitePath(site.id, "shopify");
+  const toValidate = batches.data?.batches.filter((b) => b.state === "draft").length ?? 0;
   const closeSheet = () => {
     const prev = (window.history.state as { prev?: string | null } | null)?.prev ?? null;
     if (prev) window.history.back();
     else navigate(listPath, { replace: true });
   };
+  const onComposer = view === "batches" && batchId === NEW_BATCH;
+  // Le mode automatique réellement en vigueur (verrous 1 à 3) : signalé en permanence en tête de section.
+  const automation = useAutomation(site.id, !!state.sync);
+  const auto = autoActive(automation.data);
 
   return (
     <>
       <PageHeader
         title="Boutique Shopify"
-        description={SECTION_INTRO}
+        description={sectionIntro(auto)}
         meta={
           <span className="shop-meta">
             <Store size={14} aria-hidden />
             <strong>{c.shopName ?? c.shopHost}</strong>
             {c.shopHost && <span className="mono">{c.shopHost}</span>}
             {state.sync && (
-              <>
-                <span className="shop-meta__when">Lue {fmtRelative(state.sync.syncedAt)} <span className="subtle">({fmtDateTime(state.sync.syncedAt)})</span></span>
-              </>
+              <span className="shop-meta__when">Lue {fmtRelative(state.sync.syncedAt)} <span className="subtle">({fmtDateTime(state.sync.syncedAt)})</span></span>
             )}
           </span>
         }
         actions={state.sync ? <SyncButton site={site} label="Relire la boutique" /> : undefined}
       />
 
-      {(!c.writesEnabled || c.missingScopes.length > 0) && (
+      {(!c.writesEnabled || c.missingScopes.length > 0 || auto) && (
         <div className="shop-limits">
+          {auto && (
+            <p className="shop-limit shop-limit--auto">
+              <Zap size={15} aria-hidden className="shop-limit__icon" />
+              <span>
+                <strong>Écritures automatiques actives.</strong> Les lots de « Préparer des corrections avec l'IA » peuvent être écrits dans la boutique sans votre validation, dans les limites de la règle.{" "}
+                {view !== "automation" && <Link to={shopPath(site.id, "automation")} className="text-link">Voir la règle d'automatisation</Link>}
+              </span>
+            </p>
+          )}
           {!c.writesEnabled && (
-            <p className="shop-limit">
+            <p className="shop-limit" id={READONLY_ID}>
               <Lock size={15} aria-hidden className="shop-limit__icon" />
-              <span><strong>Lecture seule.</strong> Vous pouvez tout consulter et préparer vos textes, mais rien n'est appliqué à la boutique : la personne qui gère l'installation active les modifications côté serveur.</span>
+              <span><strong>Lecture seule.</strong> Vous pouvez tout consulter et préparer vos textes et vos lots, mais rien n'est appliqué à la boutique : la personne qui gère l'installation active les modifications côté serveur.</span>
             </p>
           )}
           {c.missingScopes.map((m) => (
@@ -311,17 +479,23 @@ function Connected({ site, state, resourceId }: { site: SiteSummary; state: Shop
       ) : (
         <>
           <div className="toolbar toolbar--tabs shop-tabs">
-            <Tabs<View>
+            <Tabs<ShopifyView>
               label="Vue"
               value={view}
-              onChange={setView}
+              onChange={(v) => navigate(shopPath(site.id, v))}
               items={[
                 { id: "items", label: "Éléments" },
-                { id: "history", label: "Historique des modifications", count: changes.data?.total },
+                { id: "batches", label: "Lots de corrections", count: toValidate || undefined },
+                { id: "history", label: "Historique", count: changes.data?.total },
+                { id: "automation", label: "Automatisation" },
               ]}
             />
           </div>
-          {view === "items" ? <Items site={site} sync={state.sync} /> : <History site={site} blocked={c.writesEnabled ? null : "Lecture seule : les modifications sont désactivées sur ce serveur."} onRestore={(ch) => setIntent({ kind: "restore", change: ch })} />}
+          {draftLines.length > 0 && !onComposer && <DraftBar site={site} lines={draftLines} />}
+          {view === "items" && <Items site={site} sync={state.sync} />}
+          {view === "batches" && (batchId === NEW_BATCH ? <Composer site={site} /> : batchId ? <BatchDetail site={site} batchId={batchId} writesEnabled={c.writesEnabled} /> : <BatchList site={site} />)}
+          {view === "history" && <History site={site} blocked={c.writesEnabled ? null : WRITES_OFF} onRestore={(ch) => setIntent({ kind: "restore", change: ch })} />}
+          {view === "automation" && <AutomationPanel site={site} />}
         </>
       )}
 
@@ -331,7 +505,7 @@ function Connected({ site, state, resourceId }: { site: SiteSummary; state: Shop
   );
 }
 
-export function ShopifyScreen({ site, resourceId }: { site: SiteSummary; resourceId: string | null }) {
+export function ShopifyScreen({ site, resourceId, view, batchId }: { site: SiteSummary; resourceId: string | null; view: ShopifyView; batchId: string | null }) {
   const q = useShopify(site.id);
   const sites = useSites().data?.sites ?? [];
   const state = q.data;
@@ -359,12 +533,12 @@ export function ShopifyScreen({ site, resourceId }: { site: SiteSummary; resourc
   }
 
   const c = state.connection;
-  if (c.state === "connected") return <Connected site={site} state={state} resourceId={resourceId} />;
+  if (c.state === "connected") return <Connected site={site} state={state} resourceId={resourceId} view={view} batchId={batchId} />;
 
   const other = c.state === "other_shop" && c.shopHost ? sites.find((s) => s.host.replace(/^www\./, "") === c.shopHost) : null;
   return (
     <>
-      <PageHeader title="Boutique Shopify" description={SECTION_INTRO} />
+      <PageHeader title="Boutique Shopify" description={sectionIntro(false)} />
       {q.error && <ErrorState error={q.error} inline onRetry={() => void q.refetch()} retrying={q.fetching} />}
       {c.state === "not_configured" && (
         <EmptyState tone="framed" icon={<ShoppingBag size={20} />} title="Aucune boutique Shopify n'est connectée">

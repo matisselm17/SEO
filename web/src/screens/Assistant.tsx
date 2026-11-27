@@ -16,6 +16,7 @@ import { EmptyState, ErrorState } from "../ui/States";
 import { Skeleton, SkeletonText, LoadingLabel } from "../ui/Skeleton";
 import { useToast } from "../ui/Toast";
 import { QueryError } from "./common";
+import { BatchCard } from "./ShopifyBatches";
 
 interface Pending {
   question: string;
@@ -39,7 +40,18 @@ function Sources({ sources }: { sources: string[] }) {
   );
 }
 
-function Message({ m, siteHost }: { m: ChatMessage; siteHost: string }) {
+/** Lots de corrections préparés (ou appliqués) par l'assistant dans cette réponse : une carte par lot. */
+function Batches({ site, ids }: { site: SiteSummary; ids: string[] }) {
+  if (!ids?.length) return null;
+  return (
+    <div className="msg__batches" role="list" aria-label="Lots de corrections préparés dans cette réponse">
+      {ids.map((id) => <div role="listitem" key={id}><BatchCard site={site} batchId={id} /></div>)}
+    </div>
+  );
+}
+
+function Message({ m, site }: { m: ChatMessage; site: SiteSummary }) {
+  const siteHost = site.host;
   if (m.role === "user") {
     return (
       <div className="msg msg--user">
@@ -52,6 +64,7 @@ function Message({ m, siteHost }: { m: ChatMessage; siteHost: string }) {
       <span className="msg__avatar" aria-hidden><Bot size={15} /></span>
       <div className="msg__body">
         <Markdown source={m.content} siteHost={siteHost} />
+        <Batches site={site} ids={m.batchIds} />
         <Sources sources={m.sources} />
         <time className="msg__time" dateTime={m.createdAt}>{fmtDateTime(m.createdAt)}</time>
       </div>
@@ -281,7 +294,7 @@ export function AssistantScreen({ site }: { site: SiteSummary }) {
           </div>
         )}
 
-        {messages.map((m) => <Message key={m.id} m={m} siteHost={site.host} />)}
+        {messages.map((m) => <Message key={m.id} m={m} site={site} />)}
 
         {pending && (
           <>

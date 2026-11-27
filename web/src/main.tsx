@@ -7,6 +7,7 @@ import "./styles/base.css";
 import "./styles/components.css";
 import "./styles/layout.css";
 import "./styles/screens.css";
+import "./styles/shopify.css";
 import { App } from "./App";
 import { ToastProvider } from "./ui/Toast";
 

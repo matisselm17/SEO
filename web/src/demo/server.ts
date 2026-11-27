@@ -4,16 +4,16 @@
  * y compris les flux SSE (analyse en cours, réponse de l'assistant).
  * Ce module n'est jamais inclus dans le build de production (voir lib/transport.ts).
  *
- * Il suit la règle « Quelle analyse est affichée » : les résultats (`results`) sont ceux de la dernière
+ * Il suit la règle « Quelle analyse est affichée » : les résultats (`results`) sont ceux de la dernière
  * analyse terminée ; à défaut, de la plus récente qui a au moins une page notée. Une relance ne les remplace
  * qu'à sa fin.
  *
  * Scénarios, choisis avec ?demo=… dans l'adresse (mémorisé pour l'onglet) : voir web/README.md.
  * Boutique Shopify (site Atelier Lune) : voir src/demo/shopify.ts, état choisi avec ?boutique=….
  * Saisies spéciales :
- *   - ajout d'un site : « injoignable » → site_unreachable, « plafond » → limit_reached, « rafale » → rate_limited ;
- *   - assistant : « clé » → clé refusée (erreur définitive), « panne » → échec avant toute réponse,
- *     « limite » → rate_limited avec délai.
+ *   - ajout d'un site : « injoignable » → site_unreachable, « plafond » → limit_reached, « rafale » → rate_limited ;
+ *   - assistant : « clé » → clé refusée (erreur définitive), « panne » → échec avant toute réponse,
+ *     « limite » → rate_limited avec délai.
  */
 import examples from "../../../docs/exemples/exemples.json";
 import type {
@@ -24,12 +24,15 @@ import {
   LUNE, LUNE_CATALOGUE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, catalogueIssuesOf, categoriesOf,
   issuesOf, mergeIssues, pageTypeOf, recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
 } from "./data";
-import { handleShopify, resourceIdForPath, shopifyConfigured, shopifyWritesEnabled, type ShopCtx } from "./shopify";
+import {
+  DEMO_BATCH_IDS, aiConfiguredDemo, assistantBatch, ensureShop, handleAutomation, handleShopify, resourceIdForPath, shopifyConfigured,
+  shopifyWritesEnabled, type ShopCtx,
+} from "./shopify";
 
 type Scenario =
   | "complet" | "vide" | "sans-gsc" | "sans-config" | "analyse" | "analyse-figee" | "relance" | "relance-figee"
-  | "echec" | "coupure" | "erreurs" | "lent" | "liens" | "couverture-complete" | "catalogue-indispo" | "inventaire";
-const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "relance", "relance-figee", "echec", "coupure", "erreurs", "lent", "liens", "couverture-complete", "catalogue-indispo", "inventaire"];
+  | "echec" | "coupure" | "erreurs" | "lent" | "liens" | "couverture-complete" | "catalogue-indispo" | "inventaire" | "pause";
+const SCENARIOS: Scenario[] = ["complet", "vide", "sans-gsc", "sans-config", "analyse", "analyse-figee", "relance", "relance-figee", "echec", "coupure", "erreurs", "lent", "liens", "couverture-complete", "catalogue-indispo", "inventaire", "pause"];
 
 function readScenario(): Scenario {
   const fromUrl = new URLSearchParams(location.search).get("demo") as Scenario | null;
@@ -48,12 +51,34 @@ const exSettings = ex["GET /api/settings"] as Settings;
 const exChat = ex["GET /api/sites/site_8fk2/chat"] as { messages: ChatMessage[]; suggestions: string[] };
 const exFailed = (ex["GET /api/sites/site_8fk2/failed-pages"] as { pages: FailedPage[] }).pages;
 
+/**
+ * Lecture directe de la Search Console, choisie avec ?gsc=… (mémorisé pour l'onglet) :
+ *   google (défaut)  compte de service présent, lecture possible
+ *   non-configure    pas de compte de service (seul le dépôt de fichier existe)
+ *   sans-acces       le compte de service n'a accès à aucune propriété du site (search_console_no_access)
+ *   indispo          Google ne répond pas (search_console_unavailable)
+ */
+type GscMode = "google" | "non-configure" | "sans-acces" | "indispo";
+const GSC_MODES: GscMode[] = ["google", "non-configure", "sans-acces", "indispo"];
+function readGsc(): GscMode {
+  const fromUrl = new URLSearchParams(location.search).get("gsc") as GscMode | null;
+  if (fromUrl && GSC_MODES.includes(fromUrl)) {
+    sessionStorage.setItem("demo-gsc", fromUrl);
+    return fromUrl;
+  }
+  const saved = sessionStorage.getItem("demo-gsc") as GscMode | null;
+  return saved && GSC_MODES.includes(saved) ? saved : "google";
+}
+const gscMode = readGsc();
+
 const settings: Settings = {
   ...exSettings,
   integrations: {
-    chat: scenario === "sans-config" ? { configured: false, model: null } : exSettings.integrations.chat,
+    chat: scenario === "sans-config" || !aiConfiguredDemo ? { configured: false, model: null } : exSettings.integrations.chat,
     competitors: { configured: scenario !== "sans-config" },
     shopify: { configured: shopifyConfigured, writesEnabled: shopifyWritesEnabled },
+    searchConsole: { configured: scenario !== "sans-config" && gscMode !== "non-configure" },
+    dataForSeo: { configured: scenario !== "sans-config" },
   },
 };
 
@@ -75,7 +100,7 @@ interface DemoSite {
   inventory: DemoPage[];
   inventoryMode: "sitemap" | "links";
   platform: "shopify" | null;
-  /** Le catalogue public de la boutique répond-il ? (scénario « catalogue-indispo » : non) */
+  /** Le catalogue public de la boutique répond-il ? (scénario « catalogue-indispo » : non) */
   catalogueOk: boolean;
   otherLocales: string[];
   /** Analyse dont les résultats sont affichés (SiteSummary.results). */
@@ -109,7 +134,7 @@ function failedPage(host: string, path: string, httpStatus: number | null, reaso
   return { url: `https://${host}${path}`, path, httpStatus, reason };
 }
 
-/** Recalcule le résumé du site selon la règle « Quelle analyse est affichée ». */
+/** Recalcule le résumé du site selon la règle « Quelle analyse est affichée ». */
 function sync(site: DemoSite) {
   const cur = site.current;
   if (cur) {
@@ -134,7 +159,7 @@ function doneRun(truth: DemoPage[], end: string, failed: FailedPage[]): Run {
   return {
     audit: {
       id: nextId("aud"), state: "done", startedAt: new Date(new Date(end).getTime() - 102000).toISOString(), finishedAt: end,
-      maxPages: Math.max(100, truth.length), pagesDone: truth.length, pagesFailed: failed.length, pagesQueued: 0, currentUrl: null, error: null,
+      maxPages: Math.max(100, truth.length), pagesDone: truth.length, pagesFailed: failed.length, pagesQueued: 0, currentUrl: null, pausedUntil: null, error: null,
     },
     pages: truth,
     failed,
@@ -176,12 +201,12 @@ if (scenario !== "vide") {
   const competitorsLune: CompetitorsData = scenario === "sans-config" ? { available: false, reason: "not_configured" } : buildCompetitors(LUNE.host);
   sites.push(
     // Couverture partielle : 42 pages ouvertes en entier, les autres produits lus dans le catalogue, version anglaise signalée,
-    // « Analyser les N pages » proposé (inventaire sous le plafond).
-    // « liens » : pas de sitemap, inventaire inconnu. « couverture-complete » : tout est ouvert, une page non chargée.
-    // « catalogue-indispo » : boutique dont le catalogue ne répond pas.
+    // « Analyser les N pages » proposé (inventaire sous le plafond).
+    // « liens » : pas de sitemap, inventaire inconnu. « couverture-complete » : tout est ouvert, une page non chargée.
+    // « catalogue-indispo » : boutique dont le catalogue ne répond pas.
     makeSite("site_8fk2", "Atelier Lune", LUNE, "2026-11-20T09:12:00.000Z", {
       gsc: scenario !== "sans-gsc", auditEnd: "2026-11-26T14:01:42.000Z", previous: 61, competitors: competitorsLune,
-      chat: scenario === "sans-gsc" || scenario === "sans-config" ? [] : exChat.messages,
+      chat: scenario === "sans-gsc" || scenario === "sans-config" ? [] : exChat.messages.map((m) => ({ ...m, batchIds: m.batchIds ?? [] })),
       extra: scenario === "liens" || scenario === "couverture-complete" ? [] : LUNE_CATALOGUE,
       inventoryMode: scenario === "liens" ? "links" : "sitemap",
       platform: scenario === "liens" ? null : "shopify",
@@ -203,7 +228,7 @@ if (scenario === "echec") {
   s1.current = {
     audit: {
       id: nextId("aud"), state: "failed", startedAt: "2026-11-26T15:20:00.000Z", finishedAt: "2026-11-26T15:20:09.000Z", maxPages: 100,
-      pagesDone: 0, pagesFailed: 1, pagesQueued: 0, currentUrl: null,
+      pagesDone: 0, pagesFailed: 1, pagesQueued: 0, currentUrl: null, pausedUntil: null,
       error: { code: "site_unreachable", message: "Le site n'a pas pu être chargé : connexion impossible.", action: "Vérifiez que le site est en ligne et accessible, puis relancez l'analyse." },
     },
     pages: [],
@@ -217,7 +242,7 @@ if (scenario === "echec") {
   lune.current = {
     audit: {
       id: nextId("aud"), state: "failed", startedAt: "2026-11-26T15:02:00.000Z", finishedAt: "2026-11-26T15:02:40.000Z", maxPages: 100,
-      pagesDone: 12, pagesFailed: 0, pagesQueued: 0, currentUrl: null,
+      pagesDone: 12, pagesFailed: 0, pagesQueued: 0, currentUrl: null, pausedUntil: null,
       error: { code: "internal", message: "L'analyse a été interrompue par un redémarrage du serveur.", action: "Relancez l'analyse. Les résultats précédents restent affichés en attendant." },
     },
     pages: lune.truth.slice(0, 12),
@@ -249,7 +274,7 @@ if (scenario === "echec") {
 // ───────── Réponses
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-// Scénario « lent » : la liste des sites arrive, les écrans restent en chargement (skeletons).
+// Scénario « lent » : la liste des sites arrive, les écrans restent en chargement (skeletons).
 const latency = (path: string) => (scenario === "lent" && path !== "/sites" && path !== "/settings" ? 600_000 : 120 + Math.random() * 220);
 
 function json(body: unknown, status = 200): Response {
@@ -260,7 +285,7 @@ function apiError(status: number, code: ErrorCode, message: string, action: stri
 }
 const notFound = () => apiError(404, "not_found", "Cette ressource n'existe pas ou a été supprimée.", "Revenez à la liste de vos sites.");
 
-// Scénario « erreurs » : toute lecture échoue pendant les 2 premières secondes après le chargement
+// Scénario « erreurs » : toute lecture échoue pendant les 2 premières secondes après le chargement
 // (couvre les relances automatiques au montage des écrans) ; une relance manuelle ensuite réussit.
 const loadedAt = Date.now();
 function maybeFail(): Response | null {
@@ -387,7 +412,7 @@ function startAudit(site: DemoSite, maxPages: number, frozenAt?: number) {
   const run: Run = {
     audit: {
       id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages,
-      pagesDone: 0, pagesFailed: 0, pagesQueued: 1, currentUrl: site.summary.url, error: null,
+      pagesDone: 0, pagesFailed: 0, pagesQueued: 1, currentUrl: site.summary.url, pausedUntil: null, error: null,
     },
     pages: [],
     failed: [],
@@ -442,7 +467,7 @@ if (scenario === "inventaire") {
     s.current = {
       audit: {
         id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages: settings.maxPagesDefault,
-        pagesDone: 0, pagesFailed: 0, pagesQueued: 0, currentUrl: `https://${s.profile.host}/sitemap_products_1.xml?from=1&to=250`, error: null,
+        pagesDone: 0, pagesFailed: 0, pagesQueued: 0, currentUrl: `https://${s.profile.host}/sitemap_products_1.xml?from=1&to=250`, pausedUntil: null, error: null,
       },
       pages: [],
       failed: [],
@@ -456,11 +481,57 @@ if (scenario === "relance" || scenario === "relance-figee") {
   if (s) startAudit(s, 100, scenario === "relance-figee" ? 9 : undefined);
 }
 
+let lastGscSync = 0;
+
+if (scenario === "pause") {
+  // Le site limite les demandes : l'analyse est en pause quelques minutes, puis reprendra plus lentement.
+  const s = sites[0];
+  if (s) {
+    startAudit(s, 100, 23);
+    if (s.timer) clearInterval(s.timer);
+    s.timer = null;
+    const run = s.current!;
+    run.audit = { ...run.audit, pausedUntil: new Date(Date.now() + 4 * 60_000).toISOString(), currentUrl: null };
+    sync(s);
+  }
+}
+
+// Conversation de démonstration : une réponse de l'assistant porte le lot qu'il a préparé (toujours à valider).
+{
+  const lune = sites.find((x) => x.summary.id === "site_8fk2");
+  if (lune && lune.chat.length) {
+    ensureShop({ host: lune.summary.host, inventory: lune.inventory });
+    const ids = [DEMO_BATCH_IDS.assistantDraft].filter(Boolean);
+    if (ids.length) {
+      lune.chat = [
+        ...lune.chat,
+        { id: nextId("msg"), role: "user", content: "Peux-tu préparer des descriptions pour les produits qui n'en ont pas ?", createdAt: "2026-11-27T09:39:12.000Z", sources: [], batchIds: [] },
+        {
+          id: nextId("msg"), role: "assistant", createdAt: "2026-11-27T09:40:05.000Z", sources: ["Boutique Shopify", "Règle d'automatisation"], batchIds: ids,
+          content: "J'ai préparé 4 descriptions pour des produits dont la description pour Google est vide : elles attendent votre validation.\n\nCe que je prépare dans la conversation n'est jamais écrit sans vous, même si l'application automatique est autorisée pour ce site.",
+        },
+      ];
+    }
+  }
+}
+
 // ───────── Assistant
 
-function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: string; sources: string[] } {
+function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: string; sources: string[]; batchIds?: string[] } {
   const recs = recommendationsOf(issuesFor(site));
   const low = q.toLowerCase();
+  if (/corrige|prépare|prepare/.test(low)) {
+    const id = assistantBatch(shopCtx(site));
+    if (!id) {
+      return { tools: ["Lecture de la règle d'automatisation"], sources: ["Règle d'automatisation"], text: "Je ne peux pas préparer de corrections pour l'instant : la règle d'automatisation de ce site ne me le permet pas (ou la boutique n'est pas lue). Vous pouvez la modifier dans **Boutique Shopify**, onglet **Automatisation**." };
+    }
+    return {
+      tools: ["Lecture des éléments de la boutique", "Préparation d'un lot de corrections"],
+      sources: ["Boutique Shopify", "Problèmes du site"],
+      batchIds: [id],
+      text: "J'ai préparé des descriptions pour les produits dont la description pour Google est vide. Chaque proposition est accompagnée de la raison du changement.\n\nRelisez-les dans le lot ci-dessous : vous pouvez corriger une proposition, l'écarter, puis valider. Rien n'est écrit dans la boutique sans votre validation : ce que je prépare dans la conversation attend toujours votre accord, quel que soit le niveau d'automatisation.",
+    };
+  }
   if (/visite|clic|trafic|rapport/.test(low)) {
     if (!site.gsc) {
       return { tools: ["Lecture des données Search Console"], sources: ["Search Console"], text: "Je n'ai pas encore de données de visites pour ce site : aucun export Search Console n'a été déposé.\n\nDéposez-le dans **Mots-clés et trafic organique** et je pourrai vous dire quelles pages vous apportent des visiteurs." };
@@ -476,7 +547,7 @@ function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: st
     return {
       tools: ["Lecture de la page /collections"],
       sources: ["Page /collections"],
-      text: "Voici une proposition pour la page `/collections` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Le nom de champ `meta__description` de certains thèmes n'a rien à voir avec du gras. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
+      text: "Voici une proposition pour la page `/collections` (148 caractères) :\n\n```\nVaisselle en grès tournée à la main à Nantes : bols, assiettes, tasses et vases. Pièces uniques, livraison soignée offerte dès 60 €.\n```\n\nCollez-la dans le champ **Description** du réglage de référencement de la page. Le nom de champ `meta__description` de certains thèmes n'a rien à voir avec du gras. Pensez aussi à allonger le titre « Produits », qui ne dit pas ce que vend la page.",
     };
   }
   const first = recs[0];
@@ -563,7 +634,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
   }
 
   if (sub === "events") {
-    // Scénario « coupure » : la première connexion se coupe après 2,5 s, les suivantes échouent (serveur injoignable).
+    // Scénario « coupure » : la première connexion se coupe après 2,5 s, les suivantes échouent (serveur injoignable).
     if (scenario === "coupure" && eventsConnections++ > 0) {
       await delay(300);
       throw new TypeError("Failed to fetch");
@@ -640,7 +711,35 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       const body = method === "GET" ? url.searchParams : init?.body ? JSON.parse(String(init.body)) : {};
       return handleShopify(shopCtx(site), parts.slice(3), method, body);
     }
+    case "automation": {
+      const body = method === "PUT" && init?.body ? JSON.parse(String(init.body)) : {};
+      return handleAutomation(shopCtx(site), method, body);
+    }
     case "search-console": {
+      if (parts[3] === "sync" && method === "POST") {
+        const { days } = JSON.parse(String(init?.body ?? "{}")) as { days?: number };
+        if (!settings.integrations.searchConsole.configured) return apiError(503, "search_console_not_configured", "La lecture directe de la Search Console n'est pas configurée sur ce serveur.", "Déposez plutôt l'export de la Search Console.");
+        if (![28, 90, 480].includes(days ?? 0)) return apiError(400, "bad_request", "Période inconnue : 28, 90 ou 480 jours.", null);
+        if (lastGscSync && Date.now() - lastGscSync < 60_000) return apiError(429, "rate_limited", "La Search Console vient d'être lue.", "Patientez une minute avant de la relire.", { retryAfterSeconds: Math.ceil((60_000 - (Date.now() - lastGscSync)) / 1000) });
+        await delay(1600);
+        if (gscMode === "sans-acces") {
+          return apiError(403, "search_console_no_access", `Le compte de service n'a accès à aucune propriété Search Console pour ${site.summary.host}.`, "Ajoutez son adresse comme utilisateur de la propriété, puis réessayez.", { account: "chat-seo-lecture@chat-seo-demo.iam.gserviceaccount.com" });
+        }
+        if (gscMode === "indispo") return apiError(502, "search_console_unavailable", "Google n'a pas répondu à la demande de lecture.", "Réessayez dans quelques minutes.", { retryable: true });
+        lastGscSync = Date.now();
+        const end = new Date(Date.now() - 2 * 86400_000);
+        site.gsc = buildSearchConsole(site.truth, site.profile.seed + (days ?? 28), new Date().toISOString(), {
+          queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20,
+          extraPages: [{ path: "/ancienne-collection", clicks: 3, impressions: 410, position: 31.2 }],
+        });
+        // La période lue est celle demandée, jusqu'à avant-hier (les deux derniers jours ne sont pas encore consolidés chez Google).
+        const start = new Date(end.getTime() - ((days ?? 28) - 1) * 86400_000);
+        site.gsc = { ...site.gsc, source: "google", period: { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) } };
+        attachOrganic(site.truth, site.gsc);
+        site.summary = { ...site.summary, searchConsole: { available: true, importedAt: site.gsc.importedAt } };
+        emit(site, { type: "search_console", available: true });
+        return json(site.gsc);
+      }
       if (method === "DELETE") {
         site.gsc = null;
         attachOrganic(site.truth, null);
@@ -654,7 +753,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
         await delay(1200);
         if (!file) return apiError(400, "bad_request", "Aucun fichier reçu.", "Choisissez le fichier exporté depuis la Search Console.");
         if (file.size > 20 * 1024 * 1024) return apiError(413, "file_too_large", "Ce fichier dépasse 20 Mo.", "Exportez une période plus courte, puis réessayez.");
-        if (!/\.(zip|csv)$/i.test(file.name) || /pas-un-export/.test(file.name)) return apiError(422, "invalid_file", "Ce fichier n'est pas un export Search Console lisible.", "Déposez le fichier .zip téléchargé depuis « Performances » de la Search Console.");
+        if (!/\.(zip|csv)$/i.test(file.name) || /pas-un-export/.test(file.name)) return apiError(422, "invalid_file", "Ce fichier n'est pas un export Search Console lisible.", "Déposez le fichier .zip téléchargé depuis « Performances » de la Search Console.");
         site.gsc = buildSearchConsole(site.truth, site.profile.seed + 1, new Date().toISOString(), {
           queries: LUNE_QUERIES, host: site.profile.host, clicksPerDay: site.truth.length > 100 ? 90 : 20,
           extraPages: [{ path: "/ancienne-collection", clicks: 3, impressions: 410, position: 31.2 }],
@@ -687,7 +786,7 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
         const { message } = JSON.parse(String(init?.body ?? "{}")) as { message: string };
         const low = message.toLowerCase();
         if (low.includes("limite")) return apiError(429, "rate_limited", "Vous avez posé beaucoup de questions en peu de temps.", "Patientez un peu, puis renvoyez votre question.", { retryAfterSeconds: 45 });
-        const userMessage: ChatMessage = { id: nextId("msg"), role: "user", content: message, createdAt: new Date().toISOString(), sources: [] };
+        const userMessage: ChatMessage = { id: nextId("msg"), role: "user", content: message, createdAt: new Date().toISOString(), sources: [], batchIds: [] };
         site.chat = [...site.chat, userMessage];
         const answer = assistantAnswer(site, message);
         // Échec avant toute réponse : la question n'est pas conservée (comme le serveur).
@@ -726,14 +825,14 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
             for (const c of chunks) {
               if (cancelled) {
                 // Flux coupé par le navigateur : la génération s'arrête, la réponse partielle est enregistrée.
-                if (sent) site.chat = [...site.chat, { id: nextId("msg"), role: "assistant", content: `${sent}…`, createdAt: new Date().toISOString(), sources: answer.sources }];
+                if (sent) site.chat = [...site.chat, { id: nextId("msg"), role: "assistant", content: `${sent}…`, createdAt: new Date().toISOString(), sources: answer.sources, batchIds: [] }];
                 return;
               }
               push("delta", { type: "delta", text: c });
               sent += c;
               await delay(28);
             }
-            const msg: ChatMessage = { id: nextId("msg"), role: "assistant", content: answer.text, createdAt: new Date().toISOString(), sources: answer.sources };
+            const msg: ChatMessage = { id: nextId("msg"), role: "assistant", content: answer.text, createdAt: new Date().toISOString(), sources: answer.sources, batchIds: answer.batchIds ?? [] };
             site.chat = [...site.chat, msg];
             push("done", { type: "done", message: msg });
             close();

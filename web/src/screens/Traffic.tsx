@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
-import { FileUp, Link2, Search, Trash2, Upload } from "lucide-react";
+import { CloudDownload, FileUp, Link2, Search, Trash2, Upload } from "lucide-react";
 import type { OrganicPage, OrganicQuery, SearchConsoleData, SiteSummary } from "../lib/types";
-import { keys, useSearchConsole } from "../lib/queries";
+import { keys, useSearchConsole, useSettings } from "../lib/queries";
 import { sendFile, sendJSON, toAppError, type AppError } from "../lib/api";
 import { invalidate, setQueryData } from "../lib/cache";
 import { patchSite } from "../lib/live";
@@ -13,10 +13,12 @@ import { TrendChart } from "../ui/TrendChart";
 import { Tabs } from "../ui/Tabs";
 import { Button, Link } from "../ui/Button";
 import { ConfirmButton } from "../ui/ConfirmButton";
+import { Dialog } from "../ui/Dialog";
 import { ScorePill } from "../ui/Badge";
-import { ErrorState } from "../ui/States";
+import { ErrorState, fmtWait, useRetryCountdown } from "../ui/States";
 import { Skeleton, SkeletonRows, LoadingLabel } from "../ui/Skeleton";
 import { useToast } from "../ui/Toast";
+import { CodeBlock } from "../ui/CodeBlock";
 import { QueryError } from "./common";
 
 type Available = Extract<SearchConsoleData, { available: true }>;
@@ -32,7 +34,7 @@ function useUpload(siteId: string) {
     last.current = file;
     setError(null);
     if (!/\.(zip|csv)$/i.test(file.name)) {
-      setError({ code: "invalid_file", message: "Ce fichier n'est pas un export Search Console.", action: "Déposez le fichier .zip téléchargé depuis « Performances », ou l'un des fichiers .csv qu'il contient.", status: 0 });
+      setError({ code: "invalid_file", message: "Ce fichier n'est pas un export Search Console.", action: "Déposez le fichier .zip téléchargé depuis « Performances », ou l'un des fichiers .csv qu'il contient.", status: 0 });
       return;
     }
     if (file.size > MAX) {
@@ -79,6 +81,123 @@ function useUpload(siteId: string) {
   return { busy, error, upload, pick, retry: () => last.current && upload(last.current), clear: () => setError(null) };
 }
 
+/** Périodes de lecture directe acceptées par le serveur (jours). */
+const PERIODS = [
+  { days: 28, label: "28 jours" },
+  { days: 90, label: "3 mois" },
+  { days: 480, label: "16 mois" },
+] as const;
+
+/** Lecture directe de la Search Console par le compte de service du serveur (lecture seule). */
+function useGoogleSync(siteId: string) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
+  const run = async (days: number) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await sendJSON<SearchConsoleData>("POST", keys.searchConsoleSync(siteId), { days });
+      setQueryData(keys.searchConsole(siteId), data);
+      if (data.available) patchSite(siteId, (s) => ({ ...s, searchConsole: { available: true, importedAt: data.importedAt } }));
+      invalidate(keys.overview(siteId));
+      invalidate(keys.allPages(siteId));
+      invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
+      toast.show({ tone: "success", title: "Données lues chez Google", text: data.available && data.period ? `Période ${fmtPeriod(data.period)}. Elles remplacent les données précédentes.` : "Elles remplacent les données précédentes." });
+    } catch (err) {
+      setError(toAppError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, run, clear: () => setError(null) };
+}
+
+function PeriodPicker({ value, onChange, id }: { value: number; onChange: (d: number) => void; id: string }) {
+  return (
+    <div className="seg" role="radiogroup" aria-labelledby={id}>
+      {PERIODS.map((p) => (
+        <label key={p.days} className={`seg__opt ${value === p.days ? "is-on" : ""}`}>
+          <input type="radio" name={id} value={p.days} checked={value === p.days} onChange={() => onChange(p.days)} />
+          <span>{p.label}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Erreurs de la lecture directe : l'adresse à ajouter dans la Search Console est montrée telle quelle, avec les étapes. */
+function GoogleError({ g }: { g: ReturnType<typeof useGoogleSync> }) {
+  if (!g.error) return null;
+  if (g.error.code === "search_console_no_access") {
+    const account = typeof g.error.details?.account === "string" ? g.error.details.account : null;
+    return (
+      <div className="gsc-access" role="alert">
+        <p className="gsc-access__title">{g.error.message}</p>
+        <p className="gsc-access__lead">Chat SEO lit vos données avec un compte de service Google. Donnez-lui accès à votre propriété, en lecture :</p>
+        <ol className="howto howto--compact">
+          <li><strong>Copiez l'adresse du compte de service</strong>{account ? <CodeBlock code={account} label="Adresse à ajouter" /> : <span>La personne qui gère l'installation peut vous la donner.</span>}</li>
+          <li><strong>Ouvrez la Search Console</strong><span>Choisissez la propriété de ce site, puis « Paramètres », « Utilisateurs et autorisations ».</span></li>
+          <li><strong>Ajoutez l'utilisateur</strong><span>Collez l'adresse, choisissez l'autorisation « Limité » (lecture seule, c'est suffisant), puis validez. Revenez ici et relancez la lecture.</span></li>
+        </ol>
+      </div>
+    );
+  }
+  return <ErrorState error={g.error} inline />;
+}
+
+/**
+ * Bloc de lecture directe, à côté du dépôt de fichier (qui reste disponible). `replacesFile` : un export déposé
+ * est en place ; la lecture le remplacerait, donc elle est d'abord confirmée.
+ */
+function GoogleRead({ g, compact, replacesFile }: { g: ReturnType<typeof useGoogleSync>; compact?: boolean; replacesFile?: { importedAt: string } }) {
+  const [days, setDays] = useState<number>(90);
+  const [confirming, setConfirming] = useState(false);
+  // Une lecture par minute au plus : après un refus, le bouton attend la fin du délai donné par le serveur.
+  const wait = useRetryCountdown(g.error);
+  const read = () => {
+    if (replacesFile) setConfirming(true);
+    else void g.run(days);
+  };
+  return (
+    <div className={`gsc-google ${compact ? "gsc-google--compact" : ""}`}>
+      {!compact && (
+        <div className="gsc-google__text">
+          <p className="gsc-google__title" id="gsc-period-t">Ou lisez-les directement chez Google</p>
+          <p className="gsc-google__lead">En lecture seule, par le compte de service configuré sur le serveur. Les recherches sont alors reliées aux pages.</p>
+        </div>
+      )}
+      <div className="gsc-google__row">
+        {compact && <span className="sr-only" id="gsc-period-t">Période à lire</span>}
+        <PeriodPicker value={days} onChange={setDays} id="gsc-period-t" />
+        <Button variant={compact ? "secondary" : "primary"} icon={<CloudDownload size={15} aria-hidden />} loading={g.busy && !confirming} onClick={read} disabled={g.busy || wait > 0}>
+          {g.busy ? "Lecture chez Google…" : wait > 0 ? `Nouvel essai dans ${fmtWait(wait)}` : compact ? "Relire depuis Google" : "Lire depuis Google"}
+        </Button>
+      </div>
+      {!compact && <div className="gsc-error"><GoogleError g={g} /></div>}
+      {replacesFile && (
+        <Dialog
+          open={confirming}
+          onClose={() => setConfirming(false)}
+          busy={g.busy}
+          title="Remplacer l'export déposé ?"
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirming(false)} disabled={g.busy} data-autofocus>Garder l'export</Button>
+              <Button variant="primary" icon={<CloudDownload size={15} aria-hidden />} loading={g.busy} onClick={() => void g.run(days).then(() => setConfirming(false))}>Lire et remplacer</Button>
+            </>
+          }
+        >
+          <p className="confirm__note">
+            Les données lues chez Google ({PERIODS.find((p) => p.days === days)?.label.toLowerCase() ?? `${days} jours`}) remplaceront l'export que vous avez déposé le {fmtDateTime(replacesFile.importedAt)}. <strong>L'export ne sera pas conservé</strong> : pour y revenir, il faudra le déposer de nouveau.
+          </p>
+          <p className="muted small">La lecture se fait en lecture seule : rien n'est modifié dans votre Search Console.</p>
+        </Dialog>
+      )}
+    </div>
+  );
+}
+
 /**
  * Erreur de dépôt : un fichier refusé appelle un autre fichier ; une erreur du serveur ou du réseau,
  * un nouvel essai avec le même fichier.
@@ -101,19 +220,20 @@ function HowTo() {
         <span>Sur search.google.com/search-console, choisissez votre site. C'est l'outil gratuit de Google qui mesure vos visites.</span>
       </li>
       <li>
-        <strong>Allez dans « Performances »</strong>
-        <span>Puis « Résultats de recherche ». Choisissez une période : 3 mois donnent une bonne vue d'ensemble.</span>
+        <strong>Allez dans « Performances »</strong>
+        <span>Puis « Résultats de recherche ». Choisissez une période : 3 mois donnent une bonne vue d'ensemble.</span>
       </li>
       <li>
-        <strong>Cliquez sur « Exporter »</strong>
-        <span>En haut à droite, puis « Télécharger le fichier CSV ». Vous obtenez un fichier .zip : déposez-le ici tel quel.</span>
+        <strong>Cliquez sur « Exporter »</strong>
+        <span>En haut à droite, puis « Télécharger le fichier CSV ». Vous obtenez un fichier .zip : déposez-le ici tel quel.</span>
       </li>
     </ol>
   );
 }
 
-function NoImport({ siteId }: { siteId: string }) {
+function NoImport({ siteId, google }: { siteId: string; google: boolean }) {
   const u = useUpload(siteId);
+  const g = useGoogleSync(siteId);
   return (
     <div className="gsc-empty">
       <div className="gsc-empty__main">
@@ -123,6 +243,7 @@ function NoImport({ siteId }: { siteId: string }) {
         </p>
         <Dropzone onFile={u.upload} accept={ACCEPT} busy={u.busy} title="Déposez ici l'export de la Search Console" hint="Le fichier .zip tel quel, ou un fichier .csv. 20 Mo au plus." />
         {u.error && <div className="gsc-error"><UploadError u={u} /></div>}
+        {google && <GoogleRead g={g} />}
       </div>
       <aside className="gsc-empty__aside" aria-labelledby="howto-t">
         <h3 id="howto-t" className="gsc-empty__aside-title">Où trouver l'export</h3>
@@ -223,6 +344,7 @@ function PagesTable({ rows, siteId }: { rows: OrganicPage[]; siteId: string }) {
 /** Rapprochement entre les pages de l'export et les pages analysées. */
 function Matching({ data }: { data: Available }) {
   const m = data.matching;
+  const from = data.source === "google" ? "des données lues chez Google" : "de l'export";
   if (!m) {
     return <p className="gsc-match muted small"><Link2 size={14} aria-hidden /> L'export ne contient pas la liste des pages : les clics ne peuvent pas être reliés aux pages analysées. Le fichier .zip complet la contient.</p>;
   }
@@ -232,7 +354,7 @@ function Matching({ data }: { data: Available }) {
       <p className="gsc-match small">
         <Link2 size={14} aria-hidden />
         <span>
-          <strong>Aucune des {fmtInt(m.total)} pages de l'export</strong> ne correspond aux pages analysées : leurs clics ne peuvent pas être reliés à vos pages.
+          <strong>Aucune des {fmtInt(m.total)} pages {from}</strong> ne correspond aux pages analysées : leurs clics ne peuvent pas être reliés à vos pages.
           <span className="muted"> Vérifiez que l'export vient bien de ce site, ou relancez l'analyse avec un plafond de pages plus élevé.</span>
         </span>
       </p>
@@ -243,7 +365,7 @@ function Matching({ data }: { data: Available }) {
     <p className="gsc-match small">
       <Link2 size={14} aria-hidden />
       <span>
-        <strong className="tnum">{fmtInt(m.matched)} {m.matched > 1 ? "pages" : "page"} sur {fmtInt(m.total)}</strong> de l'export {m.matched > 1 ? "sont reliées" : "est reliée"} aux pages analysées : leurs clics apparaissent dans « Pages analysées ».
+        <strong className="tnum">{fmtInt(m.matched)} {m.matched > 1 ? "pages" : "page"} sur {fmtInt(m.total)}</strong> {from} {m.matched > 1 ? "sont reliées" : "est reliée"} aux pages analysées : leurs clics apparaissent dans « Pages analysées ».
         {rest > 0 && <span className="muted"> {rest > 1 ? `Les ${fmtInt(rest)} autres n'ont pas été analysées` : "L'autre n'a pas été analysée"} (au-delà du plafond de pages, ou introuvable depuis les liens du site).</span>}
       </span>
     </p>
@@ -303,6 +425,8 @@ function Imported({ data, site }: { data: Available; site: SiteSummary }) {
 
 export function TrafficScreen({ site }: { site: SiteSummary }) {
   const q = useSearchConsole(site.id);
+  const google = useSettings().data?.integrations.searchConsole.configured === true;
+  const g = useGoogleSync(site.id);
   const toast = useToast();
   const u = useUpload(site.id);
   const picker = useRef<HTMLInputElement>(null);
@@ -331,11 +455,17 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
       <PageHeader
         title="Mots-clés et trafic organique"
         description="Ce que Google vous apporte : les recherches qui mènent à votre site, et les pages qui reçoivent les visites."
-        meta={data?.available ? <span className="muted small">Export importé le {fmtDateTime(data.importedAt)}{data.period ? `, ${fmtPeriod(data.period)}` : ""}.</span> : undefined}
+        meta={data?.available ? (
+          <span className="gsc-source small">
+            <span className="gsc-source__tag">{data.source === "google" ? "Lu chez Google" : "Export déposé"}</span>
+            <span className="muted">{data.source === "google" ? "Lu dans la Search Console" : "Importé"} le {fmtDateTime(data.importedAt)}{data.period ? `, données ${fmtPeriod(data.period)}` : ""}.</span>
+          </span>
+        ) : undefined}
         actions={
           data?.available ? (
             <>
-              <Button icon={<Upload size={15} aria-hidden />} loading={u.busy} onClick={() => picker.current?.click()}>Remplacer l'export</Button>
+              {google && <GoogleRead g={g} compact replacesFile={data.source === "file" ? { importedAt: data.importedAt } : undefined} />}
+              <Button icon={<Upload size={15} aria-hidden />} loading={u.busy} onClick={() => picker.current?.click()}>{data.source === "google" ? "Déposer un export" : "Remplacer l'export"}</Button>
               <ConfirmButton icon={<Trash2 size={15} aria-hidden />} confirmLabel="Confirmer la suppression" onConfirm={remove} loading={deleting}>Supprimer</ConfirmButton>
               <input ref={picker} type="file" accept={ACCEPT} className="sr-only" tabIndex={-1} aria-hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void u.upload(f); e.target.value = ""; }} />
             </>
@@ -344,6 +474,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
       />
       <QueryError q={q} />
       {u.error && data?.available && <UploadError u={u} />}
+      {g.error && data?.available && <div className="gsc-error gsc-error--top"><GoogleError g={g} /></div>}
       {!data && !q.error && (
         <>
           <LoadingLabel />
@@ -354,9 +485,9 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
           <SkeletonRows rows={6} height={44} />
         </>
       )}
-      {data && !data.available && <NoImport siteId={site.id} />}
+      {data && !data.available && <NoImport siteId={site.id} google={google} />}
       {data && data.available && <Imported data={data} site={site} />}
-      {data?.available && <p className="muted small gsc-foot">{plural(data.queries?.length ?? 0, "recherche", "recherches")} et {plural(data.pages?.length ?? 0, "page", "pages")} dans l'export.</p>}
+      {data?.available && <p className="muted small gsc-foot">{plural(data.queries?.length ?? 0, "recherche", "recherches")} et {plural(data.pages?.length ?? 0, "page", "pages")} {data.source === "google" ? "lues chez Google" : "dans l'export"}.</p>}
     </>
   );
 }

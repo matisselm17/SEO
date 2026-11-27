@@ -63,10 +63,17 @@ export type Route =
   | { name: "traffic"; siteId: string }
   | { name: "competitors"; siteId: string }
   | { name: "recommendations"; siteId: string }
-  | { name: "shopify"; siteId: string; resourceId: string | null }
+  | { name: "shopify"; siteId: string; resourceId: string | null; view: ShopifyView; batchId: string | null }
   | { name: "assistant"; siteId: string }
   | { name: "settings"; siteId: string | null }
   | { name: "notfound" };
+
+/** Onglets de la section Boutique Shopify, chacun avec son adresse. */
+export type ShopifyView = "items" | "batches" | "history" | "automation";
+const SHOPIFY_VIEWS: Record<string, ShopifyView> = { lots: "batches", historique: "history", automatisation: "automation" };
+export const SHOPIFY_VIEW_SLUG: Record<ShopifyView, string | null> = { items: null, batches: "lots", history: "historique", automation: "automatisation" };
+/** Identifiant réservé : le lot en préparation dans le navigateur (pas encore envoyé au serveur). */
+export const NEW_BATCH = "nouveau";
 
 export type SectionName = Exclude<Route["name"], "home" | "add" | "notfound">;
 
@@ -104,14 +111,23 @@ export function parseRoute(path: string): Route {
   const section = SECTION_SLUGS[parts[2] ?? ""];
   if (!section) return { name: "notfound" };
   const extra = parts[3] ?? null;
+  if (section === "shopify") {
+    // /boutique, /boutique/:élément, /boutique/lots, /boutique/lots/:lot, /boutique/historique, /boutique/automatisation
+    const view = extra ? SHOPIFY_VIEWS[extra] : undefined;
+    if (view) {
+      const batchId = view === "batches" ? parts[4] ?? null : null;
+      if (parts.length > (view === "batches" ? 5 : 4)) return { name: "notfound" };
+      return { name: "shopify", siteId, resourceId: null, view, batchId };
+    }
+    if (parts.length > 4) return { name: "notfound" };
+    return { name: "shopify", siteId, resourceId: extra, view: "items", batchId: null };
+  }
   if (parts.length > 4) return { name: "notfound" };
   switch (section) {
     case "audit":
       return { name: "audit", siteId, issueId: extra };
     case "pages":
       return { name: "pages", siteId, pageId: extra };
-    case "shopify":
-      return { name: "shopify", siteId, resourceId: extra };
     default:
       if (extra) return { name: "notfound" };
       return { name: section, siteId } as Route;
@@ -120,4 +136,12 @@ export function parseRoute(path: string): Route {
 
 export function sitePath(siteId: string, section: SectionName = "overview", extra?: string) {
   return `/sites/${encodeURIComponent(siteId)}${SECTION_PATHS[section]}${extra ? "/" + encodeURIComponent(extra) : ""}`;
+}
+
+/** Adresse d'un onglet de la boutique, ou d'un lot. */
+export function shopPath(siteId: string, view: ShopifyView, batchId?: string) {
+  const slug = SHOPIFY_VIEW_SLUG[view];
+  const base = sitePath(siteId, "shopify");
+  if (!slug) return base;
+  return `${base}/${slug}${batchId ? "/" + encodeURIComponent(batchId) : ""}`;
 }

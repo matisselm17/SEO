@@ -7,14 +7,16 @@
  * caractère de contrôle, longueur maximale en points de code) : la confirmation montre la valeur qui sera écrite.
  */
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { CircleAlert, CircleCheck, ExternalLink, Info, Lock, RefreshCw } from "lucide-react";
+import { CircleAlert, CircleCheck, ExternalLink, Info, ListPlus, Lock, OctagonAlert, RefreshCw, TriangleAlert } from "lucide-react";
 import type { ShopifyChange, ShopifyChangeResponse, ShopifyField, ShopifyResourceDetail, ShopifyState, ShopifyTranslation, SiteSummary } from "../lib/types";
-import { useShopifyResource } from "../lib/queries";
-import { sitePath, useSearch } from "../lib/router";
+import { useShopifyBatches, useShopifyResource } from "../lib/queries";
+import { NEW_BATCH, navigate, shopPath, sitePath, useSearch } from "../lib/router";
 import {
-  EMPTY_DESCRIPTION_PREVIEW, FIELD_GUIDE, FIELD_HINT, FIELD_LABEL, FIELD_MAX, TYPE_LABEL, codeLength, emptyMeaning, localeLabel,
-  normalizeValue, valueProblem,
+  EMPTY_DESCRIPTION_PREVIEW, FIELD_GUIDE, FIELD_HINT, FIELD_LABEL, FIELD_MAX, TYPE_LABEL, VERDICT_LABEL, codeLength, emptyMeaning, lengthReason,
+  localeLabel, normalizeValue, valueProblem,
 } from "../lib/shopify";
+import { addDraftLines, lineKey, type DraftLine } from "../lib/batchDraft";
+import { useToast } from "../ui/Toast";
 import { fmtDateTime, plural } from "../lib/format";
 import { Sheet } from "../ui/Sheet";
 import { SerpPreview } from "../ui/SerpPreview";
@@ -37,7 +39,9 @@ const cut = (s: string, n: number) => (codeLength(s) > n ? [...s].slice(0, n - 1
 const changeKey = (field: ShopifyField, imageId: string | null | undefined, locale: string | null | undefined) => `${field}|${imageId ?? ""}|${locale ?? ""}`;
 
 /** Champ éditable : la valeur actuelle de la boutique, le texte préparé, un compteur, et « Vérifier et appliquer ». */
-function FieldEditor({ label, hint, field, current, emptyText, multiline, block, onApply, onDraft, dataField, locked, lockedReason, extraTag, compact, lang, resetSignal }: {
+function FieldEditor({ label, hint, field, current, emptyText, multiline, block, onApply, onDraft, dataField, locked, lockedReason, extraTag, compact, lang, resetSignal, onAddToBatch }: {
+  /** « Ajouter au lot » : la valeur rejoint le lot en préparation au lieu d'être écrite tout de suite. */
+  onAddToBatch?: (value: string) => void;
   label: string;
   hint?: string;
   field: ShopifyField;
@@ -130,6 +134,9 @@ function FieldEditor({ label, hint, field, current, emptyText, multiline, block,
           {(!inline || dirty || (block && !block.id)) && (
             <div className="fedit__actions">
               {!inline && apply}
+              {onAddToBatch && dirty && value && !problem && (
+                <Button size="sm" variant="secondary" icon={<ListPlus size={14} aria-hidden />} onClick={() => onAddToBatch(value)}>Ajouter au lot</Button>
+              )}
               {dirty && <Button size="sm" variant="ghost" onClick={() => setDraft(current ?? "")}>Revenir à la valeur actuelle</Button>}
               {block && !block.id && <span className="fedit__block" id={reasonId}><Lock size={13} aria-hidden />{block.text}</span>}
             </div>
@@ -137,6 +144,45 @@ function FieldEditor({ label, hint, field, current, emptyText, multiline, block,
         </>
       )}
     </div>
+  );
+}
+
+const VERDICT_ICON = { pass: CircleCheck, warn: TriangleAlert, fail: OctagonAlert } as const;
+
+/**
+ * Ce que l'analyse a vu sur la page affichée : le titre et la description réellement lus par Google, et leur verdict.
+ * Un champ vide dans Shopify dont le texte affiché est correct n'est pas présenté comme un défaut.
+ */
+function SeenOnPage({ r }: { r: ShopifyResourceDetail }) {
+  const a = r.audit;
+  if (!a) {
+    return (
+      <div className="seen seen--na">
+        <p className="seen__lead"><Info size={14} aria-hidden /> Page non ouverte par l'analyse : on ne sait pas encore ce que Google lit réellement sur cette page. Relancez l'analyse avec un plafond de pages plus élevé pour la vérifier.</p>
+      </div>
+    );
+  }
+  const rows = [
+    { field: "seo_title" as const, label: "Titre affiché", text: a.renderedTitle, status: a.titleStatus, empty: !r.seoTitle, fallback: `Le champ est vide dans Shopify : la page affiche ${TYPE_LABEL[r.type].the}.` },
+    { field: "seo_description" as const, label: "Description affichée", text: a.renderedDescription, status: a.descriptionStatus, empty: !r.seoDescription, fallback: "Le champ est vide dans Shopify : la page affiche le début du texte." },
+  ];
+  return (
+    <dl className="seen">
+      {rows.map((x) => {
+        const Icon = VERDICT_ICON[x.status];
+        const why = x.status === "warn" ? lengthReason(x.field, x.text) : null;
+        return (
+          <div key={x.field} className="seen__row">
+            <dt className="seen__k">{x.label}</dt>
+            <dd className="seen__v">
+              <span className={`verdict verdict--${x.status}`}><Icon size={13} aria-hidden />{VERDICT_LABEL[x.status]}{why ? ` : ${why}` : x.status === "fail" ? " : rien n'est affiché" : ""}</span>
+              {x.text && <span className="seen__text">« {x.text} »</span>}
+              {x.empty && <span className="seen__note">{x.fallback}{x.status === "pass" ? " Le résultat est correct : rien à corriger." : ""}</span>}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 
@@ -157,6 +203,10 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
   const q = useShopifyResource(site.id, resourceId);
   const search = useSearch();
   const focusField = search.get("champ") as ShopifyField | null;
+  const focusChange = search.get("modif");
+  const batchList = useShopifyBatches(site.id, !!resourceId).data?.batches;
+  const batchTitles = useMemo(() => new Map((batchList ?? []).map((b) => [b.id, { title: b.title, auto: b.autoApplied }])), [batchList]);
+  const toast = useToast();
   const r = q.data?.resource && q.data.resource.id === resourceId ? q.data.resource : null;
   const conn = shop?.connection;
   const writesOn = conn?.writesEnabled === true;
@@ -198,6 +248,35 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
     return () => clearTimeout(t);
   }, [r, focusField]);
 
+  // Ouverte depuis un lot sur une modification précise : on l'amène à l'écran dans l'historique de l'élément.
+  useEffect(() => {
+    if (!r || !focusChange) return;
+    const t = setTimeout(() => {
+      const el = body.current?.querySelector<HTMLElement>(`[data-change="${CSS.escape(focusChange)}"]`);
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 320);
+    return () => clearTimeout(t);
+  }, [r, focusChange]);
+
+  /** « Ajouter au lot » depuis la fiche : la valeur rejoint le lot en préparation, rien n'est écrit. */
+  const addToBatch = (field: ShopifyField, value: string, current: string | null, extra?: { imageId?: string; locale?: string; image?: { url: string; index: number } }) => {
+    if (!r) return;
+    const a = r.audit;
+    const line: DraftLine = {
+      key: lineKey(r.id, field, extra?.imageId ?? null, extra?.locale ?? null), resourceId: r.id, resourceType: r.type, title: r.title, path: r.path, field,
+      imageId: extra?.imageId ?? null, imageUrl: extra?.image?.url ?? null, imageIndex: extra?.image?.index ?? null, locale: extra?.locale ?? null, current,
+      rendered: a && !extra?.locale && field !== "image_alt" ? (field === "seo_title" ? { text: a.renderedTitle, status: a.titleStatus } : { text: a.renderedDescription, status: a.descriptionStatus }) : null,
+      value,
+    };
+    const res = addDraftLines(site.id, [line]);
+    toast.show({
+      tone: res.refused ? "error" : "success",
+      title: res.refused ? "Le lot en préparation est plein" : res.updated ? "Valeur mise à jour dans le lot en préparation" : "Ajouté au lot en préparation",
+      text: res.refused ? "Un lot compte 50 lignes au plus : créez d'abord le brouillon." : "Rien n'est écrit dans la boutique. Vous validerez le lot entier, après relecture.",
+      action: res.refused ? undefined : { label: "Ouvrir le lot", onClick: () => navigate(shopPath(site.id, "batches", NEW_BATCH)) },
+    });
+  };
+
   /** Raison propre à l'élément (readOnlyReasons), dite une fois. */
   const roReason = (field: ShopifyField | "translations") => r?.readOnlyReasons?.[field] ?? null;
   /** Pourquoi on ne peut pas appliquer un champ modifiable par nature. */
@@ -232,8 +311,9 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
     }
   }, [r, site.url]);
 
-  const previewTitle = r ? normalizeValue(draftTitle ?? r.seoTitle ?? "") ?? r.title : null;
-  const previewDesc = r ? normalizeValue(draftDesc ?? r.seoDescription ?? "") : null;
+  // L'aperçu suit la saisie ; sans saisie, il montre ce que l'analyse a vu sur la page (le nom ou le début du texte si le champ est vide).
+  const previewTitle = r ? normalizeValue(draftTitle ?? r.seoTitle ?? "") ?? (r.seoTitle ? r.title : r.audit?.renderedTitle ?? r.title) : null;
+  const previewDesc = r ? normalizeValue(draftDesc ?? r.seoDescription ?? "") ?? (r.seoDescription ? null : r.audit?.renderedDescription ?? null) : null;
   const locales = useMemo(() => {
     if (!r) return [];
     const m = new Map<string, ShopifyTranslation[]>();
@@ -322,7 +402,8 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
 
               <section className="detail-block" aria-labelledby="shop-google">
                 <h3 className="detail-block__title" id="shop-google">Dans Google</h3>
-                <p className="detail-block__hint">L'aperçu suit ce que vous écrivez ci-dessous.</p>
+                <p className="detail-block__hint">Ce que l'analyse a lu sur la page en ligne, puis l'aperçu, qui suit ce que vous écrivez ci-dessous.</p>
+                <SeenOnPage r={r} />
                 <SerpPreview
                   url={pageUrl ?? site.url}
                   title={previewTitle ? cut(previewTitle, 60) : null}
@@ -347,6 +428,7 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
                     resetSignal={resets[changeKey(f, null, null)]}
                     onDraft={f === "seo_title" ? setDraftTitle : setDraftDesc}
                     onApply={(v) => edit(f, v, f === "seo_title" ? r.seoTitle : r.seoDescription)}
+                    onAddToBatch={roReason(f) || !r.editable[f] ? undefined : (v) => addToBatch(f, v, f === "seo_title" ? r.seoTitle : r.seoDescription)}
                   />
                 ))}
               </section>
@@ -383,6 +465,7 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
                             resetSignal={resets[changeKey("image_alt", im.id, null)]}
                             extraTag={im.alt ? null : <span className="fedit__flag">Sans texte alternatif</span>}
                             onApply={(v) => edit("image_alt", v, im.alt, { imageId: im.id, image: { url: im.url, index: i + 1 } })}
+                            onAddToBatch={r.editable.image_alt ? (v) => addToBatch("image_alt", v, im.alt, { imageId: im.id, image: { url: im.url, index: i + 1 } }) : undefined}
                             compact
                           />
                         </li>
@@ -422,6 +505,7 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
                           resetSignal={resets[changeKey(t.field, null, loc)]}
                           extraTag={t.outdated ? <span className="fedit__flag" title={`Le texte en ${primaryName} a été modifié après cette traduction.`}>À revoir : le texte en {primaryName} a changé depuis</span> : null}
                           onApply={(v) => edit(t.field, v, t.value, { locale: loc })}
+                          onAddToBatch={t.editable && r.editable.translations && !trRo ? (v) => addToBatch(t.field, v, t.value, { locale: loc }) : undefined}
                           compact
                         />
                       ))}
@@ -439,6 +523,8 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
                   blocked={writesOn ? null : WRITES_OFF}
                   onRestore={(c: ShopifyChange) => setIntent({ kind: "restore", change: c })}
                   onReread={() => void q.refetch()}
+                  highlight={focusChange}
+                  batchTitles={batchTitles}
                   empty={<p className="muted small shop-empty-hist"><Info size={14} aria-hidden /> Aucune modification faite par Chat SEO sur cet élément.</p>}
                 />
               </section>

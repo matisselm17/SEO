@@ -35,6 +35,7 @@ Scénarios, avec `?demo=…` dans l'adresse (mémorisé pour l'onglet) :
 | `coupure` | Le flux en direct se coupe après 2,5 s et ne revient pas (indicateur de connexion perdue) |
 | `erreurs` | Les lectures échouent pendant 2 s puis réussissent à la relance ; l'assistant s'interrompt après un début de réponse ; le relevé des concurrents répond `competitors_unavailable` |
 | `lent` | Les écrans restent en chargement (skeletons) |
+| `pause` | Relance en pause à 23 pages : le site limite les demandes (`pausedUntil` dans 4 min) |
 
 Saisies spéciales, dans tous les scénarios :
 
@@ -55,6 +56,23 @@ Boutique Shopify (`src/demo/shopify.ts`, boutique fictive du site Atelier Lune),
 
 Maison Orlux montre toujours « la boutique connectée est celle d'un autre site ». Saisies spéciales dans un champ, au moment d'appliquer : `conflit` → la valeur est changée « dans Shopify » puis `shopify_conflict` ; `rafale` → `rate_limited` (20 s) ; `permission` → `shopify_missing_scope` ; `panne` → `shopify_unavailable` ; `relecture` → écriture acceptée mais non relue (`afterVerified: false`). Les valeurs avec `<`, `>`, un caractère de contrôle ou trop longues sont bloquées par l'interface avant la confirmation (le faux serveur répond `shopify_invalid_value` s'il les reçoit). Les images des collections et des articles sont en lecture seule (`readOnlyReasons.image_alt`). Une lecture complète par minute au plus.
 
+Lots de corrections et automatisation (boutique d'Atelier Lune), règle choisie avec `?ia=…` (mémorisé pour l'onglet, combinable) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `propose` (défaut) | L'IA prépare, un humain valide ; mode automatique non autorisé côté serveur |
+| `auto` | Mode automatique autorisé et choisi : avec `?boutique=ecriture`, « Préparer des corrections avec l'IA » écrit sans validation les lignes conformes à la règle et au filtre de contenu (`autoApplied` par ligne) ; la section porte alors le signal « Écritures automatiques actives » |
+| `auto-refuse` | « auto » choisi mais non autorisé côté serveur : l'écran dit qu'il se comporte comme « vous validez » |
+| `arret` | L'IA ne prépare rien (`automation_off`) |
+| `sans-cle` | Aucune clé d'IA (`aiConfigured: false`, assistant non configuré) |
+| `budget` | Plafond de jetons du jour atteint (`budget_exceeded`, heure de remise à zéro) |
+
+Lots présents au chargement : un brouillon de l'assistant (4 lignes, dont une trop longue) ; « Descriptions vides de produits », préparé par l'optimisation automatique, dont trois lignes ont été écrites sans validation humaine (`ShopifyBatchItem.autoApplied`, mention par ligne) et une a été retenue par le filtre de contenu (elle cite un nom de domaine : « À relire par vous », le lot est repassé en brouillon) ; un lot appliqué en partie (une ligne en conflit, une refusée), un lot annulé, un abandonné, un en échec de préparation.
+
+Écrire ou annuler un lot (avec `?boutique=ecriture`) avance d'une ligne toutes les 1,6 s ; le bouton « Arrêter après la ligne en cours » (route `stop`, sans confirmation) laisse un lot partiel, avec un bilan et « Reprendre l'écriture… ». Lancer un second lot pendant qu'un premier écrit répond `limit_reached` (« un autre lot est en cours », lien vers ce lot). Une proposition contenant `panne` est refusée, `conflit` provoque un conflit. Limites de débit simulées : un lot nommé `rafale`, plus de 5 préparations par l'IA ou plus de 10 enregistrements de la règle par minute répondent `rate_limited` (le bouton attend la fin du délai). La conversation d'Atelier Lune se termine par une réponse qui porte le lot de l'assistant ; une question contenant `corrige` ou `prépare` en crée un nouveau. **Un lot de l'assistant attend toujours une validation humaine**, même en `?ia=auto` : seule « Préparer des corrections avec l'IA » peut écrire seule.
+
+Lecture directe de la Search Console, avec `?gsc=…` : `google` (défaut, compte de service présent), `non-configure`, `sans-acces` (`search_console_no_access` avec l'adresse du compte), `indispo` (`search_console_unavailable`). Une seule lecture par minute (`rate_limited`).
+
 ## Captures
 
 ```bash
@@ -68,3 +86,11 @@ Les images vont dans `web/.captures/` (ignoré par git), avec une planche par é
 - `src/styles/tokens.css` — les tokens ; `DESIGN.md` — le design system.
 - `src/ui/` — composants de base. `src/layout/` — ossature. `src/screens/` — un fichier par écran.
 - `src/lib/` — client d'API, cache de requêtes (ETag, données affichées puis rafraîchies), routeur, lecture SSE, flux en direct.
+
+## Sécurité du serveur de développement
+
+`vite.config.ts` ne sert par `/@fs/` que `web/`, `shared/` et `docs/exemples/` (`server.fs.allow`) et refuse en plus `.env*`, `secrets/**`, `data/**`, `themes/**`, `*.sqlite*`, `*.db`, `.git/**` (`server.fs.deny`) : la base SQLite, la sauvegarde de la boutique et le compte de service Google ne sont jamais lisibles depuis le port 5173. Vérification :
+
+```
+curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:5173/@fs$PWD/data/chat-seo.sqlite"   # 403
+```

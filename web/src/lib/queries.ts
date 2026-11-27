@@ -4,7 +4,8 @@ import { getJSON } from "./api";
 import type {
   ChatState, CompetitorsData, IssueResponse, IssuesResponse, Overview, PageResponse, PageSummary, PagesResponse,
   FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, ShopifyChangesResponse, ShopifyField, ShopifyResourceResponse,
-  ShopifyResourceType, ShopifyResourcesResponse, ShopifyState, SiteResponse, SitesResponse,
+  ShopifyResourceType, ShopifyResourcesResponse, ShopifyState, SiteResponse, SitesResponse, ShopifyBatchesResponse, ShopifyBatchResponse,
+  AutomationState,
 } from "./types";
 
 const s = (id: string) => `/sites/${encodeURIComponent(id)}`;
@@ -35,6 +36,7 @@ export const keys = {
     if (f.type) p.set("type", f.type);
     if (f.q) p.set("q", f.q);
     if (f.missing) p.set("missing", f.missing);
+    if (f.fix) p.set("fix", f.fix);
     p.set("offset", String(f.offset));
     p.set("limit", String(SHOPIFY_PAGE));
     return `${s(id)}/shopify/resources?${p.toString()}`;
@@ -43,6 +45,16 @@ export const keys = {
   shopifyChanges: (id: string, offset: number) => `${s(id)}/shopify/changes?offset=${offset}&limit=${SHOPIFY_PAGE}`,
   shopifyChangesPost: (id: string) => `${s(id)}/shopify/changes`,
   shopifyRestore: (id: string, changeId: string) => `${s(id)}/shopify/changes/${encodeURIComponent(changeId)}/restore`,
+  /** Lots de corrections (sous le préfixe de la boutique : relus à l'événement « shopify »). */
+  shopifyBatches: (id: string) => `${s(id)}/shopify/batches`,
+  shopifyBatch: (id: string, batchId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}`,
+  shopifyBatchItem: (id: string, batchId: string, itemId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}`,
+  shopifyBatchApply: (id: string, batchId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}/apply`,
+  shopifyBatchRestore: (id: string, batchId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}/restore`,
+  shopifyBatchStop: (id: string, batchId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}/stop`,
+  shopifyOptimize: (id: string) => `${s(id)}/shopify/optimize`,
+  automation: (id: string) => `${s(id)}/automation`,
+  searchConsoleSync: (id: string) => `${s(id)}/search-console/sync`,
 };
 
 /** Taille d'une page de liste de la boutique (éléments, historique). */
@@ -52,6 +64,8 @@ export interface ShopifyResourceFilter {
   type: ShopifyResourceType | null;
   q: string;
   missing: ShopifyField | null;
+  /** Seulement les éléments dont la page analysée est en défaut sur ce champ (titre ou description affichés). */
+  fix: "seo_title" | "seo_description" | null;
   offset: number;
 }
 
@@ -104,3 +118,6 @@ export const useShopify = (id: string, enabled = true) => useQuery<ShopifyState>
 export const useShopifyResources = (id: string, f: ShopifyResourceFilter | null) => useQuery<ShopifyResourcesResponse>(f ? keys.shopifyResources(id, f) : null);
 export const useShopifyResource = (id: string, rid: string | null) => useQuery<ShopifyResourceResponse>(rid ? keys.shopifyResource(id, rid) : null);
 export const useShopifyChanges = (id: string, offset: number | null) => useQuery<ShopifyChangesResponse>(offset === null ? null : keys.shopifyChanges(id, offset));
+export const useShopifyBatches = (id: string, enabled = true) => useQuery<ShopifyBatchesResponse>(enabled ? keys.shopifyBatches(id) : null);
+export const useShopifyBatch = (id: string, batchId: string | null) => useQuery<ShopifyBatchResponse>(batchId ? keys.shopifyBatch(id, batchId) : null);
+export const useAutomation = (id: string, enabled = true) => useQuery<AutomationState>(enabled ? keys.automation(id) : null);

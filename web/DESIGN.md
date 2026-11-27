@@ -72,12 +72,20 @@ Règles :
 | `useWindowVirtual` | Virtualisation des longues listes (pages analysées) |
 | `Dialog` | Fenêtre de confirmation posée au-dessus de tout, panneau latéral compris (feuille montante sur mobile) ; Échap ne ferme qu'elle, le focus y reste |
 | `CharCount` | Compteur de caractères avec repère de longueur (ceux de la grille d’audit : titre 30 à 60, description 70 à 160 ; un champ vide n’est pas compté comme un défaut) : un mot et une icône, pas la couleur seule |
+| `.check` | Case à cocher du design system (coche dessinée en fond, thèmes clair et sombre) |
+| `.selbar`, `.actionbar` | Barre d'action collée en bas de l'écran (sélection, brouillon, réglages non enregistrés) |
+| `.seg` | Choix segmenté (période de lecture de la Search Console) |
+| `.mode` | Choix exclusif détaillé (niveau d'automatisation, ce que l'IA peut remplacer) |
 | `Pagination` | « 51 à 100 sur 240 », précédents, suivants, pour les listes servies par tranches |
 
 ## Boutique Shopify
 
-- Toute écriture dans la boutique passe par `ConfirmWrite` (`screens/ShopifyChanges.tsx`) : l'élément, le champ, l'avant et l'après, et la phrase « La boutique en ligne sera modifiée tout de suite ». Une seule valeur par confirmation, jamais d'action en lot.
-- Lecture seule (`writesEnabled` faux) : tout se consulte et se prépare ; les boutons d'application restent visibles, désactivés, avec la raison (une fois par section).
+- Toute écriture dans la boutique passe par une confirmation qui montre ce qui sera écrit : `ConfirmWrite` (`screens/ShopifyChanges.tsx`) pour une valeur ; `ApplyConfirm` / `RestoreConfirm` (`screens/ShopifyBatches.tsx`) pour un lot, avec le récapitulatif par champ et chaque valeur. Le focus initial est toujours sur « Ne rien… », jamais sur le bouton qui écrit.
+- Lots de corrections : une valeur par ligne, jamais de valeur commune appliquée en masse. Le lot en préparation vit dans le navigateur (`lib/batchDraft.ts`) jusqu'à la création du brouillon ; le brouillon se relit ligne par ligne (avant, après, compteur, aperçu Google repliable, note de l'IA), puis se valide.
+- Progression d'un lot : lignes traitées reçues du serveur ; aucune barre avant la première ligne traitée.
+- Un lot appliqué sans validation humaine (`autoApplied`) est marqué partout : liseré d'accent dans la liste, mention « Sans validation humaine », bandeau sur son écran, étiquette dans l'historique.
+- Verdict de l'analyse (`audit.*Status`) : « Correct », « À revoir », « Absent », avec une icône. Un champ vide dans Shopify est une information neutre (« Vide dans Shopify »), jamais un défaut en soi.
+- Lecture seule (`writesEnabled` faux) : tout se consulte et se prépare ; les boutons d'application restent visibles, désactivés, avec la raison (une fois par section, bandeau `shop-readonly` auquel les boutons renvoient).
 - Champ vide : on dit ce que Shopify montre à la place (« Vide : Shopify utilise le nom du produit »), jamais un simple tiret.
 - Les images de la boutique ne s'affichent que si leur adresse est en https (`safeImageUrl`), sinon une vignette neutre.
 

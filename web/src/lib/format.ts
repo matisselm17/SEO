@@ -61,3 +61,15 @@ export function fmtScorePoints(n: number): string {
 
 /** Accord simple : « 1 page », « 3 pages » (sans le nombre). */
 export const pl = (n: number, one: string, many: string) => (n > 1 ? many : one);
+
+const clockFmt = new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" });
+/** Heure locale d'un instant, précédée de « demain » ou de la date s'il n'est pas aujourd'hui : « demain à 01:00 ». */
+export function fmtWhen(iso: string, now = new Date()): string {
+  const d = new Date(iso);
+  const day = (x: Date) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (day(d) === day(now)) return `aujourd'hui à ${clockFmt.format(d)}`;
+  if (day(d) === day(tomorrow)) return `demain à ${clockFmt.format(d)}`;
+  return `le ${dateFmt.format(d)} à ${clockFmt.format(d)}`;
+}
+export const fmtClock = (iso: string) => clockFmt.format(new Date(iso));

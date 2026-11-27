@@ -38,7 +38,7 @@ function Screen({ route, site }: { route: Route; site: SiteSummary }) {
     case "recommendations":
       return <RecommendationsScreen site={site} />;
     case "shopify":
-      return <ShopifyScreen site={site} resourceId={route.resourceId} />;
+      return <ShopifyScreen site={site} resourceId={route.resourceId} view={route.view} batchId={route.batchId} />;
     case "assistant":
       return <AssistantScreen site={site} />;
     case "settings":

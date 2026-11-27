@@ -367,7 +367,7 @@ export function buildSearchConsole(pages: DemoPage[], seed: number, importedAt: 
 
   const exportPages = gscPages.length;
   return {
-    available: true, importedAt,
+    available: true, importedAt, source: "file",
     matching: { matched: gscPages.filter((g) => g.pageId !== null).length, total: exportPages },
     period: { start: series[0].date, end: series[series.length - 1].date },
     totals: { clicks, impressions, ctr: clicks / impressions, position: Math.round((queries.reduce((s, q) => s + q.position * q.impressions, 0) / Math.max(1, queries.reduce((s, q) => s + q.impressions, 0))) * 10) / 10 },

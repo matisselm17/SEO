@@ -12,19 +12,38 @@
  *   jamais-lue          connectée, jamais lue, modifications activées
  *   erreur              Shopify ne répond pas
  *   non-configuree      aucune boutique configurée côté serveur (la section disparaît du menu)
- * Le second site (Maison Orlux) voit toujours « la boutique connectée est celle d'un autre site ».
+ * Le second site (Maison Orlux) voit toujours « la boutique connectée est celle d'un autre site ».
  *
  * Saisies spéciales dans un champ, au moment d'appliquer :
- *   « conflit »    la valeur a été changée dans Shopify entre-temps → shopify_conflict (details.current)
- *   « rafale »     rate_limited (30 écritures par minute)
- *   « permission » shopify_missing_scope
- *   « panne »      shopify_unavailable
- *   « relecture »  Shopify accepte, mais la valeur n'a pas pu être relue (afterVerified: false)
- *   « < » ou « > », caractère de contrôle, texte trop long : shopify_invalid_value (l'interface le bloque avant)
+ *   « conflit »    la valeur a été changée dans Shopify entre-temps → shopify_conflict (details.current)
+ *   « rafale »     rate_limited (30 écritures par minute)
+ *   « permission » shopify_missing_scope
+ *   « panne »      shopify_unavailable
+ *   « relecture »  Shopify accepte, mais la valeur n'a pas pu être relue (afterVerified: false)
+ *   « < » ou « > », caractère de contrôle, texte trop long : shopify_invalid_value (l'interface le bloque avant)
+ *
+ * Lots de corrections et automatisation (voir plus bas) : lots déjà présents dans chaque état, application
+ * ligne par ligne au rythme d'une valeur toutes les 0,9 s, préparation par l'IA simulée (aucun appel à une IA).
+ * Règle d'automatisation choisie avec ?ia=… (mémorisé pour l'onglet) :
+ *   propose (défaut)  l'IA prépare, un humain valide ; mode automatique non autorisé côté serveur
+ *   auto              mode automatique autorisé côté serveur et choisi (avec ?boutique=ecriture : écritures sans validation)
+ *   auto-refuse       mode « auto » choisi, mais non autorisé côté serveur (se comporte comme « vous validez »)
+ *   arret             l'IA ne prépare rien (automation_off)
+ *   sans-cle          aucune clé d'IA sur le serveur (aiConfigured: false)
+ *   budget            plafond de jetons du jour atteint (budget_exceeded)
+ * Valeurs spéciales dans un lot : une proposition contenant « panne » est refusée par Shopify à l'application
+ * (ligne en échec) ; « conflit » fait changer la valeur dans Shopify juste avant son écriture (ligne en conflit).
+ * Un lot nommé « rafale » est refusé à la création (rate_limited).
+ * Écriture d'un lot : une valeur toutes les 1,6 s ; « Arrêter après la ligne en cours » (route stop) laisse le
+ * lot en « partial ». Un seul lot en écriture par site : en lancer un second répond limit_reached.
+ * Le lot « Descriptions vides de produits » montre trois lignes écrites sans validation humaine
+ * (`ShopifyBatchItem.autoApplied`) et une ligne retenue par le filtre de contenu (elle cite un nom de domaine),
+ * restée en attente avec sa raison. Les lots de l'assistant attendent toujours une validation humaine.
  */
 import type {
-  ApiError, ErrorCode, ShopifyChange, ShopifyChangeRequest, ShopifyConnection, ShopifyField, ShopifyImage, ShopifyResourceDetail,
-  ShopifyResourceSummary, ShopifyResourceType, ShopifyState, ShopifyTranslation,
+  ApiError, AutomationPolicy, AutomationState, CheckStatus, CreateBatchRequest, ErrorCode, OptimizeRequest, ProposalOrigin, ShopifyBatch,
+  ShopifyBatchItem, ShopifyChange, ShopifyChangeRequest, ShopifyConnection, ShopifyField, ShopifyImage, ShopifyResourceDetail,
+  ShopifyResourceSummary, ShopifyResourceType, ShopifyState, ShopifyTranslation, UpdateAutomationRequest, UpdateBatchItemRequest,
 } from "../lib/types";
 import { rng, type DemoPage } from "./data";
 
@@ -65,6 +84,9 @@ interface Shop {
   syncedAt: string | null;
   writes: number[];
   lastSync: number | null;
+  batches: ShopifyBatch[];
+  automation: AutomationState;
+  timers: Map<string, ReturnType<typeof setInterval>>;
 }
 
 const scopesAll = ["read_content", "read_products", "read_translations", "write_content", "write_files", "write_products", "write_translations"];
@@ -137,7 +159,7 @@ function buildShop(inventory: DemoPage[]): Shop {
     const seoTitle = hasTitle ? p.summary.title : null;
     const seoDescription = hasDesc && desc ? (desc.length > 300 ? desc.slice(0, 300) : desc) : null;
     resources.push({
-      // Comme le serveur : « shr_ » suivi de 6 à 40 caractères [a-z0-9].
+      // Comme le serveur : « shr_ » suivi de 6 à 40 caractères [a-z0-9].
       id: `shr_${(slug.normalize("NFD").replace(/[^a-z0-9]/g, "").slice(0, 30) + n.toString(36)).padEnd(6, "0")}`,
       type, path: p.summary.path, title: name, seoTitle, seoDescription, images, pagePath: p.summary.path,
       en: {
@@ -164,9 +186,14 @@ function buildShop(inventory: DemoPage[]): Shop {
       changes.unshift(c1);
     }
   }
-  changes.sort((a, b) => b.appliedAt.localeCompare(a.appliedAt));
-  refreshRestorable(changes);
-  return { resources, changes, syncedAt: shopMode === "jamais-lue" ? null : "2026-11-27T10:12:04.000Z", writes: [], lastSync: null };
+  const shop: Shop = {
+    resources, changes, syncedAt: shopMode === "jamais-lue" ? null : "2026-11-27T10:12:04.000Z", writes: [], lastSync: null,
+    batches: [], automation: initialAutomation(), timers: new Map(),
+  };
+  if (shop.syncedAt) seedBatches(shop);
+  shop.changes.sort((a, b) => b.appliedAt.localeCompare(a.appliedAt));
+  refreshRestorable(shop.changes);
+  return shop;
 }
 
 let seq = 1;
@@ -174,7 +201,7 @@ function change(res: Res, field: ShopifyField, image: ShopifyImage | null, local
   return {
     id: `chg_${(seq++).toString(36)}`, resourceId: res.id, resourceType: res.type, resourceTitle: res.title, path: res.path, field,
     image: image ? { id: image.id, url: image.url } : null, locale, before, after, appliedAt: at, kind,
-    afterVerified: true, restoresChangeId: restores, restoredByChangeId: null, restorable: false,
+    afterVerified: true, restoresChangeId: restores, restoredByChangeId: null, restorable: false, batchId: null,
   };
 }
 
@@ -211,6 +238,37 @@ function shopOf(ctx: ShopCtx): Shop {
   return s;
 }
 
+/** Statut de la grille d'audit pour une longueur : titre 30 à 60, description 70 à 160. */
+function gridStatus(text: string | null, min: number, max: number): CheckStatus {
+  if (!text) return "fail";
+  const n = [...text].length;
+  return n >= min && n <= max ? "pass" : "warn";
+}
+
+/** Ce que Shopify affiche quand la description est vide : le début du texte, coupé à 320 caractères. */
+function bodyStart(res: Res): string | null {
+  if (res.type === "collection" || res.type === "page") return null;
+  const t = res.type === "product"
+    ? `Matériaux : grès de Saint-Amand, émail sans plomb. Dimensions : diamètre 14 cm, hauteur 7 cm. Entretien : passe au lave-vaisselle et au four à micro-ondes. Chaque pièce de ${res.title.toLowerCase()} est tournée à la main dans notre atelier de Nantes : les nuances d'émail varient d'une pièce à l'autre, ce qui fait leur charme. Expédition sous 48 heures.`
+    : `${res.title}. Dans cet article, nous revenons sur les gestes du tournage, le choix des terres et la cuisson à haute température qui donnent au grès sa solidité. Nous partageons aussi nos conseils pour choisir une vaisselle qui dure, l'entretenir et la faire vivre au quotidien, de la table du petit-déjeuner aux repas entre amis.`;
+  return [...t].slice(0, 320).join("");
+}
+
+/** Constat de l'analyse sur la page affichée, null si elle n'a pas été ouverte. */
+function auditOf(res: Res, ctx: ShopCtx): ShopifyResourceSummary["audit"] {
+  const page = ctx.shown.find((p) => p.summary.path === res.pagePath) ?? null;
+  if (!page) return null;
+  // Comme la plupart des thèmes : le titre affiché est « titre ou nom – nom de la boutique ».
+  const renderedTitle = `${res.seoTitle ?? res.title} – ${SHOP_NAME}`;
+  const renderedDescription = res.seoDescription ?? bodyStart(res);
+  return {
+    renderedTitle,
+    titleStatus: gridStatus(renderedTitle, 30, 60),
+    renderedDescription,
+    descriptionStatus: gridStatus(renderedDescription, 70, 160),
+  };
+}
+
 function summaryOf(res: Res, ctx: ShopCtx, shop: Shop): ShopifyResourceSummary {
   const page = ctx.shown.find((p) => p.summary.path === res.pagePath) ?? null;
   return {
@@ -218,6 +276,7 @@ function summaryOf(res: Res, ctx: ShopCtx, shop: Shop): ShopifyResourceSummary {
     images: res.images.length, imagesWithoutAlt: res.images.filter((i) => !i.alt).length,
     pageId: page?.summary.id ?? null, pageScore: page?.summary.score ?? null,
     changes: shop.changes.filter((c) => c.resourceId === res.id).length,
+    audit: auditOf(res, ctx),
   };
 }
 
@@ -267,6 +326,10 @@ function stateOf(ctx: ShopCtx): ShopifyState {
         imagesWithoutAlt: shop.resources.reduce((s, r) => s + r.images.filter((i) => !i.alt).length, 0),
         images,
       },
+      toFix: (() => {
+        const audits = shop.resources.map((r) => auditOf(r, ctx)).filter((a): a is NonNullable<typeof a> => !!a);
+        return { audited: audits.length, title: audits.filter((a) => a.titleStatus !== "pass").length, description: audits.filter((a) => a.descriptionStatus !== "pass").length };
+      })(),
     },
   };
 }
@@ -355,6 +418,7 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
     const type = q.get("type") as ShopifyResourceType | null;
     const text = (q.get("q") ?? "").toLowerCase();
     const missing = q.get("missing") as ShopifyField | null;
+    const fix = q.get("fix") as ShopifyField | null;
     const offset = Math.max(0, Number(q.get("offset") ?? 0));
     const limit = Math.min(200, Math.max(1, Number(q.get("limit") ?? 50)));
     let list = shop.resources;
@@ -363,9 +427,13 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
     if (missing === "seo_title") list = list.filter((r) => !r.seoTitle);
     if (missing === "seo_description") list = list.filter((r) => !r.seoDescription);
     if (missing === "image_alt") list = list.filter((r) => r.images.some((i) => !i.alt));
+    if (fix === "seo_title") list = list.filter((r) => { const a = auditOf(r, ctx); return !!a && a.titleStatus !== "pass"; });
+    if (fix === "seo_description") list = list.filter((r) => { const a = auditOf(r, ctx); return !!a && a.descriptionStatus !== "pass"; });
     await ctx.delay(160);
     return json({ resources: list.slice(offset, offset + limit).map((r) => summaryOf(r, ctx, shop)), total: list.length, offset, limit });
   }
+
+  if (sub === "batches" || sub === "optimize") return handleBatches(ctx, shop, conn, parts, method, body);
 
   if (sub === "changes") {
     if (method === "GET" && !parts[1]) {
@@ -449,4 +517,610 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
     return json({ change: c, resource: detailOf(res, ctx, shop) }, 201);
   }
   return apiError(404, "not_found", "Cette ressource n'existe pas.", null);
+}
+
+// ───────── Automatisation et lots de corrections
+
+type IaMode = "propose" | "auto" | "auto-refuse" | "arret" | "sans-cle" | "budget";
+const IA_MODES: IaMode[] = ["propose", "auto", "auto-refuse", "arret", "sans-cle", "budget"];
+function readIa(): IaMode {
+  const fromUrl = new URLSearchParams(location.search).get("ia") as IaMode | null;
+  if (fromUrl && IA_MODES.includes(fromUrl)) {
+    sessionStorage.setItem("demo-ia", fromUrl);
+    return fromUrl;
+  }
+  const saved = sessionStorage.getItem("demo-ia") as IaMode | null;
+  return saved && IA_MODES.includes(saved) ? saved : "propose";
+}
+export const iaMode = readIa();
+/** Le serveur de démonstration accepte-t-il une clé d'IA (assistant, préparation des corrections). */
+export const aiConfiguredDemo = iaMode !== "sans-cle";
+
+const LIMITS: AutomationState["limits"] = {
+  maxChangesPerRun: { min: 1, max: 50 },
+  maxAutoChangesPerDay: { min: 0, max: 200 },
+  aiTokensPerDay: { min: 10_000, max: 2_000_000 },
+};
+
+/** Prochain minuit UTC : remise à zéro des compteurs. */
+function nextReset(): string {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
+}
+
+function initialAutomation(): AutomationState {
+  const policy: AutomationPolicy = {
+    mode: iaMode === "arret" ? "off" : iaMode === "auto" || iaMode === "auto-refuse" ? "auto" : "propose",
+    fields: iaMode === "auto" ? ["seo_description", "image_alt"] : ["seo_description"],
+    resourceTypes: ["product", "collection"],
+    scope: iaMode === "auto" ? "failing" : "empty_only",
+    translations: false,
+    maxChangesPerRun: 10,
+    maxAutoChangesPerDay: 20,
+    aiTokensPerDay: 200_000,
+  };
+  return {
+    policy,
+    limits: LIMITS,
+    autoAllowed: iaMode === "auto",
+    writesEnabled: shopifyWritesEnabled,
+    aiConfigured: aiConfiguredDemo,
+    usage: {
+      day: new Date().toISOString().slice(0, 10),
+      autoChanges: iaMode === "auto" ? 3 : 0,
+      aiTokens: iaMode === "budget" ? 200_000 : iaMode === "auto" ? 14_320 : 6_180,
+      resetsAt: nextReset(),
+    },
+  };
+}
+
+let batchSeq = 1;
+const batchId = () => `bat_${(batchSeq++).toString(36).padStart(4, "0")}`;
+let itemSeq = 1;
+const itemId = () => `bit_${(itemSeq++).toString(36).padStart(4, "0")}`;
+
+function countsOf(items: ShopifyBatchItem[]): ShopifyBatch["counts"] {
+  return {
+    total: items.length,
+    selected: items.filter((i) => i.selected).length,
+    applied: items.filter((i) => i.state === "applied").length,
+    conflict: items.filter((i) => i.state === "conflict").length,
+    failed: items.filter((i) => i.state === "failed").length,
+    restored: items.filter((i) => i.state === "restored").length,
+  };
+}
+
+function refreshCounts(b: ShopifyBatch) {
+  b.counts = countsOf(b.items);
+}
+
+function newBatch(title: string, origin: ProposalOrigin, createdAt: string, state: ShopifyBatch["state"]): ShopifyBatch {
+  return {
+    id: batchId(), title, origin, createdAt, state, autoApplied: false,
+    counts: { total: 0, selected: 0, applied: 0, conflict: 0, failed: 0, restored: 0 }, error: null, finishedAt: null, items: [],
+  };
+}
+
+function newItem(res: Res, field: ShopifyField, proposed: string, note: string | null, opts: { image?: ShopifyImage | null; locale?: string | null } = {}): ShopifyBatchItem {
+  const image = opts.image ?? null;
+  const locale = opts.locale ?? null;
+  return {
+    id: itemId(), resourceId: res.id, resourceType: res.type, resourceTitle: res.title, path: res.path, field,
+    image: image ? { id: image.id, url: image.url } : null, locale,
+    before: readValue(res, field, image?.id ?? null, locale), proposed, note, selected: true, state: "pending", changeId: null, error: null,
+    autoApplied: false,
+  };
+}
+
+/**
+ * Filtre de contenu des écritures automatiques (format d'échange) : une proposition de l'IA appliquée sans
+ * relecture est refusée si elle contient une adresse web, un nom de domaine, une adresse e-mail ou un numéro de
+ * téléphone, ou si elle ne reprend aucun mot significatif du nom de l'élément. Renvoie la raison, ou null.
+ */
+function contentFilter(it: ShopifyBatchItem): string | null {
+  const v = it.proposed;
+  if (/https?:\/\/|www\./i.test(v)) return "Le filtre de contenu l'a retenue : elle contient une adresse web.";
+  if (/[\w.+-]+@[\w-]+\.[\w.]+/.test(v)) return "Le filtre de contenu l'a retenue : elle contient une adresse e-mail.";
+  if (/\b[a-z0-9-]+\.(?:com|fr|net|org|io|shop|example)\b/i.test(v)) return "Le filtre de contenu l'a retenue : elle contient un nom de domaine.";
+  if (/(?:\+33|\b0)[1-9](?:[ .-]?\d{2}){4}\b/.test(v)) return "Le filtre de contenu l'a retenue : elle contient un numéro de téléphone.";
+  const words = it.resourceTitle.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4);
+  if (words.length && !words.some((w) => v.toLowerCase().includes(w))) return "Le filtre de contenu l'a retenue : elle ne reprend aucun mot du nom de l'élément.";
+  return null;
+}
+
+/** Écrit une ligne comme le ferait le serveur : relecture, écriture, modification dans l'historique avec son lot. */
+function writeItem(shop: Shop, b: ShopifyBatch, it: ShopifyBatchItem, at: string): void {
+  const res = shop.resources.find((r) => r.id === it.resourceId);
+  if (!res) {
+    it.state = "failed";
+    it.error = "Cet élément n'existe plus dans la boutique.";
+    return;
+  }
+  const imageId = it.image?.id ?? null;
+  if (it.proposed.toLowerCase().includes("conflit")) writeValue(res, it.field, imageId, it.locale, `${res.title} (modifié dans Shopify)`);
+  const current = readValue(res, it.field, imageId, it.locale);
+  if ((current ?? null) !== (it.before ?? null)) {
+    it.state = "conflict";
+    it.error = null;
+    return;
+  }
+  if (it.proposed.toLowerCase().includes("panne")) {
+    it.state = "failed";
+    it.error = "Shopify a refusé la valeur : « Le service est momentanément indisponible ». Rien n'a été écrit.";
+    return;
+  }
+  const value = normalize(it.proposed);
+  writeValue(res, it.field, imageId, it.locale, value);
+  const c = change(res, it.field, res.images.find((i) => i.id === imageId) ?? null, it.locale, current, value, at, "edit");
+  c.batchId = b.id;
+  shop.changes.unshift(c);
+  it.state = "applied";
+  it.changeId = c.id;
+}
+
+function restoreItem(shop: Shop, b: ShopifyBatch, it: ShopifyBatchItem, at: string): boolean {
+  const target = shop.changes.find((c) => c.id === it.changeId);
+  if (!target || !target.restorable) {
+    it.error = "Cette valeur a été modifiée depuis : elle reste telle quelle.";
+    return false;
+  }
+  const res = shop.resources.find((r) => r.id === it.resourceId)!;
+  const imageId = it.image?.id ?? null;
+  const current = readValue(res, it.field, imageId, it.locale);
+  if (current !== target.after) {
+    it.error = "Cette valeur a changé dans Shopify depuis : elle reste telle quelle.";
+    return false;
+  }
+  writeValue(res, it.field, imageId, it.locale, target.before);
+  const c = change(res, it.field, res.images.find((i) => i.id === imageId) ?? null, it.locale, current, target.before, at, "restore", target.id);
+  c.batchId = b.id;
+  target.restoredByChangeId = c.id;
+  shop.changes.unshift(c);
+  it.state = "restored";
+  it.error = null;
+  return true;
+}
+
+const proposalFor = (res: Res, field: ShopifyField): string => {
+  if (field === "seo_title") {
+    const options = [`${res.title} en grès fait main | Atelier Lune`, `${res.title} fait main | Atelier Lune`, `${res.title} | Atelier Lune`, res.title];
+    return options.find((o) => [...o].length <= 60) ?? [...res.title].slice(0, 60).join("");
+  }
+  if (field === "image_alt") return `${res.title}, vue de face sur fond clair`;
+  const base = res.type === "collection"
+    ? `${res.title} : notre sélection de pièces en grès tournées à la main à Nantes. Livraison soignée, retours sous 30 jours.`
+    : `${res.title} en grès émaillé, tourné à la main dans notre atelier de Nantes. Pièce unique, livraison soignée sous 48 h.`;
+  return [...base].slice(0, 158).join("");
+};
+
+const noteFor = (res: Res, field: ShopifyField, ctx: ShopCtx | null): string => {
+  const a = ctx ? auditOf(res, ctx) : null;
+  if (field === "seo_title") {
+    if (!res.seoTitle && a) return `Le titre était vide : la page affichait « ${a.renderedTitle} », ${a.titleStatus === "pass" ? "correct mais peu descriptif" : "trop court pour décrire la page"}.`;
+    return "Le titre renseigné ne dit pas ce que vend la page ; la proposition reprend le nom et la matière.";
+  }
+  if (field === "image_alt") return "L'image n'était pas décrite : la proposition dit ce qu'elle montre, à partir du nom du produit.";
+  if (!res.seoDescription) return res.type === "product" ? "La description était vide : Google affichait le début de la fiche (320 caractères, coupés)." : "La description était vide et la page n'a pas de texte : Google choisissait seul un extrait.";
+  return "La description affichée sortait des repères de longueur (70 à 160 caractères).";
+};
+
+/** Lots présents au chargement : un dans chaque état utile. */
+function seedBatches(shop: Shop) {
+  const products = shop.resources.filter((r) => r.type === "product");
+  const collections = shop.resources.filter((r) => r.type === "collection");
+  const at = (iso: string, plusSec: number) => new Date(new Date(iso).getTime() + plusSec * 1000).toISOString();
+
+  // Échec de la préparation (le plus ancien).
+  const failed = newBatch("Descriptions des collections", "automation", "2026-11-22T21:00:00.000Z", "failed");
+  failed.error = { code: "budget_exceeded", message: "Le plafond de jetons d'IA du jour était atteint : aucune proposition n'a été préparée.", action: "Réessayez après la remise à zéro, ou relevez le plafond dans l'onglet Automatisation.", details: { resetsAt: "2026-11-23T00:00:00.000Z" } };
+  failed.finishedAt = failed.createdAt;
+
+  // Abandonné sans rien écrire.
+  const cancelled = newBatch("Titres des pages d'information", "assistant", "2026-11-23T15:12:00.000Z", "cancelled");
+  for (const r of shop.resources.filter((x) => x.type === "page").slice(0, 2)) cancelled.items.push({ ...newItem(r, "seo_title", proposalFor(r, "seo_title"), noteFor(r, "seo_title", null)), selected: false, state: "skipped" });
+  cancelled.finishedAt = at(cancelled.createdAt, 600);
+
+  // Appliqué puis annulé en entier.
+  const restored = newBatch("Textes alternatifs, première série", "manual", "2026-11-24T09:30:00.000Z", "applying");
+  for (const r of products.slice(10, 12)) {
+    const im = r.images.find((i) => !i.alt);
+    if (im) restored.items.push(newItem(r, "image_alt", `${r.title}, posé sur une table en bois`, null, { image: im }));
+  }
+  restored.items.forEach((it, i) => writeItem(shop, restored, it, at(restored.createdAt, 60 + i * 2)));
+  refreshRestorable(shop.changes.sort((a, b) => b.appliedAt.localeCompare(a.appliedAt)));
+  restored.items.forEach((it, i) => restoreItem(shop, restored, it, at(restored.createdAt, 3600 + i * 2)));
+  restored.state = "restored";
+  restored.finishedAt = at(restored.createdAt, 3610);
+
+  // Appliqué en partie : une valeur changée entre-temps, une refusée par Shopify.
+  const partial = newBatch("Titres des collections", "manual", "2026-11-25T14:05:00.000Z", "applying");
+  const pc = collections.slice(2, 6);
+  pc.forEach((r) => partial.items.push(newItem(r, "seo_title", proposalFor(r, "seo_title"), null)));
+  partial.items.forEach((it, i) => {
+    const res = shop.resources.find((r) => r.id === it.resourceId)!;
+    // Ligne 3 : quelqu'un a modifié le titre dans l'administration Shopify entre la préparation et l'écriture.
+    if (i === 2) writeValue(res, "seo_title", null, null, `${res.title} — collection d'hiver`);
+    if (i === 3) {
+      it.state = "failed";
+      it.error = "Shopify a refusé la valeur : « Title tag is too long for this theme setting ». Rien n'a été écrit.";
+      return;
+    }
+    writeItem(shop, partial, it, at(partial.createdAt, 90 + i * 2));
+  });
+  partial.state = "partial";
+  partial.finishedAt = at(partial.createdAt, 100);
+
+  // Appliqué sans validation humaine par l'optimisation automatique.
+  const auto = newBatch("Descriptions vides de produits", "automation", "2026-11-26T22:00:00.000Z", "applying");
+  // La quatrième proposition cite le domaine de la boutique : le filtre de contenu la retient, elle attend
+  // une validation humaine et le lot repasse en brouillon (les trois autres sont écrites sans validation).
+  const autoRes = products.filter((x) => !x.seoDescription).slice(4, 8);
+  for (const r of autoRes) auto.items.push(newItem(r, "seo_description", proposalFor(r, "seo_description"), noteFor(r, "seo_description", null)));
+  const filtered = auto.items[3];
+  if (filtered) filtered.proposed = `${filtered.resourceTitle} en grès émaillé, à découvrir sur ${SHOP_HOST}. Pièce unique tournée à la main à Nantes.`;
+  auto.items.forEach((it, i) => {
+    const why = contentFilter(it);
+    if (why) {
+      it.error = why;
+      return;
+    }
+    writeItem(shop, auto, it, at(auto.createdAt, 30 + i * 2));
+    it.autoApplied = it.state === "applied";
+  });
+  auto.state = auto.items.some((i) => i.state === "pending") ? "draft" : "applied";
+  auto.autoApplied = auto.items.some((i) => i.autoApplied);
+  auto.finishedAt = auto.state === "draft" ? null : at(auto.createdAt, 40);
+
+  // Brouillon préparé par l'assistant, à valider.
+  const draft = newBatch("Descriptions de produits proposées par l'assistant", "assistant", "2026-11-27T09:40:00.000Z", "draft");
+  for (const r of products.filter((x) => !x.seoDescription).slice(0, 4)) draft.items.push(newItem(r, "seo_description", proposalFor(r, "seo_description"), noteFor(r, "seo_description", null)));
+  const tooLong = draft.items[1];
+  if (tooLong) tooLong.proposed = `${tooLong.resourceTitle} en grès émaillé, tourné à la main dans notre atelier de Nantes, cuit à haute température pour une solidité à toute épreuve, au lave-vaisselle comme au four. Pièce unique.`;
+
+  shop.batches = [draft, auto, partial, restored, cancelled, failed];
+  shop.batches.forEach(refreshCounts);
+  DEMO_BATCH_IDS.assistantDraft = draft.id;
+  DEMO_BATCH_IDS.autoApplied = auto.id;
+}
+
+/** Identifiants des lots présents au chargement (pour la conversation de démonstration). */
+export const DEMO_BATCH_IDS = { assistantDraft: "", autoApplied: "" };
+
+/** Une valeur écrite toutes les 1,6 s : assez lent pour voir la progression et essayer « Arrêter ». */
+const WRITE_EVERY_MS = 1_600;
+
+function stopTimer(shop: Shop, id: string) {
+  const t = shop.timers.get(id);
+  if (t) clearInterval(t);
+  shop.timers.delete(id);
+}
+
+/** Écrit les lignes retenues une par une, à 0,9 s d'intervalle (au rythme de la limite d'écriture). */
+function runApply(ctx: ShopCtx, shop: Shop, b: ShopifyBatch, auto: boolean) {
+  b.state = "applying";
+  b.finishedAt = null;
+  stopTimer(shop, b.id);
+  const tick = () => {
+    // En automatique, une ligne retenue par le filtre de contenu reste en attente (avec sa raison) : on passe à la suivante.
+    const next = b.items.find((i) => i.selected && i.state === "pending" && !(auto && i.error));
+    if (next && auto) {
+      const a = shop.automation;
+      const u = a.usage;
+      // Les verrous sont revérifiés avant chaque ligne : passer la règle sur « off » ou « propose » arrête l'écriture.
+      if (a.policy.mode !== "auto" || u.autoChanges >= a.policy.maxAutoChangesPerDay) {
+        b.state = "draft";
+        refreshCounts(b);
+        stopTimer(shop, b.id);
+        ctx.emit();
+        return;
+      }
+      const why = contentFilter(next);
+      if (why) {
+        next.error = why;
+        refreshCounts(b);
+        ctx.emit();
+        return;
+      }
+      u.autoChanges += 1;
+    }
+    if (next) {
+      writeItem(shop, b, next, new Date().toISOString());
+      if (auto && next.state === "applied") {
+        next.autoApplied = true;
+        b.autoApplied = true;
+      }
+      refreshRestorable(shop.changes);
+    } else if (auto && b.items.some((i) => i.selected && i.state === "pending")) {
+      // Des lignes retenues par le filtre attendent une validation humaine : le lot repasse en brouillon.
+      b.state = "draft";
+      stopTimer(shop, b.id);
+    } else {
+      b.state = b.items.some((i) => i.state === "conflict" || i.state === "failed") ? "partial" : "applied";
+      b.finishedAt = new Date().toISOString();
+      stopTimer(shop, b.id);
+    }
+    refreshCounts(b);
+    ctx.emit();
+  };
+  shop.timers.set(b.id, setInterval(tick, WRITE_EVERY_MS));
+}
+
+function runRestore(ctx: ShopCtx, shop: Shop, b: ShopifyBatch) {
+  b.state = "applying";
+  stopTimer(shop, b.id);
+  const queue = b.items.filter((i) => i.state === "applied");
+  let kept = 0;
+  const tick = () => {
+    const next = queue.shift();
+    if (next) {
+      if (!restoreItem(shop, b, next, new Date().toISOString())) kept++;
+      refreshRestorable(shop.changes);
+    } else {
+      b.state = kept > 0 ? "partial" : "restored";
+      b.finishedAt = new Date().toISOString();
+      stopTimer(shop, b.id);
+    }
+    refreshCounts(b);
+    ctx.emit();
+  };
+  shop.timers.set(b.id, setInterval(tick, WRITE_EVERY_MS));
+}
+
+/** Éléments que la règle autorise pour ce champ, d'abord ceux dont la page analysée est en défaut. */
+function candidates(ctx: ShopCtx, shop: Shop, field: ShopifyField, type: ShopifyResourceType | undefined, policy: AutomationPolicy) {
+  const out: { res: Res; image: ShopifyImage | null; failing: boolean }[] = [];
+  for (const r of shop.resources) {
+    if (type && r.type !== type) continue;
+    if (!policy.resourceTypes.includes(r.type)) continue;
+    if (shop.batches.some((b) => (b.state === "draft" || b.state === "preparing") && b.items.some((i) => i.resourceId === r.id && i.field === field))) continue;
+    if (field === "image_alt") {
+      if (r.type !== "product") continue;
+      const im = r.images.find((i) => !i.alt || policy.scope === "any");
+      if (im) out.push({ res: r, image: im, failing: !im.alt });
+      continue;
+    }
+    const value = field === "seo_title" ? r.seoTitle : r.seoDescription;
+    const a = auditOf(r, ctx);
+    const failing = !!a && (field === "seo_title" ? a.titleStatus : a.descriptionStatus) !== "pass";
+    const ok = policy.scope === "any" || !value || (policy.scope === "failing" && failing);
+    if (ok) out.push({ res: r, image: null, failing });
+  }
+  return out.sort((x, y) => Number(y.failing) - Number(x.failing));
+}
+
+/** L'IA « rédige » : une proposition toutes les 0,7 s, comptée en jetons ; puis le brouillon (ou l'application automatique). */
+function runPrepare(ctx: ShopCtx, shop: Shop, b: ShopifyBatch, picks: ReturnType<typeof candidates>, field: ShopifyField) {
+  const a = shop.automation;
+  const queue = picks.slice();
+  stopTimer(shop, b.id);
+  const tick = () => {
+    const next = queue.shift();
+    if (next && a.usage.aiTokens + 1_850 > a.policy.aiTokensPerDay) {
+      b.error = { code: "budget_exceeded", message: "Plafond de jetons d'IA du jour atteint : la préparation s'est arrêtée. Le lot garde ce qui a été préparé.", action: null, details: { resetsAt: a.usage.resetsAt } };
+      queue.length = 0;
+    } else if (next) {
+      a.usage.aiTokens += 1_850;
+      b.items.push(newItem(next.res, field, proposalFor(next.res, field), noteFor(next.res, field, ctx), { image: next.image }));
+      refreshCounts(b);
+      ctx.emit();
+      return;
+    }
+    stopTimer(shop, b.id);
+    if (b.items.length === 0) {
+      b.state = "failed";
+      b.error = b.error ?? { code: "internal", message: "L'IA n'a rien pu préparer.", action: "Réessayez dans un instant.", details: undefined };
+      b.finishedAt = new Date().toISOString();
+      ctx.emit();
+      return;
+    }
+    const conn = connectionFor(ctx.host);
+    if (a.policy.mode === "auto" && a.autoAllowed && conn.writesEnabled) {
+      runApply(ctx, shop, b, true);
+    } else {
+      b.state = "draft";
+    }
+    refreshCounts(b);
+    ctx.emit();
+  };
+  shop.timers.set(b.id, setInterval(tick, 700));
+}
+
+const strip = ({ items: _i, ...rest }: ShopifyBatch) => rest;
+
+/** Un seul lot en écriture ou en annulation par site (format d'échange) : limit_reached sinon. */
+function otherWriting(ctx: ShopCtx, shop: Shop, b: ShopifyBatch) {
+  const other = shop.batches.find((x) => x.id !== b.id && x.state === "applying");
+  if (!other) return null;
+  return ctx.apiError(409, "limit_reached", `Un autre lot est en cours d'écriture sur ce site : « ${other.title} ».`, "Attendez sa fin ou arrêtez-le, puis recommencez.", { batchId: other.id });
+}
+
+/** Limites de débit de la démo, comme le serveur : créations de lot, préparations par l'IA, enregistrements de règle. */
+const hits = new Map<string, number[]>();
+function overRate(key: string, perMinute: number): number {
+  const now = Date.now();
+  const list = (hits.get(key) ?? []).filter((t) => now - t < 60_000);
+  if (list.length >= perMinute) {
+    hits.set(key, list);
+    return Math.ceil((60_000 - (now - list[0])) / 1000);
+  }
+  list.push(now);
+  hits.set(key, list);
+  return 0;
+}
+
+function handleBatches(ctx: ShopCtx, shop: Shop, conn: ShopifyConnection, parts: string[], method: string, body: unknown): Promise<Response> | Response {
+  const { json, apiError } = ctx;
+  if (!shop.syncedAt) return apiError(409, "shopify_not_synced", "La boutique n'a pas encore été lue.", "Lancez une lecture de la boutique : rien n'y sera modifié.", { shopHost: SHOP_HOST });
+
+  if (parts[0] === "optimize" && method === "POST") {
+    const req = body as OptimizeRequest;
+    const a = shop.automation;
+    const wait = overRate(`optimize:${ctx.host}`, 5);
+    if (wait) return apiError(429, "rate_limited", "Vous avez demandé beaucoup de préparations en peu de temps.", "Patientez un peu, puis relancez la préparation.", { retryAfterSeconds: wait });
+    if (!a.aiConfigured) return apiError(503, "chat_not_configured", "Aucune clé d'API Claude n'est configurée sur ce serveur : l'IA ne peut rien préparer.", "La personne qui gère l'installation peut ajouter ANTHROPIC_API_KEY côté serveur.");
+    if (a.policy.mode === "off") return apiError(409, "automation_off", "L'automatisation est arrêtée pour ce site : l'IA ne prépare aucune correction.", "Choisissez « L'IA prépare, vous validez » dans l'onglet Automatisation.");
+    if (!a.policy.fields.includes(req.field)) return apiError(403, "automation_not_allowed", `La règle n'autorise pas l'IA à proposer ce champ.`, "Ajoutez-le aux champs autorisés dans l'onglet Automatisation.");
+    if (req.resourceType && !a.policy.resourceTypes.includes(req.resourceType)) return apiError(403, "automation_not_allowed", "La règle n'autorise pas l'IA sur ce type d'élément.", "Ajoutez-le aux types autorisés dans l'onglet Automatisation.");
+    if (a.usage.aiTokens >= a.policy.aiTokensPerDay) return apiError(429, "budget_exceeded", "Le plafond de jetons d'IA du jour est atteint.", "Réessayez après la remise à zéro, ou relevez le plafond dans l'onglet Automatisation.", { resetsAt: a.usage.resetsAt });
+    const limit = Math.max(1, Math.min(a.policy.maxChangesPerRun, req.limit ?? a.policy.maxChangesPerRun));
+    const picks = candidates(ctx, shop, req.field, req.resourceType, a.policy).slice(0, limit);
+    if (picks.length === 0) return apiError(403, "automation_not_allowed", "Aucun élément ne correspond à la règle pour ce champ : rien à préparer.", "Élargissez ce que l'IA a le droit de remplacer, ou choisissez un autre champ.");
+    const label = req.field === "seo_title" ? "Titres préparés" : req.field === "seo_description" ? "Descriptions préparées" : "Textes alternatifs préparés";
+    const b = newBatch(`${label} par l'IA`, "automation", new Date().toISOString(), "preparing");
+    shop.batches.unshift(b);
+    runPrepare(ctx, shop, b, picks, req.field);
+    return json({ batch: b }, 202);
+  }
+
+  const id = parts[1];
+  if (!id) {
+    if (method === "GET") return json({ batches: shop.batches.map(strip) });
+    if (method === "POST") {
+      const req = body as CreateBatchRequest;
+      const wait = req.title?.toLowerCase().includes("rafale") ? 20 : overRate(`batch:${ctx.host}`, 10);
+      if (wait) return apiError(429, "rate_limited", "Trop de lots créés en peu de temps.", "Patientez un peu : votre lot en préparation est conservé.", { retryAfterSeconds: wait });
+      if (!Array.isArray(req.items) || req.items.length === 0) return apiError(400, "bad_request", "Le lot ne contient aucune ligne.", null);
+      if (req.items.length > 50) return apiError(400, "bad_request", "Un lot compte 50 lignes au plus.", "Répartissez vos corrections sur plusieurs lots.");
+      const seen = new Set<string>();
+      const b = newBatch(req.title?.trim() || `Lot du ${new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long" })}`, "manual", new Date().toISOString(), "draft");
+      for (const it of req.items) {
+        const res = shop.resources.find((r) => r.id === it.resourceId);
+        if (!res) return apiError(404, "not_found", "Un élément du lot n'existe plus dans la boutique.", "Relisez la boutique.");
+        const k = `${it.resourceId}|${it.field}|${it.imageId ?? ""}|${it.locale ?? ""}`;
+        if (seen.has(k)) return apiError(400, "bad_request", `Deux lignes visent le même champ de « ${res.title} ».`, "Gardez-en une seule.");
+        seen.add(k);
+        const v = normalize(it.value);
+        // eslint-disable-next-line no-control-regex
+        if (!v || /[<>]/.test(v) || /[\u0000-\u001f\u007f]/.test(v) || [...v].length > MAX_LEN[it.field]) {
+          return apiError(422, "shopify_invalid_value", `La valeur proposée pour « ${res.title} » est refusée telle quelle.`, "Corrigez-la, puis recommencez.");
+        }
+        const image = it.imageId ? res.images.find((i) => i.id === it.imageId) ?? null : null;
+        const item = newItem(res, it.field, v, null, { image, locale: it.locale ?? null });
+        if (item.before === v) return apiError(400, "bad_request", `La valeur proposée pour « ${res.title} » est déjà celle de la boutique.`, "Retirez cette ligne ou changez sa valeur.");
+        b.items.push(item);
+      }
+      refreshCounts(b);
+      shop.batches.unshift(b);
+      ctx.emit();
+      return json({ batch: b }, 201);
+    }
+  }
+  const b = shop.batches.find((x) => x.id === id);
+  if (!b) return apiError(404, "not_found", "Ce lot n'existe pas.", "Revenez à la liste des lots.");
+  const action = parts[2];
+  if (!action) {
+    if (method === "GET") return json({ batch: b });
+    if (method === "DELETE") {
+      if (b.state !== "draft") return apiError(409, "batch_not_editable", "Ce lot n'est plus un brouillon.", null);
+      b.state = "cancelled";
+      b.items.forEach((i) => { if (i.state === "pending") { i.state = "skipped"; i.selected = false; } });
+      b.finishedAt = new Date().toISOString();
+      refreshCounts(b);
+      ctx.emit();
+      return json({ batch: b });
+    }
+  }
+  if (action === "items" && method === "PATCH") {
+    if (b.state !== "draft") return apiError(409, "batch_not_editable", "Ce lot n'est plus un brouillon : il ne se modifie plus.", null);
+    const it = b.items.find((i) => i.id === parts[3]);
+    if (!it) return apiError(404, "not_found", "Cette ligne n'existe pas.", null);
+    const req = body as UpdateBatchItemRequest;
+    if (typeof req.proposed === "string") {
+      const v = normalize(req.proposed);
+      // eslint-disable-next-line no-control-regex
+      if (!v || /[<>]/.test(v) || /[\u0000-\u001f\u007f]/.test(v) || [...v].length > MAX_LEN[it.field]) return apiError(422, "shopify_invalid_value", "Cette valeur est refusée telle quelle.", "Corrigez-la, puis recommencez.");
+      if (v === it.before) return apiError(400, "bad_request", "Cette valeur est déjà celle de la boutique.", "Écartez plutôt la ligne.");
+      it.proposed = v;
+    }
+    if (typeof req.selected === "boolean") {
+      it.selected = req.selected;
+      it.state = req.selected ? "pending" : "skipped";
+    }
+    refreshCounts(b);
+    return json({ batch: b });
+  }
+  if (action === "apply" && method === "POST") {
+    if (!conn.writesEnabled) return apiError(403, "shopify_writes_disabled", "Les modifications de la boutique ne sont pas activées sur ce serveur.", "La personne qui gère l'installation peut les activer avec SHOPIFY_WRITES_ENABLED=1, puis redémarrer le serveur.");
+    const resumable = b.state === "partial" && b.items.some((i) => i.selected && i.state === "pending");
+    if (b.state !== "draft" && !resumable) return apiError(409, "batch_not_editable", "Ce lot n'est plus un brouillon.", null);
+    if (b.counts.selected === 0) return apiError(400, "bad_request", "Aucune ligne n'est retenue.", "Retenez au moins une ligne.");
+    const busy = otherWriting(ctx, shop, b);
+    if (busy) return busy;
+    // Validée par un humain : les lignes retenues par le filtre de contenu sont écrites comme les autres.
+    b.items.forEach((i) => { if (i.state === "pending") i.error = null; });
+    runApply(ctx, shop, b, false);
+    refreshCounts(b);
+    ctx.emit();
+    return json({ batch: b }, 202);
+  }
+  if (action === "restore" && method === "POST") {
+    if (!conn.writesEnabled) return apiError(403, "shopify_writes_disabled", "Les modifications de la boutique ne sont pas activées sur ce serveur.", "La personne qui gère l'installation peut les activer avec SHOPIFY_WRITES_ENABLED=1, puis redémarrer le serveur.");
+    if (b.counts.applied === 0) return apiError(400, "bad_request", "Aucune ligne de ce lot n'est à annuler.", null);
+    const busy = otherWriting(ctx, shop, b);
+    if (busy) return busy;
+    runRestore(ctx, shop, b);
+    ctx.emit();
+    return json({ batch: b }, 202);
+  }
+  if (action === "stop" && method === "POST") {
+    if (b.state !== "applying") return apiError(409, "batch_not_editable", "Ce lot n'est pas en cours d'écriture.", null);
+    // La ligne en cours est déjà terminée dans la démo (chaque écriture est instantanée) : on s'arrête là.
+    stopTimer(shop, b.id);
+    b.state = "partial";
+    b.finishedAt = new Date().toISOString();
+    refreshCounts(b);
+    ctx.emit();
+    return json({ batch: b });
+  }
+  return apiError(404, "not_found", "Cette ressource n'existe pas.", null);
+}
+
+/** GET et PUT /api/sites/:id/automation. */
+export async function handleAutomation(ctx: ShopCtx, method: string, body: unknown): Promise<Response> {
+  const { json, apiError } = ctx;
+  const shop = shopOf(ctx);
+  const a = shop.automation;
+  a.writesEnabled = connectionFor(ctx.host).writesEnabled;
+  if (new Date(a.usage.resetsAt).getTime() <= Date.now()) a.usage = { day: new Date().toISOString().slice(0, 10), autoChanges: 0, aiTokens: 0, resetsAt: nextReset() };
+  if (method === "PUT") {
+    const wait = overRate(`automation:${ctx.host}`, 10);
+    if (wait) return apiError(429, "rate_limited", "La règle a été enregistrée beaucoup de fois en peu de temps.", "Patientez un peu, puis enregistrez de nouveau.", { retryAfterSeconds: wait });
+    const p = (body as UpdateAutomationRequest).policy;
+    const inRange = (v: number, r: { min: number; max: number }) => Number.isInteger(v) && v >= r.min && v <= r.max;
+    if (!p || !["off", "propose", "auto"].includes(p.mode)) return apiError(400, "bad_request", "Niveau d'automatisation inconnu.", null);
+    if (!inRange(p.maxChangesPerRun, LIMITS.maxChangesPerRun) || !inRange(p.maxAutoChangesPerDay, LIMITS.maxAutoChangesPerDay) || !inRange(p.aiTokensPerDay, LIMITS.aiTokensPerDay)) {
+      return apiError(400, "bad_request", "Un plafond sort des bornes acceptées.", "Corrigez la valeur, puis enregistrez.");
+    }
+    a.policy = { ...p, fields: [...new Set(p.fields)], resourceTypes: [...new Set(p.resourceTypes)] };
+    await ctx.delay(300);
+  }
+  return json(a);
+}
+
+/**
+ * L'assistant prépare un lot (outil de la conversation) : soumis à la règle, comme l'optimisation.
+ * Renvoie l'identifiant du lot, ou null si la règle ne le permet pas.
+ */
+export function assistantBatch(ctx: ShopCtx): string | null {
+  if (connectionFor(ctx.host).state !== "connected") return null;
+  const shop = shopOf(ctx);
+  const a = shop.automation;
+  if (!shop.syncedAt || a.policy.mode === "off" || !a.aiConfigured) return null;
+  const field: ShopifyField = a.policy.fields.includes("seo_description") ? "seo_description" : a.policy.fields[0];
+  if (!field) return null;
+  const picks = candidates(ctx, shop, field, undefined, a.policy).slice(0, Math.min(3, a.policy.maxChangesPerRun));
+  if (!picks.length) return null;
+  const b = newBatch("Corrections proposées dans la conversation", "assistant", new Date().toISOString(), "draft");
+  for (const p of picks) b.items.push(newItem(p.res, field, proposalFor(p.res, field), noteFor(p.res, field, ctx), { image: p.image }));
+  refreshCounts(b);
+  shop.batches.unshift(b);
+  // Un lot préparé par l'assistant attend toujours une validation humaine, quel que soit le niveau (format d'échange).
+  ctx.emit();
+  return b.id;
+}
+
+/** Les lots de démonstration existent dès le premier chargement de la boutique. */
+export function ensureShop(ctx: Pick<ShopCtx, "host" | "inventory">) {
+  if (connectionFor(ctx.host).state !== "connected") return;
+  if (!shops.has(ctx.host)) shops.set(ctx.host, buildShop(ctx.inventory));
 }
