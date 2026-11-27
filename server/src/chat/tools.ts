@@ -10,6 +10,7 @@ import type { PageFacts } from "../analyse/grille.ts";
 import { totalsOf } from "../gsc/import.ts";
 import type { SiteRow, Store } from "../store.ts";
 import { coverage, listPages } from "../views.ts";
+import type { ShopifyService } from "../shopify/service.ts";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -98,6 +99,21 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "boutique_shopify",
+    description:
+      "État SEO de la boutique Shopify de ce site, tel qu'il a été lu lors de la dernière lecture de la boutique (lecture seule) : nombre de produits, collections, pages et articles, titres et descriptions pour Google vides, images sans texte alternatif, et la liste des éléments avec leur page analysée. Filtrable par chemin, type ou champ vide. Aucune modification n'est possible par cet outil.",
+    input_schema: {
+      type: "object",
+      properties: {
+        chemin: { type: "string", description: "Chemin ou partie de chemin, ex. /products/bague-or." },
+        type: { type: "string", enum: ["product", "collection", "page", "article"] },
+        champ_vide: { type: "string", enum: ["seo_title", "seo_description", "image_alt"], description: "Ne garder que les éléments où ce champ est vide (image_alt : au moins une image sans texte alternatif)." },
+        limite: { type: "integer", minimum: 1, maximum: 100, description: "30 par défaut." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "concurrents",
     description: "Concurrents relevés dans les résultats de recherche réels, avec la preuve (requête, position, titre, adresse).",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
@@ -140,7 +156,7 @@ const num = (v: unknown, def: number, min: number, max: number) => {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
 };
 
-export function runTool(store: Store, site: SiteRow, name: string, input: Record<string, unknown>): ToolOutcome {
+export function runTool(store: Store, site: SiteRow, name: string, input: Record<string, unknown>, shopify: ShopifyService | null = null): ToolOutcome {
   const audit = store.resultsAudit(site.id);
   const siteName = site.name || site.host;
   const noAudit = { disponible: false, raison: "Aucune analyse n'a encore de page notée. Proposez de lancer une analyse du site." };
@@ -199,7 +215,7 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
       if (!agg) return out("Lecture d'un problème", "Problèmes du site", noAudit);
       const issue = agg.issues.find((i) => i.id === id);
       if (!issue) return fail("Lecture d'un problème", `Aucun problème « ${id.slice(0, 60)} ». Identifiants disponibles : ${agg.issues.map((i) => i.id).join(", ") || "aucun"}.`);
-      const { pointsLost: _pl, ...visible } = issue;
+      const { pointsLost: _pl, ...visible } = shopify ? shopify.linkIssue(site.id, issue) : issue;
       return out(`Lecture du problème « ${issue.title} »`, `Problème : ${issue.title}`, {
         ...visible,
         evidence: issue.evidence.slice(0, 40),
@@ -304,6 +320,52 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
       const c = store.getCompetitors(site.id);
       if (!c) return out("Lecture des concurrents", "Concurrents", { disponible: false, raison: "Aucun relevé de concurrents n'a été fait. Il se lance depuis la section Concurrents." });
       return out("Lecture des concurrents", "Concurrents", { ...c, note: UNTRUSTED });
+    }
+    case "boutique_shopify": {
+      const label = "Lecture de la boutique Shopify";
+      if (!shopify?.configured) return out(label, "Boutique Shopify", { disponible: false, raison: "Aucune boutique Shopify n'est connectée à ce serveur." });
+      const data = shopify.storedOverview(site);
+      if (!data) return out(label, "Boutique Shopify", { disponible: false, raison: "La boutique n'a pas encore été lue pour ce site. Proposez de lancer une lecture depuis la section « Boutique Shopify »." });
+      const all = data.rows;
+      const chemin = String(input.chemin ?? "").trim().toLowerCase();
+      const type = String(input.type ?? "");
+      const vide = String(input.champ_vide ?? "");
+      let rows = all;
+      if (chemin) rows = rows.filter((r) => r.path.toLowerCase().includes(chemin));
+      if (["product", "collection", "page", "article"].includes(type)) rows = rows.filter((r) => r.type === type);
+      if (vide === "seo_title") rows = rows.filter((r) => !r.seoTitle);
+      else if (vide === "seo_description") rows = rows.filter((r) => !r.seoDescription);
+      else if (vide === "image_alt") rows = rows.filter((r) => r.imagesWithoutAlt > 0);
+      const count = (pred: (r: (typeof all)[number]) => boolean) => all.filter(pred).length;
+      return out(label, "Boutique Shopify", {
+        lue_le: data.syncedAt,
+        totaux: {
+          produits: count((r) => r.type === "product"),
+          collections: count((r) => r.type === "collection"),
+          pages: count((r) => r.type === "page"),
+          articles: count((r) => r.type === "article"),
+          titre_google_vide: count((r) => !r.seoTitle),
+          description_google_vide: count((r) => !r.seoDescription),
+          images: all.reduce((a, r) => a + r.images, 0),
+          images_sans_texte_alternatif: all.reduce((a, r) => a + r.imagesWithoutAlt, 0),
+        },
+        elements_trouves: rows.length,
+        elements: rows.slice(0, num(input.limite, 30, 1, 100)).map((r) => ({
+          chemin: r.path,
+          type: r.type,
+          nom_donnee_non_fiable: r.title,
+          titre_google_donnee_non_fiable: r.seoTitle,
+          description_google_donnee_non_fiable: r.seoDescription,
+          images: r.images,
+          images_sans_texte_alternatif: r.imagesWithoutAlt,
+          page_analysee: r.pageId,
+          note_de_la_page: r.pageScore,
+          modifications_faites: r.changes,
+        })),
+        note:
+          "Valeurs de la dernière lecture de la boutique (pas en direct). Un titre ou une description vide (null) : Shopify affiche alors le nom ou le début du texte de l'élément. L'assistant ne peut rien modifier : la modification se fait dans la section « Boutique Shopify ». " +
+          UNTRUSTED,
+      });
     }
     default:
       return fail("Outil inconnu", `L'outil « ${name.slice(0, 40)} » n'existe pas.`);

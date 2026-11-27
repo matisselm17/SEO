@@ -8,6 +8,7 @@ import type { ApiError, ChatEvent, ChatMessage } from "../../../shared/api.ts";
 import { HttpError } from "../errors.ts";
 import type { SiteRow, Store } from "../store.ts";
 import { runTool, TOOLS } from "./tools.ts";
+import type { ShopifyService } from "../shopify/service.ts";
 
 /** Ce dont l'assistant a besoin du client : `messages.stream`, que fournit le SDK (et un client simulé en test). */
 export interface ChatClient {
@@ -44,6 +45,7 @@ export function systemPrompt(site: SiteRow): string {
     "- Écris en français simple, pour quelqu'un qui ne connaît pas le SEO. Explique les termes techniques en quelques mots. Vouvoie l'utilisateur.",
     "- Sois concret et bref : cite les pages concernées par leur chemin (ex. `/boutique`), les valeurs relevées, et propose des actions précises. Quand tu rédiges un titre ou une description, respecte les longueurs de la grille (titre 30 à 60 caractères, description 70 à 160).",
     "- Mise en forme : Markdown simple uniquement (paragraphes, listes, **gras**, `code`, blocs de code). Pas de tableaux, pas de HTML, pas de titres de niveau 1.",
+    "- Boutique Shopify : l'outil boutique_shopify donne l'état de la boutique tel qu'il a été lu (titres et descriptions pour Google vides, images sans texte alternatif). Tu ne peux rien modifier dans la boutique : propose le texte, et indique que la modification se fait depuis la section « Boutique Shopify », avec confirmation.",
     "- Si la question n'a rien à voir avec le site ou le référencement, réponds en une phrase que tu es là pour aider sur le référencement de ce site.",
   ].join("\n");
 }
@@ -95,6 +97,8 @@ export interface ChatRunOptions {
   message: string;
   send: (event: ChatEvent) => void;
   signal: AbortSignal;
+  /** Boutique Shopify, pour l'outil de lecture « boutique_shopify ». */
+  shopify?: ShopifyService | null;
 }
 
 /** Fait tourner un tour de conversation et émet les événements du flux. Ne lève pas : les erreurs deviennent un « error ». */
@@ -148,7 +152,7 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const block of final.content) {
           if (block.type !== "tool_use") continue;
-          const outcome = runTool(store, site, block.name, (block.input ?? {}) as Record<string, unknown>);
+          const outcome = runTool(store, site, block.name, (block.input ?? {}) as Record<string, unknown>, o.shopify ?? null);
           send({ type: "tool", label: outcome.label });
           if (outcome.source && !sources.includes(outcome.source)) sources.push(outcome.source);
           results.push({ type: "tool_result", tool_use_id: block.id, content: outcome.content, ...(outcome.isError ? { is_error: true } : {}) });

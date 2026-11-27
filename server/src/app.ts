@@ -20,6 +20,9 @@ import type {
   PageResponse,
   Settings,
   SiteEvent,
+  ShopifyChangeRequest,
+  ShopifyResourceResponse,
+  ShopifyResourceType,
   SiteResponse,
   SitesResponse,
   StartAuditRequest,
@@ -40,11 +43,12 @@ import { errors, HttpError, toHttpError } from "./errors.ts";
 import type { EventHub } from "./events.ts";
 import { importFile, MAX_UPLOAD_BYTES } from "./gsc/import.ts";
 import { assertFetchable, FetchError, safeFetch } from "./net/fetch.ts";
-import { compress, guardMutations, JSON_LIMIT, limitBody, RateLimiter, securityHeaders, UPLOAD_LIMIT } from "./http.ts";
+import { compress, guardHost, guardMutations, JSON_LIMIT, limitBody, RateLimiter, securityHeaders, UPLOAD_LIMIT } from "./http.ts";
 import { displayPath } from "./crawl/url.ts";
 import type { PageFacts } from "./analyse/grille.ts";
 import type { SiteRow, Store } from "./store.ts";
 import { coverage, isPageSort, issues, listPages, overview, recommendations } from "./views.ts";
+import { ShopifyService, type ResourceQuery } from "./shopify/service.ts";
 
 export interface AppDeps {
   config: Config;
@@ -55,7 +59,12 @@ export interface AppDeps {
   chatClient: ChatClient | null;
   /** Fournisseur de recherche pour les concurrents ; null sans clé. */
   searchProvider: SearchProvider | null;
+  /** Boutique Shopify ; construite depuis `config` si absente (les tests y passent un faux Shopify). */
+  shopify?: ShopifyService;
 }
+
+const SHOPIFY_TYPES: ShopifyResourceType[] = ["product", "collection", "page", "article"];
+const SHOPIFY_MISSING = ["seo_title", "seo_description", "image_alt"] as const;
 
 export { MAX_PAGES_LIMITS };
 const PING_MS = 20_000;
@@ -93,7 +102,12 @@ async function readJson<T>(c: Context, optional = false): Promise<Partial<T>> {
 
 export function createApp(deps: AppDeps): Hono {
   const { config, store, hub, crawler } = deps;
+  const shopify = deps.shopify ?? new ShopifyService(store, hub, { creds: config.shopify, writesEnabled: config.shopifyWritesEnabled });
   const app = new Hono();
+  /** 30 écritures par minute au plus dans la boutique. */
+  const shopifyWriteLimiter = new RateLimiter(30);
+  /** Une lecture complète de la boutique par minute au plus. */
+  const shopifySyncLimiter = new RateLimiter(1);
   const chatLimiter = new RateLimiter(config.limits.chatPerMinute);
   const competitorsLimiter = new RateLimiter(config.limits.competitorsPerMinute);
   /** Une seule réponse de l'assistant en cours par site. */
@@ -102,6 +116,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.use("*", securityHeaders);
   app.use("*", compress);
+  app.use("/api/*", guardHost(config.port, config.allowedHosts));
   app.use("/api/*", guardMutations(isUpload));
   app.use("/api/*", limitBody((p) => (isUpload(p, "POST") ? UPLOAD_LIMIT : JSON_LIMIT)));
 
@@ -111,6 +126,7 @@ export function createApp(deps: AppDeps): Hono {
     integrations: {
       chat: { configured: !!deps.chatClient, model: deps.chatClient ? config.anthropicModel : null },
       competitors: { configured: !!deps.searchProvider },
+      shopify: { configured: shopify.configured, writesEnabled: shopify.writesEnabled },
     },
     version: config.version,
   });
@@ -306,7 +322,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!audit) throw errors.noAudit();
     const issue = store.aggregate(audit.id, s.name || s.host).issues.find((i) => i.id === c.req.param("issueId"));
     if (!issue) throw errors.notFound("Ce problème");
-    return getJson(c, { issue } satisfies IssueResponse);
+    return getJson(c, { issue: shopify.linkIssue(s.id, issue) } satisfies IssueResponse);
   });
   app.get("/api/sites/:siteId/pages", (c) => {
     const s = site(c);
@@ -321,7 +337,9 @@ export function createApp(deps: AppDeps): Hono {
     const s = site(c);
     const row = store.getPage(c.req.param("pageId"));
     if (!row || row.site_id !== s.id) throw errors.notFound("Cette page");
-    return getJson(c, { page: store.pageDetail(row, store.gscIndex(s.id)) } satisfies PageResponse);
+    const page = store.pageDetail(row, store.gscIndex(s.id));
+    page.shopifyResourceId = shopify.resourceIdForPage(s.id, row.path);
+    return getJson(c, { page } satisfies PageResponse);
   });
   app.get("/api/sites/:siteId/coverage", (c) => getJson(c, { coverage: coverage(store, site(c).id) } satisfies CoverageResponse));
   app.get("/api/sites/:siteId/failed-pages", (c) => {
@@ -436,7 +454,7 @@ export function createApp(deps: AppDeps): Hono {
         chain = chain.then(() => stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) })).catch(() => undefined);
       };
       try {
-        await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal });
+        await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal, shopify });
         await chain;
       } finally {
         chatBusy.delete(s.id);
@@ -446,6 +464,54 @@ export function createApp(deps: AppDeps): Hono {
   app.delete("/api/sites/:siteId/chat", (c) => {
     store.clearChat(site(c).id);
     return new Response(null, { status: 204 });
+  });
+
+  // ───────── Boutique Shopify (docs/format-echange.md, « Boutique Shopify »)
+
+  const pageParams = (c: Context) => {
+    const offset = Math.max(0, Number.parseInt(c.req.query("offset") ?? "0", 10) || 0);
+    const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
+    return { offset, limit: Math.min(200, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 50)) };
+  };
+
+  app.get("/api/sites/:siteId/shopify", async (c) => getJson(c, await shopify.state(site(c))));
+  app.post("/api/sites/:siteId/shopify/sync", async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    shopifySyncLimiter.take("shopify-sync", "de lecture de la boutique");
+    return json(await shopify.sync(s));
+  });
+  app.get("/api/sites/:siteId/shopify/resources", async (c) => {
+    const s = site(c);
+    const type = c.req.query("type") || null;
+    if (type !== null && !(SHOPIFY_TYPES as string[]).includes(type)) throw errors.badRequest("Ce type d'élément n'existe pas.", "Utilisez product, collection, page ou article.");
+    const missing = c.req.query("missing") || null;
+    if (missing !== null && !(SHOPIFY_MISSING as readonly string[]).includes(missing)) throw errors.badRequest("Ce filtre n'existe pas.", "Utilisez seo_title, seo_description ou image_alt.");
+    const q: ResourceQuery = { type: type as ShopifyResourceType | null, missing: missing as ResourceQuery["missing"], q: (c.req.query("q") ?? "").slice(0, 200), ...pageParams(c) };
+    return getJson(c, await shopify.resources(s, q));
+  });
+  app.get("/api/sites/:siteId/shopify/resources/:resourceId", async (c) => {
+    const s = site(c);
+    return getJson(c, { resource: await shopify.resource(s, c.req.param("resourceId")) } satisfies ShopifyResourceResponse);
+  });
+  app.post("/api/sites/:siteId/shopify/changes", async (c) => {
+    const s = site(c);
+    // Garde-fou n° 1 avant tout appel à Shopify : écritures activées côté serveur.
+    shopify.assertWritable();
+    shopifyWriteLimiter.take("shopify", "de modification de la boutique");
+    const body = await readJson<ShopifyChangeRequest>(c);
+    return json(await shopify.change(s, body), 201);
+  });
+  app.get("/api/sites/:siteId/shopify/changes", async (c) => {
+    const s = site(c);
+    const { offset, limit } = pageParams(c);
+    return getJson(c, await shopify.changes(s, offset, limit));
+  });
+  app.post("/api/sites/:siteId/shopify/changes/:changeId/restore", async (c) => {
+    const s = site(c);
+    shopify.assertWritable();
+    shopifyWriteLimiter.take("shopify", "de modification de la boutique");
+    return json(await shopify.restore(s, c.req.param("changeId")), 201);
   });
 
   // ───────── Routes inconnues et interface compilée

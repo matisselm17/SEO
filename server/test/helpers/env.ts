@@ -7,20 +7,27 @@ import { Crawler } from "../../src/crawl/crawler.ts";
 import { openDb } from "../../src/db.ts";
 import { EventHub } from "../../src/events.ts";
 import { Store } from "../../src/store.ts";
+import { ShopifyService } from "../../src/shopify/service.ts";
+import { FAKE_CREDS } from "./fake-shopify.ts";
 
 export function testEnv(
-  opts: { chatClient?: ChatClient | null; searchProvider?: SearchProvider | null; delayMs?: number; limits?: Partial<Limits>; cataloguePageSize?: number; dataDir?: string } = {},
+  opts: { chatClient?: ChatClient | null; searchProvider?: SearchProvider | null; delayMs?: number; limits?: Partial<Limits>; cataloguePageSize?: number; dataDir?: string;
+    /** Boutique Shopify simulée (faux fetch) ; sans elle, la boutique n'est pas configurée. */
+    shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number };
+  } = {},
 ) {
   const limits = { ...DEFAULT_LIMITS, ...opts.limits };
   const config: Config = {
-    port: 0,
+    port: 8787,
     host: "127.0.0.1",
     limits,
     dataDir: ":memory:",
     anthropicApiKey: opts.chatClient ? "sk-ant-test-SECRET-KEY" : null,
     anthropicModel: "claude-sonnet-5-5",
     firecrawlApiKey: opts.searchProvider ? "fc-test" : null,
-    shopify: null,
+    shopify: opts.shopify ? FAKE_CREDS : null,
+    shopifyWritesEnabled: opts.shopify?.writesEnabled ?? false,
+    allowedHosts: [],
     allowPrivateHosts: true,
     version: "0.1.0",
     webDist: "/nonexistent",
@@ -28,8 +35,16 @@ export function testEnv(
   const store = new Store(openDb(opts.dataDir ?? ":memory:"));
   const hub = new EventHub();
   const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024, cataloguePageSize: opts.cataloguePageSize }, limits.maxConcurrentAudits);
-  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null });
-  return { app, store, hub, crawler, config };
+  const shopify = new ShopifyService(store, hub, {
+    creds: config.shopify,
+    writesEnabled: config.shopifyWritesEnabled,
+    fetchImpl: opts.shopify?.fetchImpl ?? (async () => {
+      throw new Error("aucun appel réseau à Shopify dans ce test");
+    }),
+    now: opts.shopify?.now,
+  });
+  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify });
+  return { app, store, hub, crawler, config, shopify };
 }
 
 /** Lit un flux SSE complet et renvoie les événements { event, data }. */

@@ -24,7 +24,7 @@ export const SHOPIFY_API_VERSION = "2026-07";
 export const RENEW_MARGIN_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 20_000;
 
-export type ShopifyErrorCode = "auth_refused" | "unreachable" | "bad_response" | "graphql";
+export type ShopifyErrorCode = "auth_refused" | "unreachable" | "bad_response" | "graphql" | "throttled";
 
 export class ShopifyError extends Error {
   readonly code: ShopifyErrorCode;
@@ -131,8 +131,26 @@ export class ShopifyAuth {
 }
 
 /**
- * Appel GraphQL à l'API d'administration, avec le jeton courant.
- * Un refus 401 fait redemander un jeton et rejouer l'appel une fois.
+ * Texte d'un document GraphQL sans ses commentaires ni ses chaînes : ce qui reste décide de sa nature.
+ */
+function stripGraphql(doc: string): string {
+  return doc
+    .replace(/"""[\s\S]*?"""/g, " ")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, " ")
+    .replace(/#[^\n]*/g, " ");
+}
+
+/** true si le document contient une mutation (le mot-clé `mutation`, hors chaînes et commentaires). */
+export function containsMutation(doc: string): boolean {
+  return /(^|[^A-Za-z0-9_])mutation(?![A-Za-z0-9_])/.test(stripGraphql(doc));
+}
+
+/**
+ * Appel GraphQL en LECTURE à l'API d'administration, avec le jeton courant.
+ * Tout document qui contient une mutation est refusé avant tout appel réseau : les écritures passent
+ * uniquement par `shopifyMutate`, qui exige que les écritures soient activées.
+ * Un refus 401 fait redemander un jeton et rejouer l'appel une fois ; une requête freinée par Shopify
+ * (THROTTLED) est rejouée deux fois au plus après une courte attente.
  */
 export async function shopifyGraphql<T = unknown>(
   auth: ShopifyAuth,
@@ -140,6 +158,45 @@ export async function shopifyGraphql<T = unknown>(
   variables?: Record<string, unknown>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<T> {
+  if (containsMutation(query)) throw new ShopifyError("bad_response", "Une écriture a été refusée : ce chemin du code ne fait que lire la boutique.");
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await rawGraphql<T>(auth, query, variables, fetchImpl);
+    } catch (err) {
+      if (err instanceof ShopifyError && err.code === "throttled" && attempt < 2) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/** Les écritures ne sont pas activées côté serveur (SHOPIFY_WRITES_ENABLED). */
+export class ShopifyWritesDisabledError extends Error {
+  constructor() {
+    super("Les écritures dans la boutique ne sont pas activées sur ce serveur.");
+    this.name = "ShopifyWritesDisabledError";
+  }
+}
+
+/**
+ * Appel GraphQL en ÉCRITURE. Exige `writesEnabled` (SHOPIFY_WRITES_ENABLED=1) : sinon rien ne part.
+ * Le document doit être une mutation et une seule opération. Jamais rejoué automatiquement.
+ */
+export async function shopifyMutate<T = unknown>(
+  auth: ShopifyAuth,
+  writesEnabled: boolean,
+  mutation: string,
+  variables: Record<string, unknown>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<T> {
+  if (writesEnabled !== true) throw new ShopifyWritesDisabledError();
+  if (!/^\s*mutation\b/.test(stripGraphql(mutation))) throw new ShopifyError("bad_response", "Document d'écriture invalide.");
+  return rawGraphql<T>(auth, mutation, variables, fetchImpl);
+}
+
+async function rawGraphql<T>(auth: ShopifyAuth, query: string, variables: Record<string, unknown> | undefined, fetchImpl: typeof fetch): Promise<T> {
   const url = `https://${auth.storeDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
   for (let attempt = 0; ; attempt++) {
     const token = await auth.getToken();
@@ -160,6 +217,7 @@ export async function shopifyGraphql<T = unknown>(
       continue;
     }
     if (res.status === 401 || res.status === 403) throw new ShopifyError("auth_refused", `Shopify a refusé l'accès (${res.status}).`, res.status);
+    if (res.status === 429) throw new ShopifyError("throttled", "Shopify demande de ralentir (trop de demandes).", 429);
     if (!res.ok) throw new ShopifyError("unreachable", `Shopify a répondu ${res.status}.`, res.status);
     let body: unknown;
     try {
@@ -167,8 +225,9 @@ export async function shopifyGraphql<T = unknown>(
     } catch {
       throw new ShopifyError("bad_response", "Réponse illisible de Shopify.");
     }
-    const o = (body && typeof body === "object" ? body : {}) as { data?: T; errors?: Array<{ message?: unknown }> };
+    const o = (body && typeof body === "object" ? body : {}) as { data?: T; errors?: Array<{ message?: unknown; extensions?: { code?: unknown } }> };
     if (Array.isArray(o.errors) && o.errors.length) {
+      if (o.errors.some((e) => e?.extensions?.code === "THROTTLED")) throw new ShopifyError("throttled", "Shopify demande de ralentir (trop de demandes).");
       const first = typeof o.errors[0]?.message === "string" ? o.errors[0].message.slice(0, 300) : "erreur inconnue";
       throw new ShopifyError("graphql", `Shopify a refusé la requête : ${first}`);
     }

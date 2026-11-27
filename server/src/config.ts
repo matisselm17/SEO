@@ -94,6 +94,10 @@ export interface Config {
   firecrawlApiKey: string | null;
   /** Connexion à la boutique Shopify ; null si l'une des trois variables manque ou si le domaine est invalide. */
   shopify: ShopifyCredentials | null;
+  /** Écritures dans la boutique autorisées : vrai seulement si SHOPIFY_WRITES_ENABLED vaut exactement « 1 ». */
+  shopifyWritesEnabled: boolean;
+  /** Hôtes acceptés dans l'en-tête Host en plus de localhost (ALLOWED_HOSTS, séparés par des virgules), en minuscules. */
+  allowedHosts: string[];
   /** Réservé au développement et aux tests : autorise le chargement d'adresses privées (localhost…). */
   allowPrivateHosts: boolean;
   version: string;
@@ -128,6 +132,11 @@ export function loadConfig(): Config {
     anthropicModel: nonEmpty(env.ANTHROPIC_MODEL) ?? "claude-sonnet-5-5",
     firecrawlApiKey: nonEmpty(env.FIRECRAWL_API_KEY),
     shopify: shopDomain && shopId && shopSecret ? { storeDomain: shopDomain, clientId: shopId, clientSecret: shopSecret } : null,
+    shopifyWritesEnabled: env.SHOPIFY_WRITES_ENABLED === "1",
+    allowedHosts: (env.ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((h) => h.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, ""))
+      .filter(Boolean),
     allowPrivateHosts: env.ALLOW_PRIVATE_HOSTS === "1",
     version: readVersion(),
     webDist: path.resolve(REPO_DIR, "web", "dist"),

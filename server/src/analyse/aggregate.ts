@@ -11,6 +11,7 @@ import type {
   PageCheck,
   Recommendation,
   Severity,
+  ShopifyField,
   Strength,
 } from "../../../shared/api.ts";
 import type { CatalogueProduct } from "../crawl/shopify.ts";
@@ -110,6 +111,8 @@ export function aggregate(pages: PageRecord[], siteName: string, catalogue: Cata
       path: r.p.path,
       found: r.c.found,
       expected: r.c.expected,
+      // Rapproché de la boutique à la lecture (le rapprochement change après chaque lecture de la boutique).
+      shopifyResourceId: null,
     }));
     const built = entry.snippet ? entry.snippet(ctx) : null;
     const snippet = built ? { language: built.language, code: built.code, forPath: entry.snippetFromPage ? sample.p.path : null } : null;
@@ -128,6 +131,7 @@ export function aggregate(pages: PageRecord[], siteName: string, catalogue: Cata
       why: entry.why,
       fix: { steps: issueSteps(rawSteps, !!snippet), snippet },
       evidence,
+      shopifyField: shopifyFieldFor(crit.id),
     });
     effortById.set(crit.id, effortFor(entry.scope, bad.length));
     actionById.set(crit.id, entry.action(ctx));
@@ -161,6 +165,7 @@ export function aggregate(pages: PageRecord[], siteName: string, catalogue: Cata
           path: p.path,
           found: `« ${shown} », identique sur ${g.length} pages`,
           expected: kind === "duplicate_title" ? "Un titre propre à chaque page" : "Une description propre à chaque page",
+          shopifyResourceId: null,
         });
       }
     }
@@ -178,6 +183,7 @@ export function aggregate(pages: PageRecord[], siteName: string, catalogue: Cata
       why: def.why,
       fix: { steps: def.steps, snippet: null },
       evidence,
+      shopifyField: shopifyFieldFor(kind),
     });
     effortById.set(kind, effortFor("page", affected));
     actionById.set(kind, def.action(affected));
@@ -226,6 +232,17 @@ export function aggregate(pages: PageRecord[], siteName: string, catalogue: Cata
   return { pagesTotal: total, score, categories, issues, strengths, recommendations: recs };
 }
 
+/**
+ * Champ Shopify qui corrige un problème (IssueDetail.shopifyField) : le titre, la description et le texte
+ * alternatif des images. « catalogue_image_alt » est le même champ, constaté dans le catalogue.
+ */
+export function shopifyFieldFor(issueId: string): ShopifyField | null {
+  if (issueId === "title" || issueId === "duplicate_title") return "seo_title";
+  if (issueId === "meta_description" || issueId === "duplicate_description") return "seo_description";
+  if (issueId === "image_alt" || issueId === "catalogue_image_alt") return "image_alt";
+  return null;
+}
+
 /** Constats sur les produits lus dans le catalogue : preuves sans page analysée (pageId null). */
 function catalogueIssues(products: CatalogueProduct[]): Array<{ issue: IssueDetail; action: string }> {
   const total = products.length;
@@ -249,11 +266,12 @@ function catalogueIssues(products: CatalogueProduct[]): Array<{ issue: IssueDeta
         why: def.why,
         fix: { steps: def.steps, snippet: null },
         evidence: evidence.slice(0, MAX_EVIDENCE),
+        shopifyField: shopifyFieldFor(id),
       },
       action: def.action(affected),
     });
   };
-  const ev = (p: CatalogueProduct, found: string, expected: string): Evidence => ({ pageId: null, url: p.url, path: p.path, found, expected });
+  const ev = (p: CatalogueProduct, found: string, expected: string): Evidence => ({ pageId: null, url: p.url, path: p.path, found, expected, shopifyResourceId: null });
 
   // Nom (titre par défaut dans Google) : les plus éloignés de la fourchette d'abord.
   const titleBad = products
@@ -326,6 +344,6 @@ function maxOf(id: string): number {
 }
 
 export function toIssue(d: IssueDetail): Issue {
-  const { why: _w, fix: _f, evidence: _e, ...rest } = d;
+  const { why: _w, fix: _f, evidence: _e, shopifyField: _s, ...rest } = d;
   return rest;
 }

@@ -14,7 +14,8 @@ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export const CSP = [
   "default-src 'self'",
   // Polices et petites images intégrées en data: dans la feuille de style compilée.
-  "img-src 'self' data:",
+  // Seules les vignettes de la boutique Shopify viennent d'ailleurs ; l'interface n'affiche que cet hôte.
+  "img-src 'self' data: https://cdn.shopify.com",
   "font-src 'self' data:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -31,6 +32,50 @@ export const securityHeaders: MiddlewareHandler = async (c, next) => {
   h.set("X-Content-Type-Options", "nosniff");
   h.set("X-Frame-Options", "DENY");
 };
+
+/** Port de l'interface de développement (Vite), qui relaie /api en gardant l'en-tête Host d'origine. */
+export const DEV_UI_PORT = "5173";
+
+/**
+ * Protection contre le rebond DNS : une page tierce qui fait pointer son propre nom vers 127.0.0.1 envoie
+ * toujours son nom dans l'en-tête Host. Seuls sont acceptés :
+ * - localhost, 127.0.0.1 et [::1], sans port, sur le port du serveur, ou sur le port de l'interface de
+ *   développement (5173 : le relais de Vite transmet le Host du navigateur, `changeOrigin: false`) ;
+ * - les hôtes déclarés dans ALLOWED_HOSTS (avec ou sans port ; sans port, tout port est accepté).
+ * S'applique à toutes les méthodes, lectures comprises.
+ */
+export function hostAllowed(hostHeader: string | undefined, serverPort: number, allowed: string[]): boolean {
+  if (!hostHeader) return false;
+  const raw = hostHeader.trim().toLowerCase();
+  let hostname: string;
+  let port: string;
+  try {
+    const u = new URL(`http://${raw}`);
+    if (u.host !== raw && `${u.hostname}:80` !== raw) return false; // rien d'autre qu'un hôte et un port
+    hostname = u.hostname;
+    port = u.port || (raw.endsWith(":80") ? "80" : "");
+  } catch {
+    return false;
+  }
+  if (["localhost", "127.0.0.1", "[::1]"].includes(hostname)) {
+    return port === "" || port === String(serverPort) || port === DEV_UI_PORT;
+  }
+  return allowed.some((a) => a === raw || a === hostname);
+}
+
+export function guardHost(serverPort: number, allowed: string[]): MiddlewareHandler {
+  return async (c, next) => {
+    if (!hostAllowed(c.req.header("host") ?? new URL(c.req.url).host, serverPort, allowed)) {
+      throw new HttpError(
+        403,
+        "bad_request",
+        "Cette adresse n'est pas autorisée à joindre le serveur.",
+        "Ouvrez l'application depuis son adresse habituelle. Pour un hébergement, déclarez son nom dans ALLOWED_HOSTS.",
+      );
+    }
+    return next();
+  };
+}
 
 /**
  * Requêtes qui modifient : l'en-tête Origin, s'il est présent, doit être celui du serveur

@@ -457,6 +457,8 @@ export class Store {
       },
       // L'export « Performances » ne relie pas les requêtes aux pages.
       queries: null,
+      // Renseigné par la route (ShopifyService.resourceIdForPage) : dépend de la boutique configurée et lue.
+      shopifyResourceId: null,
     };
   }
 
