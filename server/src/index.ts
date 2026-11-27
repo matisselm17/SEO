@@ -46,6 +46,7 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   console.log(`[serveur] Chat SEO ${config.version} à l'écoute sur http://${config.host}:${info.port}`);
   console.log(`[serveur] Données : ${config.dataDir}`);
   console.log(`[serveur] Assistant : ${config.anthropicApiKey ? `activé (${config.anthropicModel})` : "désactivé (pas de clé ANTHROPIC_API_KEY)"}`);
+  console.log(`[serveur] Shopify : ${config.shopify ? `configuré (${config.shopify.storeDomain})` : "non configuré (SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET)"}`);
   console.log(`[serveur] Concurrents : ${config.firecrawlApiKey ? "activé" : "désactivé (pas de clé FIRECRAWL_API_KEY)"}`);
   if (config.allowPrivateHosts) {
     console.warn("[serveur] ATTENTION : ALLOW_PRIVATE_HOSTS=1 autorise le chargement d'adresses internes. Réservé au développement et aux tests.");

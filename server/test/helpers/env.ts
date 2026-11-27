@@ -20,6 +20,7 @@ export function testEnv(
     anthropicApiKey: opts.chatClient ? "sk-ant-test-SECRET-KEY" : null,
     anthropicModel: "claude-sonnet-5-5",
     firecrawlApiKey: opts.searchProvider ? "fc-test" : null,
+    shopify: null,
     allowPrivateHosts: true,
     version: "0.1.0",
     webDist: "/nonexistent",

@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseShopDomain, type ShopifyCredentials } from "./shopify/auth.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -91,6 +92,8 @@ export interface Config {
   anthropicApiKey: string | null;
   anthropicModel: string;
   firecrawlApiKey: string | null;
+  /** Connexion à la boutique Shopify ; null si l'une des trois variables manque ou si le domaine est invalide. */
+  shopify: ShopifyCredentials | null;
   /** Réservé au développement et aux tests : autorise le chargement d'adresses privées (localhost…). */
   allowPrivateHosts: boolean;
   version: string;
@@ -112,6 +115,9 @@ export function loadConfig(): Config {
   const env = process.env;
   const port = Number.parseInt(env.PORT ?? "", 10);
   const dataDirRaw = nonEmpty(env.DATA_DIR) ?? "./data";
+  const shopDomain = parseShopDomain(env.SHOPIFY_STORE_DOMAIN);
+  const shopId = nonEmpty(env.SHOPIFY_CLIENT_ID);
+  const shopSecret = nonEmpty(env.SHOPIFY_CLIENT_SECRET);
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8787,
     host: nonEmpty(env.HOST) ?? "127.0.0.1",
@@ -121,6 +127,7 @@ export function loadConfig(): Config {
     anthropicApiKey: nonEmpty(env.ANTHROPIC_API_KEY),
     anthropicModel: nonEmpty(env.ANTHROPIC_MODEL) ?? "claude-sonnet-5-5",
     firecrawlApiKey: nonEmpty(env.FIRECRAWL_API_KEY),
+    shopify: shopDomain && shopId && shopSecret ? { storeDomain: shopDomain, clientId: shopId, clientSecret: shopSecret } : null,
     allowPrivateHosts: env.ALLOW_PRIVATE_HOSTS === "1",
     version: readVersion(),
     webDist: path.resolve(REPO_DIR, "web", "dist"),
