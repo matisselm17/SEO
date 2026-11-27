@@ -145,7 +145,8 @@ test("audit complet du site d'essai, flux SSE et forme des réponses", async () 
   assert.equal(up.status, 200);
   const gsc = (await up.json()) as any;
   assert.equal(gsc.available, true);
-  assert.deepEqual(keysOf(gsc), ["available", "importedAt", "matching", "pages", "period", "queries", "series", "totals"]);
+  assert.deepEqual(keysOf(gsc), ["available", "importedAt", "matching", "pages", "period", "queries", "series", "source", "totals"]);
+  assert.equal(gsc.source, "file");
   assert.equal(gsc.series, null);
   assert.deepEqual(gsc.matching, { matched: 2, total: 3 });
   assert.equal(gsc.pages.find((p: any) => p.path === "/services/").pageId !== null, true);
@@ -233,7 +234,7 @@ test("santé et paramètres", async () => {
   const { app } = testEnv();
   assert.deepEqual(await (await app.request("/api/health")).json(), { ok: true, version: "0.1.0" });
   const st = (await (await app.request("/api/settings")).json()) as any;
-  assert.deepEqual(st, { maxPagesDefault: 100, maxPagesLimits: { min: 1, max: 100 }, integrations: { chat: { configured: false, model: null }, competitors: { configured: false }, shopify: { configured: false, writesEnabled: false } }, version: "0.1.0" });
+  assert.deepEqual(st, { maxPagesDefault: 100, maxPagesLimits: { min: 1, max: 100 }, integrations: { chat: { configured: false, model: null }, competitors: { configured: false }, shopify: { configured: false, writesEnabled: false }, searchConsole: { configured: false }, dataForSeo: { configured: false } }, version: "0.1.0" });
   const patched = await app.request("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPagesDefault: 40 }) });
   assert.equal(((await patched.json()) as any).maxPagesDefault, 40);
   const wrong = await app.request("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPagesDefault: 0 }) });
@@ -280,7 +281,7 @@ test("assistant (client simulé) : outils côté serveur, flux, sources, histori
   const pageResult = (third.messages[third.messages.length - 1].content as any[])[0];
   assert.match(pageResult.content, /donnee_non_fiable/);
   assert.equal(client.requests[0].model, "claude-sonnet-5-5");
-  assert.equal(client.requests[0].tools?.length, 11); // dont boutique_shopify (lecture seule)
+  assert.equal(client.requests[0].tools?.length, 12); // dont boutique_shopify (lecture) et proposer_corrections (seul moyen d'écrire)
   // Historique enregistré et renvoyé.
   const after = (await (await app.request(`/api/sites/${siteId}/chat`)).json()) as any;
   assert.equal(after.messages.length, 2);

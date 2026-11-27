@@ -96,6 +96,18 @@ export interface Config {
   shopify: ShopifyCredentials | null;
   /** Écritures dans la boutique autorisées : vrai seulement si SHOPIFY_WRITES_ENABLED vaut exactement « 1 ». */
   shopifyWritesEnabled: boolean;
+  /** Mode d'automatisation « auto » autorisé : vrai seulement si SHOPIFY_AUTO_APPLY vaut exactement « 1 ». */
+  shopifyAutoApply: boolean;
+  /**
+   * Chemin du fichier JSON du compte de service Google (GOOGLE_SERVICE_ACCOUNT_FILE, sinon
+   * secrets/google-service-account.json à la racine du dépôt). Le fichier peut ne pas exister : la Search Console
+   * n'est alors pas configurée. Son contenu n'est jamais journalisé ni renvoyé.
+   */
+  googleServiceAccountFile: string;
+  /** Propriété Search Console à lire (GSC_PROPERTY) ; null : déduite de l'hôte du site. */
+  gscProperty: string | null;
+  /** Identifiants DataForSEO ; null si l'un manque. Aucune fonctionnalité ne s'en sert encore. */
+  dataForSeo: { login: string; password: string } | null;
   /** Hôtes acceptés dans l'en-tête Host en plus de localhost (ALLOWED_HOSTS, séparés par des virgules), en minuscules. */
   allowedHosts: string[];
   /** Réservé au développement et aux tests : autorise le chargement d'adresses privées (localhost…). */
@@ -133,6 +145,14 @@ export function loadConfig(): Config {
     firecrawlApiKey: nonEmpty(env.FIRECRAWL_API_KEY),
     shopify: shopDomain && shopId && shopSecret ? { storeDomain: shopDomain, clientId: shopId, clientSecret: shopSecret } : null,
     shopifyWritesEnabled: env.SHOPIFY_WRITES_ENABLED === "1",
+    shopifyAutoApply: env.SHOPIFY_AUTO_APPLY === "1",
+    googleServiceAccountFile: (() => {
+      const raw = nonEmpty(env.GOOGLE_SERVICE_ACCOUNT_FILE);
+      if (!raw) return path.join(REPO_DIR, "secrets", "google-service-account.json");
+      return path.isAbsolute(raw) ? raw : path.resolve(REPO_DIR, raw);
+    })(),
+    gscProperty: nonEmpty(env.GSC_PROPERTY),
+    dataForSeo: nonEmpty(env.DATAFORSEO_LOGIN) && nonEmpty(env.DATAFORSEO_PASSWORD) ? { login: nonEmpty(env.DATAFORSEO_LOGIN)!, password: nonEmpty(env.DATAFORSEO_PASSWORD)! } : null,
     allowedHosts: (env.ALLOWED_HOSTS ?? "")
       .split(",")
       .map((h) => h.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, ""))

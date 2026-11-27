@@ -34,11 +34,14 @@ import type {
   ShopifyState,
   ShopifyTranslation,
 } from "../../../shared/api.ts";
+import type { CheckStatus, PageCheck } from "../../../shared/api.ts";
+import type { PageFacts } from "../analyse/grille.ts";
 import { errors, HttpError } from "../errors.ts";
 import type { EventHub } from "../events.ts";
+import { RateLimiter } from "../http.ts";
 import type { SiteRow, Store } from "../store.ts";
 import { ShopifyAuth, ShopifyError, ShopifyWritesDisabledError, type ShopifyCredentials } from "./auth.ts";
-import { readAllResources, readerFor, readLocales, readResource, readShopInfo, readTranslations, toResourceInput, type Gql, type LiveImage, type LiveResource, type LiveTranslations } from "./read.ts";
+import { readAllResources, readerFor, readLocales, readResource, readResourceText, readShopInfo, readTranslations, toResourceInput, type Gql, type LiveImage, type LiveResource, type LiveTranslations } from "./read.ts";
 import {
   changeCounts,
   changesFor,
@@ -120,9 +123,12 @@ const orNull = (v: string | null | undefined) => (v && v.trim() ? v : null);
 export function normalizeValue(raw: unknown, field: ShopifyField): string | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw !== "string") throw shopifyErrors.invalidValue("La valeur doit être un texte.", "Saisissez un texte, puis réessayez.");
-  const s = raw.replace(/[\t\n\r\f\v \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g, " ").trim();
-  if (!s) return null;
+  const s = raw.replace(/[\t\n\r\f\v \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g, " ").trim();
   const what = field === "seo_title" ? "Le titre" : field === "seo_description" ? "La description" : "Le texte alternatif";
+  // Caract\u00e8res invisibles de mise en forme (cat\u00e9gorie Unicode Cf : U+200B, U+202E, U+FEFF\u2026) : ils peuvent masquer ou
+  // retourner le texte affich\u00e9. Refus\u00e9s pour toutes les \u00e9critures, humaines comprises.
+  if (/\p{Cf}/u.test(s)) throw shopifyErrors.invalidValue(`${what} contient un caract\u00e8re invisible de mise en forme (espace sans largeur, inversion du sens d'\u00e9criture\u2026).`, "Retapez le texte au clavier au lieu de le copier-coller, puis r\u00e9essayez.");
+  if (!s) return null;
   if (/[<>]/.test(s)) throw shopifyErrors.invalidValue(`${what} contient le caractère « < » ou « > », refusé par sécurité.`, "Retirez ces caractères (écrivez par exemple « moins de » ou « plus de »), puis réessayez.");
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f-\u009f]/.test(s)) throw shopifyErrors.invalidValue(`${what} contient un caractère invisible non autorisé.`, "Retapez le texte sans le copier-coller depuis un autre logiciel, puis réessayez.");
@@ -132,7 +138,7 @@ export function normalizeValue(raw: unknown, field: ShopifyField): string | null
   return s;
 }
 
-const scrub = (s: string) => s.replace(/[a-z0-9][a-z0-9-]*\.myshopify\.com/gi, "la boutique").replace(/gid:\/\/shopify\/[A-Za-z]+\/\d+/g, "un élément");
+export const scrub = (s: string) => s.replace(/[a-z0-9][a-z0-9-]*\.myshopify\.com/gi, "la boutique").replace(/gid:\/\/shopify\/[A-Za-z]+\/\d+/g, "un élément");
 
 // ───────── Erreurs
 
@@ -223,13 +229,81 @@ export interface ResourceQuery {
   type: ShopifyResourceType | null;
   q: string;
   missing: "seo_title" | "seo_description" | "image_alt" | null;
+  /** Éléments dont la page analysée ne valide pas ce critère (titre ou description réellement affichés). */
+  fix?: "seo_title" | "seo_description" | null;
   offset: number;
   limit: number;
 }
 
+/** Verdict de l'analyse affichée sur la page d'un élément (ShopifyResourceSummary.audit). */
+export type ResourceAudit = NonNullable<ShopifyResourceSummary["audit"]>;
+interface PageInfo {
+  id: string;
+  score: number;
+  audit: ResourceAudit | null;
+}
+
+/** Ligne de lot prête à enregistrer : valeur actuelle lue dans Shopify et valeur proposée validée. */
+export interface PreparedLine {
+  resourceId: string;
+  gid: string;
+  type: ShopifyResourceType;
+  title: string;
+  path: string;
+  field: ShopifyField;
+  imageId: string | null;
+  imageUrl: string | null;
+  locale: string | null;
+  before: string | null;
+  proposed: string;
+}
+
+/** Demande d'une ligne (lot composé par l'utilisateur, l'assistant ou l'optimisation). */
+export interface LineRequest {
+  resourceId: string;
+  field: ShopifyField;
+  imageId?: string | null;
+  locale?: string | null;
+  value: unknown;
+}
+
+/**
+ * Lectures en direct qui préparent un lot (création d'un lot, propositions de l'assistant, `optimize`) : une seule à
+ * la fois pour tout le serveur, avec un court intervalle entre deux. Un lot peut demander jusqu'à 50 lectures ; sans
+ * cette file, plusieurs créations simultanées videraient le quota de lecture de Shopify (seau de points restauré
+ * à un rythme fixe) au détriment de la lecture de la boutique et de l'interface. Une à la fois, chaque lecture
+ * coûtant quelques points réels, le débit reste sous le rythme de restauration du plan Shopify standard.
+ */
+export class ReadQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+  private last = 0;
+  constructor(private gapMs: number) {}
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const go = async (): Promise<T> => {
+      const wait = this.last + this.gapMs - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      try {
+        return await fn();
+      } finally {
+        this.last = Date.now();
+      }
+    };
+    const p = this.tail.then(go, go);
+    this.tail = p.catch(() => undefined);
+    return p;
+  }
+}
+
 export class ShopifyService {
   readonly configured: boolean;
+  /** File des lectures en direct qui préparent un lot (voir `ReadQueue`). */
+  readonly prepReads = new ReadQueue(100);
   readonly writesEnabled: boolean;
+  /**
+   * 30 écritures par minute au plus dans la boutique, toutes origines confondues : refus (`take`) pour une
+   * modification isolée, cadence (`acquire`) pour les lignes d'un lot.
+   */
+  readonly writeLimiter: RateLimiter;
   private readonly gql: Gql | null;
   private readonly mutate: Mutate | null;
   private readonly now: () => number;
@@ -248,6 +322,7 @@ export class ShopifyService {
     this.configured = !!opts.creds;
     this.writesEnabled = this.configured && opts.writesEnabled === true;
     this.now = opts.now ?? Date.now;
+    this.writeLimiter = new RateLimiter(30, this.now);
     const fetchImpl = opts.fetchImpl ?? fetch;
     const auth = opts.creds ? new ShopifyAuth(opts.creds, fetchImpl, this.now) : null;
     this.gql = auth ? readerFor(auth, fetchImpl) : null;
@@ -337,16 +412,24 @@ export class ShopifyService {
     const at = syncedAt(this.store.db, siteId);
     if (!at) return null;
     const rows = resourceRows(this.store.db, siteId);
+    const pages = this.pageIndex(siteId);
     const counts = Object.fromEntries(RESOURCE_TYPES.map((t) => [t, 0])) as Record<ShopifyResourceType, number>;
     const missing = { seoTitle: 0, seoDescription: 0, imagesWithoutAlt: 0, images: 0 };
+    const toFix = { audited: 0, title: 0, description: 0 };
     for (const r of rows) {
       counts[r.type]++;
       if (!r.seo_title) missing.seoTitle++;
       if (!r.seo_description) missing.seoDescription++;
       missing.images += r.images;
       missing.imagesWithoutAlt += r.images_without_alt;
+      const audit = pages.get(r.path_key)?.audit;
+      if (audit) {
+        toFix.audited++;
+        if (audit.titleStatus !== "pass") toFix.title++;
+        if (audit.descriptionStatus !== "pass") toFix.description++;
+      }
     }
-    return { syncedAt: at, counts, missing };
+    return { syncedAt: at, counts, missing, toFix };
   }
 
   // ───── Lecture complète
@@ -376,22 +459,33 @@ export class ShopifyService {
 
   // ───── Rapprochement avec l'analyse affichée
 
-  /** Pages de l'analyse affichée par clé de chemin (recalculé à chaque lecture : jamais une ancienne analyse). */
-  private pageIndex(siteId: string): Map<string, { id: string; score: number }> {
-    const map = new Map<string, { id: string; score: number }>();
+  /**
+   * Pages de l'analyse affichée par clé de chemin, avec le verdict de la grille sur le titre et la description
+   * réellement affichés (recalculé à chaque lecture : jamais une ancienne analyse).
+   */
+  private pageIndex(siteId: string): Map<string, PageInfo> {
+    const map = new Map<string, PageInfo>();
     const audit = this.store.resultsAudit(siteId);
     if (!audit) return map;
-    const rows = this.store.pageRows(audit.id);
-    for (const r of rows) {
+    const records = this.store.records(audit.id);
+    const info = (r: (typeof records)[number]): PageInfo => ({ id: r.id, score: r.score, audit: pageAudit(r.checks, r.facts) });
+    for (const r of records) {
       const k = pathKey(r.path);
-      if (!map.has(k)) map.set(k, { id: r.id, score: r.score });
+      if (!map.has(k)) map.set(k, info(r));
     }
     // Un produit ouvert seulement depuis une collection (/collections/x/products/y) vaut pour /products/y.
-    for (const r of rows) {
+    for (const r of records) {
       const alias = productAlias(pathKey(r.path));
-      if (alias && !map.has(alias)) map.set(alias, { id: r.id, score: r.score });
+      if (alias && !map.has(alias)) map.set(alias, info(r));
     }
     return map;
+  }
+
+  /** Verdict de l'analyse affichée sur la page de cet élément ; null si la page n'a pas été ouverte. */
+  auditFor(siteId: string, resourceId: string): ResourceAudit | null {
+    const row = getResource(this.store.db, siteId, resourceId);
+    if (!row) return null;
+    return this.pageIndex(siteId).get(row.path_key)?.audit ?? null;
   }
 
   /** Élément de la boutique d'une page analysée (dès qu'il y a correspondance) ; null sans boutique configurée ou lue. */
@@ -436,7 +530,7 @@ export class ShopifyService {
     return { ...issue, evidence };
   }
 
-  private summary(r: ResourceRow, pages: Map<string, { id: string; score: number }>, counts: Map<string, number>): ShopifyResourceSummary {
+  private summary(r: ResourceRow, pages: Map<string, PageInfo>, counts: Map<string, number>): ShopifyResourceSummary {
     const page = pages.get(r.path_key) ?? null;
     return {
       id: r.id,
@@ -450,6 +544,7 @@ export class ShopifyService {
       pageId: page?.id ?? null,
       pageScore: page?.score ?? null,
       changes: counts.get(r.id) ?? 0,
+      audit: page?.audit ?? null,
     };
   }
 
@@ -479,6 +574,8 @@ export class ShopifyService {
     if (q.missing === "seo_title") rows = rows.filter((r) => !r.seo_title);
     else if (q.missing === "seo_description") rows = rows.filter((r) => !r.seo_description);
     else if (q.missing === "image_alt") rows = rows.filter((r) => r.images_without_alt > 0);
+    if (q.fix === "seo_title") rows = rows.filter((r) => { const a = pages.get(r.path_key)?.audit; return !!a && a.titleStatus !== "pass"; });
+    else if (q.fix === "seo_description") rows = rows.filter((r) => { const a = pages.get(r.path_key)?.audit; return !!a && a.descriptionStatus !== "pass"; });
     return { resources: rows.slice(q.offset, q.offset + q.limit).map((r) => this.summary(r, pages, counts)), total: rows.length, offset: q.offset, limit: q.limit };
   }
 
@@ -555,6 +652,35 @@ export class ShopifyService {
     const page = pages.get(pathKey(live.path)) ?? null;
     const history = changesFor(this.store.db, site.host, id);
     const latest = latestByField(this.store.db, site.host, id);
+    const reasons = this.readOnlyReasons(info, live);
+    return {
+      id,
+      type: live.type,
+      path: live.path,
+      title: live.title,
+      seoTitle: live.seoTitle,
+      seoDescription: live.seoDescription,
+      images: live.images,
+      imagesWithoutAlt: live.imagesWithoutAlt,
+      pageId: page?.id ?? null,
+      pageScore: page?.score ?? null,
+      changes: history.length,
+      audit: page?.audit ?? null,
+      imageList: live.imageList.map((i) => ({ id: i.id, url: i.url, alt: i.alt })),
+      translations: this.translationList(info, live, tr),
+      history: history.map((c) => toChange(c, latest)),
+      editable: {
+        seo_title: !reasons.seo_title,
+        seo_description: !reasons.seo_description,
+        image_alt: !reasons.image_alt,
+        translations: !reasons.translations,
+      },
+      readOnlyReasons: reasons,
+    };
+  }
+
+  /** Raison pour laquelle chaque champ n'est pas modifiable sur cet élément (même règle pour le détail et les lots). */
+  private readOnlyReasons(info: ConnectionInfo, live: LiveResource): ShopifyResourceDetail["readOnlyReasons"] {
     const reasons: ShopifyResourceDetail["readOnlyReasons"] = {};
     const tooLong = "La valeur actuelle dépasse 5 000 caractères : elle ne peut pas être lue en entier, et l'annuler ne serait pas fidèle. Modifiez-la dans l'administration Shopify.";
     for (const field of ["seo_title", "seo_description"] as const) {
@@ -571,29 +697,7 @@ export class ShopifyService {
     if (!info.otherLocales.length) reasons.translations = "La boutique n'a pas d'autre langue publiée.";
     else if (!hasScope(info.scopes, "read_translations")) reasons.translations = "L'application Shopify n'a pas la permission « read_translations ».";
     else if (!hasScope(info.scopes, "write_translations")) reasons.translations = "L'application Shopify n'a pas la permission « write_translations ».";
-    return {
-      id,
-      type: live.type,
-      path: live.path,
-      title: live.title,
-      seoTitle: live.seoTitle,
-      seoDescription: live.seoDescription,
-      images: live.images,
-      imagesWithoutAlt: live.imagesWithoutAlt,
-      pageId: page?.id ?? null,
-      pageScore: page?.score ?? null,
-      changes: history.length,
-      imageList: live.imageList.map((i) => ({ id: i.id, url: i.url, alt: i.alt })),
-      translations: this.translationList(info, live, tr),
-      history: history.map((c) => toChange(c, latest)),
-      editable: {
-        seo_title: !reasons.seo_title,
-        seo_description: !reasons.seo_description,
-        image_alt: !reasons.image_alt,
-        translations: !reasons.translations,
-      },
-      readOnlyReasons: reasons,
-    };
+    return reasons;
   }
 
   private translationList(info: ConnectionInfo, live: LiveResource, tr: LiveTranslations | null): ShopifyTranslation[] {
@@ -651,7 +755,7 @@ export class ShopifyService {
     this.assertWritable();
     const req = parseChange(body);
     const { info, row } = await this.requireRow(site, req.resourceId);
-    return this.apply(site, info, {
+    const out = await this.apply(site, info, {
       type: row.type,
       gid: row.gid,
       field: req.field,
@@ -660,10 +764,34 @@ export class ShopifyService {
       value: req.value,
       expected: req.expectedBefore,
       restores: null,
+      batchId: null,
     });
+    return { change: out.change, resource: out.resource! };
+  }
+
+  /**
+   * Une ligne d'un lot de corrections : exactement le même chemin qu'une modification isolée (garde-fous, journal
+   * avant écriture, relecture, conflit par rapport à la valeur `before` de la ligne). Ne renvoie que la modification.
+   */
+  async applyLine(site: SiteRow, line: { type: ShopifyResourceType; gid: string; field: ShopifyField; imageId: string | null; locale: string | null; before: string | null; proposed: string }, batchId: string): Promise<ShopifyChange> {
+    this.assertWritable();
+    const info = await this.connected(site);
+    const out = await this.apply(
+      site,
+      info,
+      { type: line.type, gid: line.gid, field: line.field, imageId: line.imageId, locale: line.locale, value: normalizeValue(line.proposed, line.field), expected: line.before, restores: null, batchId },
+      { withResource: false },
+    );
+    return out.change;
   }
 
   async restore(site: SiteRow, changeId: string): Promise<ShopifyChangeResponse> {
+    const out = await this.restoreChange(site, changeId, null, true);
+    return { change: out.change, resource: out.resource! };
+  }
+
+  /** Annule une modification (isolée, ou ligne d'un lot quand `batchId` est donné) par le chemin d'écriture commun. */
+  async restoreChange(site: SiteRow, changeId: string, batchId: string | null, withResource = false): Promise<{ change: ShopifyChange; resource: ShopifyResourceDetail | null }> {
     this.assertWritable();
     const info = await this.connected(site);
     const c = getChange(this.store.db, changeId);
@@ -684,14 +812,17 @@ export class ShopifyService {
       value: c.before_value,
       expected: view.after,
       restores: c,
-    });
+      batchId,
+    }, { withResource });
   }
 
   private async apply(
     site: SiteRow,
     info: ConnectionInfo,
-    w: { type: ShopifyResourceType; gid: string; field: ShopifyField; imageId: string | null; locale: string | null; value: string | null; expected: string | null; restores: ChangeRow | null },
-  ): Promise<ShopifyChangeResponse> {
+    w: { type: ShopifyResourceType; gid: string; field: ShopifyField; imageId: string | null; locale: string | null; value: string | null; expected: string | null; restores: ChangeRow | null; batchId: string | null },
+    opts: { withResource?: boolean } = {},
+  ): Promise<{ change: ShopifyChange; resource: ShopifyResourceDetail | null }> {
+    const withResource = opts.withResource !== false;
     if (w.locale && !info.otherLocales.includes(w.locale)) {
       throw errors.badRequest(`La langue « ${w.locale.slice(0, 20)} » n'est pas publiée dans la boutique.`, info.otherLocales.length ? `Langues disponibles : ${info.otherLocales.join(", ")}.` : null);
     }
@@ -742,6 +873,7 @@ export class ShopifyService {
         applied_at: new Date(this.now()).toISOString(),
         kind: w.restores ? "restore" : "edit",
         restores_change_id: w.restores?.id ?? null,
+        batch_id: w.batchId,
       });
       this.inflight.add(pending.id);
       try {
@@ -791,15 +923,108 @@ export class ShopifyService {
           }
         }
         this.hub.emit(site.id, { type: "shopify" });
+        const latest = latestByField(this.store.db, site.host, row.resource_id);
+        const change = toChange(getChange(this.store.db, pending.id) ?? row, latest);
+        if (!withResource) return { change, resource: null };
         const shown = verified ?? { live: patched(before.live, w), tr: patchedTr(before.tr, w) };
         const tr = verified ? await this.translations(info, verified.live.gid).catch(() => verified!.tr) : shown.tr;
-        const resource = this.detail(site, info, shown.live, tr);
-        const latest = latestByField(this.store.db, site.host, row.resource_id);
-        return { change: toChange(getChange(this.store.db, pending.id) ?? row, latest), resource };
+        return { change, resource: this.detail(site, info, shown.live, tr) };
       } finally {
         this.inflight.delete(pending.id);
       }
     });
+  }
+
+  // ───── Lots de corrections : préparation d'une ligne (aucune écriture)
+
+  /** Connexion de la boutique de ce site (même contrôle que les autres routes). */
+  async connectedInfo(site: SiteRow): Promise<{ primaryLocale: string | null; otherLocales: string[]; scopes: string[] }> {
+    const info = await this.connected(site);
+    return { primaryLocale: info.primaryLocale, otherLocales: info.otherLocales, scopes: info.scopes };
+  }
+
+  /** La boutique a-t-elle été lue pour ce site ? */
+  isSynced(siteId: string): boolean {
+    return !!syncedAt(this.store.db, siteId);
+  }
+
+  /** Éléments de la dernière lecture (stockés), avec le verdict de l'analyse affichée. */
+  storedRows(siteId: string): Array<{ row: ResourceRow; audit: ResourceAudit | null }> {
+    const pages = this.pageIndex(siteId);
+    return resourceRows(this.store.db, siteId).map((row) => ({ row, audit: pages.get(row.path_key)?.audit ?? null }));
+  }
+
+  storedRow(siteId: string, id: string): ResourceRow | null {
+    return getResource(this.store.db, siteId, id);
+  }
+
+  /** Relit un élément en direct, avec son texte (pour préparer une proposition). */
+  async liveForProposal(row: ResourceRow): Promise<{ live: LiveResource; text: string | null }> {
+    const live = await this.prepReads.run(() => this.live(row));
+    let text: string | null = null;
+    try {
+      text = await this.prepReads.run(() => readResourceText(this.gql!, row.type, row.gid));
+    } catch {
+      /* sans texte : la proposition se fonde sur le nom seul */
+    }
+    return { live, text };
+  }
+
+  /**
+   * Prépare une ligne de lot : relit la valeur actuelle dans Shopify (`before`), vérifie que le champ est modifiable
+   * sur cet élément (mêmes raisons que `readOnlyReasons`) et valide la valeur proposée exactement comme une saisie
+   * humaine. Lève l'erreur affichable sinon. N'écrit rien.
+   */
+  async prepareLine(site: SiteRow, req: LineRequest, liveCache?: Map<string, LiveResource>): Promise<PreparedLine> {
+    const info = await this.connected(site);
+    const field = req.field;
+    if (!FIELDS.includes(field)) throw errors.badRequest("Ce champ ne peut pas être modifié.", "Champs possibles : seo_title, seo_description, image_alt.");
+    const locale = req.locale === undefined || req.locale === null || req.locale === "" ? null : req.locale;
+    if (locale !== null && (typeof locale !== "string" || !LOCALE_RE.test(locale))) throw errors.badRequest("Cette langue n'est pas valide.", null);
+    if (locale && field === "image_alt") throw errors.badRequest("Le texte alternatif d'une image ne se traduit pas ici.", null);
+    if (locale && !info.otherLocales.includes(locale)) {
+      throw errors.badRequest(`La langue « ${locale.slice(0, 20)} » n'est pas publiée dans la boutique.`, info.otherLocales.length ? `Langues disponibles : ${info.otherLocales.join(", ")}.` : null);
+    }
+    let imageId: string | null = null;
+    if (field === "image_alt") {
+      if (typeof req.imageId !== "string" || !/^img_[a-z0-9]{6,40}$/.test(req.imageId)) throw errors.badRequest("L'image à modifier n'est pas indiquée.", "Choisissez une image, puis réessayez.");
+      imageId = req.imageId;
+    }
+    const row = typeof req.resourceId === "string" ? getResource(this.store.db, site.id, req.resourceId) : null;
+    if (!row) throw errors.notFound("Cet élément de la boutique");
+    let live = liveCache?.get(row.id);
+    if (!live) {
+      live = await this.prepReads.run(() => this.live(row));
+      liveCache?.set(row.id, live);
+    }
+    const reasons = this.readOnlyReasons(info, live);
+    let tr: LiveTranslations | null = null;
+    if (locale) {
+      if (reasons.translations) throw errors.badRequest(reasons.translations, null);
+      const gid = live.gid;
+      tr = await this.prepReads.run(() => this.translations(info, gid, [locale]));
+      const t = this.translationList(info, live, tr).find((x) => x.locale === locale && x.field === field);
+      if (!t || !t.editable) throw errors.badRequest(t?.reason ?? "Cette traduction n'est pas modifiable.", null);
+    } else if (reasons[field]) throw errors.badRequest(reasons[field]!, null);
+    const cur = currentOf(live, tr, { field, imageId, locale });
+    if (field === "image_alt" && !cur.image) throw errors.notFound("Cette image");
+    if (!cur.complete) throw errors.badRequest("La valeur actuelle est trop longue pour être lue en entier : la modifier ici empêcherait de la remettre à l'identique.", "Modifiez-la dans l'administration Shopify.");
+    const value = normalizeValue(req.value, field);
+    if (value === null) throw shopifyErrors.invalidValue("La valeur proposée est vide.", "Saisissez un texte, puis réessayez.");
+    if (sameValue(cur.value, value)) throw errors.badRequest("Cette valeur est déjà en place dans Shopify.", "Proposez une autre valeur ou retirez cette ligne.");
+    return {
+      resourceId: row.id,
+      gid: live.gid,
+      type: live.type,
+      title: live.title,
+      path: live.path,
+      field,
+      imageId: cur.image?.id ?? null,
+      imageUrl: cur.image?.url ?? null,
+      locale,
+      before: cur.value,
+      proposed: value,
+    };
   }
 
   // ───── Historique
@@ -891,4 +1116,17 @@ function parseChange(b: Partial<ShopifyChangeRequest>): {
   if (!("expectedBefore" in b)) throw errors.badRequest("La valeur actuelle affichée (expectedBefore) manque.", "Rechargez l'élément, puis réessayez.");
   if (b.expectedBefore !== null && typeof b.expectedBefore !== "string") throw errors.badRequest("La valeur actuelle affichée (expectedBefore) doit être un texte ou null.", null);
   return { resourceId, field, imageId, locale, value: normalizeValue(b.value, field), expectedBefore: b.expectedBefore ?? null };
+}
+
+/** Verdict de la grille sur le titre et la description affichés d'une page ; null si l'un des critères manque. */
+export function pageAudit(checks: PageCheck[], facts: PageFacts): ResourceAudit | null {
+  const t = checks.find((c) => c.id === "title");
+  const d = checks.find((c) => c.id === "meta_description");
+  if (!t || !d) return null;
+  return {
+    renderedTitle: facts.title ? facts.title : null,
+    titleStatus: t.status as CheckStatus,
+    renderedDescription: facts.description ? facts.description : null,
+    descriptionStatus: d.status as CheckStatus,
+  };
 }

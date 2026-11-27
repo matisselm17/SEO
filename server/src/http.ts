@@ -194,6 +194,31 @@ export class RateLimiter {
     private now: () => number = Date.now,
   ) {}
 
+  /** Millisecondes avant qu'une demande de plus soit permise (0 : tout de suite). */
+  waitMs(key: string): number {
+    const t = this.now();
+    const list = (this.hits.get(key) ?? []).filter((x) => t - x < 60_000);
+    this.hits.set(key, list);
+    return list.length < this.perMinute ? 0 : Math.max(1, list[0] + 60_000 - t);
+  }
+
+  /**
+   * Cadence plutôt que refus : attend qu'une place se libère dans la minute, puis compte la demande.
+   * Partagé avec `take` : les écritures isolées et celles d'un lot entrent dans la même limite.
+   * Renvoie false si `signal` interrompt l'attente (rien n'est compté).
+   */
+  async acquire(key: string, signal?: AbortSignal, sleep: (ms: number) => Promise<void> = defaultSleep): Promise<boolean> {
+    for (;;) {
+      if (signal?.aborted) return false;
+      const wait = this.waitMs(key);
+      if (wait === 0) {
+        this.hits.get(key)!.push(this.now());
+        return true;
+      }
+      await sleep(Math.min(wait, 5_000));
+    }
+  }
+
   /** Lève rate_limited si la limite est atteinte ; sinon compte la demande. */
   take(key: string, what: string): void {
     const t = this.now();
@@ -209,3 +234,5 @@ export class RateLimiter {
     this.hits.set(key, list);
   }
 }
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

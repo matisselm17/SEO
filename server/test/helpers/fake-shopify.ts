@@ -17,8 +17,8 @@ export interface FakeState {
   shop: { name: string; host: string };
   locales: Array<{ locale: string; primary: boolean; published: boolean }>;
   /** Titre et description pour Google : metafields global.title_tag / global.description_tag, comme chez Shopify. */
-  products: Array<{ id: string; handle: string; title: string; meta: Record<string, Meta | undefined>; media: Array<{ id: string; alt: string | null; url: string }> }>;
-  collections: Array<{ id: string; handle: string; title: string; meta: Record<string, Meta | undefined>; image: { id: string; altText: string | null; url: string } | null }>;
+  products: Array<{ id: string; handle: string; title: string; description?: string; meta: Record<string, Meta | undefined>; media: Array<{ id: string; alt: string | null; url: string }> }>;
+  collections: Array<{ id: string; handle: string; title: string; description?: string; meta: Record<string, Meta | undefined>; image: { id: string; altText: string | null; url: string } | null }>;
   pages: Array<{ id: string; handle: string; title: string; meta: Record<string, Meta | undefined> }>;
   articles: Array<{ id: string; handle: string; title: string; blog: string; image: { altText: string | null; url: string } | null; meta: Record<string, Meta | undefined> }>;
   /** gid → langue → clé → traduction. */
@@ -153,6 +153,12 @@ export function fakeShopify(state: FakeState = defaultState(), opts: FakeOptions
       const a = state.articles.find((x) => x.id === v.id);
       return { node: a ? article(a) : null };
     }
+    if (q.includes("text: product(") || q.includes("text: collection(")) {
+      const r = (state.products.find((x) => x.id === v.id) ?? state.collections.find((x) => x.id === v.id)) as { description?: string } | undefined;
+      return { text: r ? { description: r.description ?? "" } : null };
+    }
+    if (q.includes("text: page(")) return { text: state.pages.some((x) => x.id === v.id) ? { bodySummary: "" } : null };
+    if (q.includes("text: article(")) return { text: state.articles.some((x) => x.id === v.id) ? { summary: "", body: "" } : null };
     if (q.includes("translatableResource")) {
       const content = translatable(v.id);
       const res: Record<string, unknown> = {

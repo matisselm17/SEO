@@ -156,6 +156,66 @@ BEGIN
 END;
 -- Le déclencheur des mises à jour est (re)créé par migrate(), après l'ajout des colonnes du journal.
 
+-- Lots de corrections. Sans lien vers sites (comme l'historique) : un lot n'est jamais supprimé.
+CREATE TABLE IF NOT EXISTS shopify_batches (
+  id TEXT PRIMARY KEY,
+  site_host TEXT NOT NULL,
+  title TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  state TEXT NOT NULL,
+  auto_applied INTEGER NOT NULL DEFAULT 0,
+  error_json TEXT,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS shopify_batches_site ON shopify_batches(site_host);
+CREATE TABLE IF NOT EXISTS shopify_batch_items (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES shopify_batches(id),
+  seq INTEGER NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_gid TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_title TEXT NOT NULL,
+  path TEXT NOT NULL,
+  field TEXT NOT NULL,
+  image_id TEXT,
+  image_url TEXT,
+  locale TEXT,
+  before_value TEXT,
+  proposed TEXT NOT NULL,
+  note TEXT,
+  selected INTEGER NOT NULL DEFAULT 1,
+  state TEXT NOT NULL DEFAULT 'pending',
+  change_id TEXT,
+  error TEXT,
+  auto_applied INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS shopify_batch_items_batch ON shopify_batch_items(batch_id, seq);
+CREATE TRIGGER IF NOT EXISTS shopify_batches_no_delete BEFORE DELETE ON shopify_batches
+BEGIN
+  SELECT RAISE(ABORT, 'lots de corrections : suppression interdite');
+END;
+CREATE TRIGGER IF NOT EXISTS shopify_batch_items_no_delete BEFORE DELETE ON shopify_batch_items
+BEGIN
+  SELECT RAISE(ABORT, 'lots de corrections : suppression interdite');
+END;
+
+-- Règle d'automatisation par site (valeurs par défaut du format tant qu'aucune n'est enregistrée).
+CREATE TABLE IF NOT EXISTS automation_policies (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  policy_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- Compteurs du jour (jour UTC), par hôte : supprimer puis recréer un site ne remet pas les compteurs à zéro.
+CREATE TABLE IF NOT EXISTS automation_usage (
+  site_host TEXT NOT NULL,
+  day TEXT NOT NULL,
+  auto_changes INTEGER NOT NULL DEFAULT 0,
+  ai_tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (site_host, day)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -185,6 +245,11 @@ const ADDED_COLUMNS: Array<[table: string, column: string, type: string]> = [
   ["shopify_changes", "status", "TEXT NOT NULL DEFAULT 'applied'"],
   ["shopify_changes", "requested_value", "TEXT"],
   ["shopify_changes", "after_verified", "INTEGER NOT NULL DEFAULT 1"],
+  ["shopify_changes", "batch_id", "TEXT"],
+  ["chat_messages", "batch_ids_json", "TEXT"],
+  ["audits", "paused_until", "TEXT"],
+  ["search_console", "source", "TEXT NOT NULL DEFAULT 'file'"],
+  ["shopify_batch_items", "auto_applied", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /**
@@ -201,7 +266,7 @@ WHEN NEW.id IS NOT OLD.id OR NEW.site_host IS NOT OLD.site_host OR NEW.resource_
   OR NEW.resource_title IS NOT OLD.resource_title OR NEW.path IS NOT OLD.path OR NEW.field IS NOT OLD.field
   OR NEW.image_id IS NOT OLD.image_id OR NEW.image_gid IS NOT OLD.image_gid OR NEW.image_url IS NOT OLD.image_url
   OR NEW.locale IS NOT OLD.locale OR NEW.before_value IS NOT OLD.before_value OR NEW.requested_value IS NOT OLD.requested_value
-  OR NEW.kind IS NOT OLD.kind OR NEW.restores_change_id IS NOT OLD.restores_change_id
+  OR NEW.kind IS NOT OLD.kind OR NEW.restores_change_id IS NOT OLD.restores_change_id OR NEW.batch_id IS NOT OLD.batch_id
   OR (OLD.status <> 'pending' AND (NEW.status IS NOT OLD.status OR NEW.after_value IS NOT OLD.after_value
       OR NEW.after_verified IS NOT OLD.after_verified OR NEW.applied_at IS NOT OLD.applied_at))
   OR (OLD.status = 'pending' AND NEW.status NOT IN ('pending', 'applied', 'failed'))
@@ -214,7 +279,12 @@ END;
 function migrate(db: DB): void {
   for (const [table, column, type] of ADDED_COLUMNS) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    if (cols.some((c) => c.name === column)) continue;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    if (table === "shopify_batch_items" && column === "auto_applied") {
+      // Lots antérieurs : seul le lot portait la marque. Au mieux, ses lignes écrites la reçoivent.
+      db.exec("UPDATE shopify_batch_items SET auto_applied = 1 WHERE state IN ('applied', 'restored') AND batch_id IN (SELECT id FROM shopify_batches WHERE auto_applied = 1)");
+    }
   }
   db.exec(CHANGES_UPDATE_TRIGGER);
 }

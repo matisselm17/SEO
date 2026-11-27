@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node --disable-warning=ExperimentalWarning dist/server/src/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/*.test.ts"
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test test/*.test.ts",
+    "shopify:sauvegarde": "node --disable-warning=ExperimentalWarning --import tsx scripts/shopify-sauvegarde.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.14.0",

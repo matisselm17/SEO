@@ -6,7 +6,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { ChatClient } from "../../src/chat/assistant.ts";
 
 export type Turn =
-  | { text?: string[]; tools?: Array<{ name: string; input: Record<string, unknown> }> }
+  | { text?: string[]; tools?: Array<{ name: string; input: Record<string, unknown> }>; usage?: { input_tokens: number; output_tokens: number } }
   | { error: unknown };
 
 export function mockClaude(
@@ -61,7 +61,7 @@ export function mockClaude(
           content,
           stop_reason: turn.tools?.length ? "tool_use" : "end_turn",
           stop_sequence: null,
-          usage: { input_tokens: 1, output_tokens: 1 },
+          usage: turn.usage ?? { input_tokens: 1, output_tokens: 1 },
         } as unknown as Anthropic.Message;
         return {
           async *[Symbol.asyncIterator]() {

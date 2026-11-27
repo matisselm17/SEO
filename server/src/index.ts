@@ -11,6 +11,8 @@ import { openDb } from "./db.ts";
 import { EventHub } from "./events.ts";
 import { setAllowPrivateHosts } from "./net/fetch.ts";
 import { Store } from "./store.ts";
+import { ShopifyService } from "./shopify/service.ts";
+import { BatchService, recoverInterruptedBatches } from "./shopify/batches.ts";
 
 const config = loadConfig();
 setAllowPrivateHosts(config.allowPrivateHosts);
@@ -19,11 +21,16 @@ const store = new Store(openDb(config.dataDir));
 const hub = new EventHub();
 const crawler = new Crawler(store, hub, DEFAULT_CRAWL, config.limits.maxConcurrentAudits);
 
+const shopify = new ShopifyService(store, hub, { creds: config.shopify, writesEnabled: config.shopifyWritesEnabled });
+const batches = new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply });
+
 const app = createApp({
   config,
   store,
   hub,
   crawler,
+  shopify,
+  batches,
   chatClient: config.anthropicApiKey ? createClient(config.anthropicApiKey) : null,
   searchProvider: config.firecrawlApiKey ? new FirecrawlSearch(config.firecrawlApiKey) : null,
 });
@@ -43,11 +50,15 @@ function markInterruptedAudits(): void {
 
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
   markInterruptedAudits();
+  // Un lot resté « en cours d'écriture » ne reprend jamais tout seul : il passe « partial ».
+  const recovered = recoverInterruptedBatches(store.db);
+  if (recovered) console.warn(`[serveur] ${recovered} lot(s) de corrections interrompu(s) par un arrêt : marqué(s) « partial » ou remis en brouillon, sans reprise automatique.`);
   console.log(`[serveur] Chat SEO ${config.version} à l'écoute sur http://${config.host}:${info.port}`);
   console.log(`[serveur] Données : ${config.dataDir}`);
   console.log(`[serveur] Assistant : ${config.anthropicApiKey ? `activé (${config.anthropicModel})` : "désactivé (pas de clé ANTHROPIC_API_KEY)"}`);
   // Le domaine myshopify.com n'est jamais journalisé.
   console.log(`[serveur] Shopify : ${config.shopify ? `configuré, ${config.shopifyWritesEnabled ? "écritures ACTIVÉES (SHOPIFY_WRITES_ENABLED=1)" : "lecture seule"}` : "non configuré (SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET)"}`);
+  console.log(`[serveur] Écritures automatiques (SHOPIFY_AUTO_APPLY) : ${config.shopifyAutoApply ? "autorisées par le serveur" : "non autorisées"}`);
   console.log(`[serveur] Concurrents : ${config.firecrawlApiKey ? "activé" : "désactivé (pas de clé FIRECRAWL_API_KEY)"}`);
   if (config.allowPrivateHosts) {
     console.warn("[serveur] ATTENTION : ALLOW_PRIVATE_HOSTS=1 autorise le chargement d'adresses internes. Réservé au développement et aux tests.");
@@ -73,7 +84,7 @@ function shutdown(): void {
   stopping = true;
   // Arrêt du serveur : les analyses en cours passent en « failed » avec un message qui le dit.
   crawler.stopAllForShutdown();
-  void crawler.waitAll().finally(() => {
+  void Promise.all([crawler.waitAll(), batches.stopAll()]).finally(() => {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2_000).unref();
   });

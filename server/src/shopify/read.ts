@@ -91,7 +91,7 @@ export async function readLocales(gql: Gql): Promise<{ primary: string | null; o
 type Page<T> = { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: T[] };
 const MAX_PAGES = 200;
 
-async function paginate<T>(gql: Gql, query: string, root: string): Promise<T[]> {
+export async function paginate<T>(gql: Gql, query: string, root: string): Promise<T[]> {
   const out: T[] = [];
   let after: string | null = null;
   for (let i = 0; i < MAX_PAGES; i++) {
@@ -104,29 +104,29 @@ async function paginate<T>(gql: Gql, query: string, root: string): Promise<T[]> 
   return out;
 }
 
-type MediaNode = { __typename?: string; id?: string; image?: { altText: string | null; url?: string } | null };
-type MetaNode = { id: string; value: string | null; type: string; compareDigest: string } | null;
-type ProductNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode; media: Page<MediaNode> };
-type CollectionNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode; image: { id?: string | null; altText: string | null; url: string } | null };
-type PageNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode };
-type ArticleNode = PageNode & { blog: { handle: string } | null; image: { altText: string | null; url: string } | null };
+export type MediaNode = { __typename?: string; id?: string; image?: { altText: string | null; url?: string } | null };
+export type MetaNode = { id: string; value: string | null; type: string; compareDigest: string } | null;
+export type ProductNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode; media: Page<MediaNode> };
+export type CollectionNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode; image: { id?: string | null; altText: string | null; url: string } | null };
+export type PageNode = { id: string; handle: string; title: string; t: MetaNode; d: MetaNode };
+export type ArticleNode = PageNode & { blog: { handle: string } | null; image: { altText: string | null; url: string } | null };
 
 const MEDIA = "media(first: 50) { pageInfo { hasNextPage endCursor } nodes { __typename ... on MediaImage { id image { altText url } } } }";
 const META = 't: metafield(namespace: "global", key: "title_tag") { id value type compareDigest } d: metafield(namespace: "global", key: "description_tag") { id value type compareDigest }';
 
 // Titre et description pour Google : lus partout dans global.title_tag / global.description_tag, les champs que le
 // logiciel écrit. Vérifié en lecture sur une boutique réelle : identiques à seo { title description } des produits et collections.
-const Q_PRODUCTS = `query($after: String) { products(first: 25, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} ${MEDIA} } } }`;
+export const Q_PRODUCTS = `query($after: String) { products(first: 25, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} ${MEDIA} } } }`;
 const Q_PRODUCT_MEDIA = "query($id: ID!, $after: String) { product(id: $id) { media(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { __typename ... on MediaImage { id image { altText url } } } } } }";
-const Q_COLLECTIONS = `query($after: String) { collections(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} image { id altText url } } } }`;
-const Q_PAGES = `query($after: String) { pages(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} } } }`;
-const Q_ARTICLES = `query($after: String) { articles(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title blog { handle } image { altText url } ${META} } } }`;
+export const Q_COLLECTIONS = `query($after: String) { collections(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} image { id altText url } } } }`;
+export const Q_PAGES = `query($after: String) { pages(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title ${META} } } }`;
+export const Q_ARTICLES = `query($after: String) { articles(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id handle title blog { handle } image { altText url } ${META} } } }`;
 
 const isImage = (m: MediaNode) => m.__typename === "MediaImage" && typeof m.id === "string";
 const hasAlt = (alt: unknown) => typeof alt === "string" && alt.trim().length > 0;
 
 /** Toutes les images d'un produit, au-delà des 50 premières si besoin. */
-async function allMedia(gql: Gql, p: ProductNode): Promise<MediaNode[]> {
+export async function allMedia(gql: Gql, p: ProductNode): Promise<MediaNode[]> {
   const nodes = [...(p.media?.nodes ?? [])];
   let info = p.media?.pageInfo;
   for (let i = 0; info?.hasNextPage && info.endCursor && i < 50; i++) {
@@ -287,6 +287,46 @@ export async function readResource(gql: Gql, type: ShopifyResourceType, gid: str
     images: img ? 1 : 0,
     imagesWithoutAlt: img && !hasAlt(img.altText) ? 1 : 0,
   };
+}
+
+// ───────── Texte d'un élément (pour préparer des propositions)
+
+const Q_TEXT: Record<ShopifyResourceType, string> = {
+  product: "query($id: ID!) { text: product(id: $id) { description(truncateAt: 2000) } }",
+  collection: "query($id: ID!) { text: collection(id: $id) { description(truncateAt: 2000) } }",
+  page: "query($id: ID!) { text: page(id: $id) { bodySummary } }",
+  article: "query($id: ID!) { text: article(id: $id) { summary body } }",
+};
+
+/** HTML → texte brut (les balises sont retirées, jamais interprétées), espaces normalisés, borné. */
+export function plainText(v: unknown, max = 1500): string | null {
+  if (typeof v !== "string") return null;
+  const s = v
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "‹")
+    .replace(/&gt;/g, "›")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return s ? [...s].slice(0, max).join("") : null;
+}
+
+/**
+ * Texte de l'élément (description du produit ou de la collection, résumé de la page ou de l'article), en texte brut.
+ * Donnée non fiable : elle n'est transmise à l'IA que comme matière à résumer. null si vide ou illisible.
+ */
+export async function readResourceText(gql: Gql, type: ShopifyResourceType, gid: string): Promise<string | null> {
+  const d = await gql<{ text: Record<string, unknown> | null }>(Q_TEXT[type], { id: gid });
+  const t = d.text;
+  if (!t) return null;
+  if (type === "article") return plainText(t.summary) ?? plainText(t.body);
+  return plainText(type === "page" ? t.bodySummary : t.description);
 }
 
 export function toResourceInput(r: LiveResource): ResourceInput {

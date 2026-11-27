@@ -10,6 +10,9 @@ import { EventHub } from "../../src/events.ts";
 import { Store } from "../../src/store.ts";
 import { ShopifyService } from "../../src/shopify/service.ts";
 import { FAKE_CREDS } from "./fake-shopify.ts";
+import { BatchService } from "../../src/shopify/batches.ts";
+import { Optimizer } from "../../src/automation/optimize.ts";
+import { SearchConsoleClient } from "../../src/gsc/google.ts";
 
 /** Conduite face aux refus passagers, en millisecondes, pour des tests rapides. */
 export const FAST_RETRY: RetryPolicy = {
@@ -28,7 +31,9 @@ export function testEnv(
     /** Conduite face aux refus passagers ; par défaut des délais de quelques millisecondes (tests rapides). */
     retry?: RetryPolicy;
     /** Boutique Shopify simulée (faux fetch) ; sans elle, la boutique n'est pas configurée. */
-    shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number };
+    shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number; autoApply?: boolean; sleep?: (ms: number) => Promise<void> };
+    /** Search Console simulée : fichier du compte de service et faux fetch de Google. */
+    google?: { file: string; fetchImpl: typeof fetch; property?: string | null; now?: () => number };
   } = {},
 ) {
   const limits = { ...DEFAULT_LIMITS, ...opts.limits };
@@ -42,6 +47,10 @@ export function testEnv(
     firecrawlApiKey: opts.searchProvider ? "fc-test" : null,
     shopify: opts.shopify ? FAKE_CREDS : null,
     shopifyWritesEnabled: opts.shopify?.writesEnabled ?? false,
+    shopifyAutoApply: opts.shopify?.autoApply ?? false,
+    googleServiceAccountFile: opts.google?.file ?? "/nonexistent/google-service-account.json",
+    gscProperty: opts.google?.property ?? null,
+    dataForSeo: null,
     allowedHosts: [],
     allowPrivateHosts: true,
     version: "0.1.0",
@@ -58,8 +67,18 @@ export function testEnv(
     }),
     now: opts.shopify?.now,
   });
-  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify });
-  return { app, store, hub, crawler, config, shopify };
+  const batches = new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply, sleep: opts.shopify?.sleep });
+  const optimizer = new Optimizer({ store, shopify, batches, client: opts.chatClient ?? null, model: config.anthropicModel });
+  const searchConsole = new SearchConsoleClient({
+    file: config.googleServiceAccountFile,
+    property: config.gscProperty,
+    fetchImpl: opts.google?.fetchImpl ?? (async () => {
+      throw new Error("aucun appel réseau à Google dans ce test");
+    }),
+    now: opts.google?.now,
+  });
+  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify, batches, optimizer, searchConsole });
+  return { app, store, hub, crawler, config, shopify, batches, optimizer, searchConsole };
 }
 
 /** Lit un flux SSE complet et renvoie les événements { event, data }. */

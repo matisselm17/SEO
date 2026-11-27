@@ -11,6 +11,10 @@ import { totalsOf } from "../gsc/import.ts";
 import type { SiteRow, Store } from "../store.ts";
 import { coverage, listPages } from "../views.ts";
 import type { ShopifyService } from "../shopify/service.ts";
+import type { BatchService, Proposal } from "../shopify/batches.ts";
+import { automationErrors, getPolicy } from "../automation/policy.ts";
+import { pathKey, productAlias } from "../shopify/repo.ts";
+import { HttpError } from "../errors.ts";
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -110,6 +114,34 @@ export const TOOLS: Anthropic.Tool[] = [
         champ_vide: { type: "string", enum: ["seo_title", "seo_description", "image_alt"], description: "Ne garder que les éléments où ce champ est vide (image_alt : au moins une image sans texte alternatif)." },
         limite: { type: "integer", minimum: 1, maximum: 100, description: "30 par défaut." },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "proposer_corrections",
+    description:
+      "SEUL moyen de proposer des modifications de la boutique Shopify : titres et descriptions pour Google. Crée un lot de corrections. Le serveur relit chaque valeur actuelle dans Shopify, vérifie chaque proposition (longueur, caractères, champ modifiable) et la règle d'automatisation choisie par le propriétaire (champs, types d'éléments, champs vides ou en défaut) : une proposition hors règle est refusée. Le lot n'est JAMAIS appliqué automatiquement : il attend toujours la validation du propriétaire dans la section « Boutique Shopify ». Rien n'est modifié dans la boutique par cet outil. Pas de texte alternatif d'image avec cet outil. Rédige d'abord les textes en respectant la grille (titre 30 à 60 caractères, description 70 à 160), sans les caractères < ni >.",
+    input_schema: {
+      type: "object",
+      properties: {
+        corrections: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: "object",
+            properties: {
+              element: { type: "string", description: "Chemin de l'élément (ex. /products/bague-or) ou son identifiant (shr_…), tels que donnés par boutique_shopify." },
+              champ: { type: "string", enum: ["seo_title", "seo_description"], description: "seo_title : titre pour Google ; seo_description : description pour Google." },
+              valeur: { type: "string", description: "Le texte proposé, exactement tel qu'il sera enregistré." },
+              justification: { type: "string", description: "Pourquoi, en une phrase courte." },
+            },
+            required: ["element", "champ", "valeur", "justification"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["corrections"],
       additionalProperties: false,
     },
   },
@@ -351,6 +383,7 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
         },
         elements_trouves: rows.length,
         elements: rows.slice(0, num(input.limite, 30, 1, 100)).map((r) => ({
+          id: r.id,
           chemin: r.path,
           type: r.type,
           nom_donnee_non_fiable: r.title,
@@ -360,14 +393,126 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
           images_sans_texte_alternatif: r.imagesWithoutAlt,
           page_analysee: r.pageId,
           note_de_la_page: r.pageScore,
+          analyse_de_la_page: r.audit
+            ? {
+                titre_affiche_donnee_non_fiable: r.audit.renderedTitle,
+                verdict_titre: r.audit.titleStatus,
+                description_affichee_donnee_non_fiable: r.audit.renderedDescription,
+                verdict_description: r.audit.descriptionStatus,
+              }
+            : null,
           modifications_faites: r.changes,
         })),
         note:
-          "Valeurs de la dernière lecture de la boutique (pas en direct). Un titre ou une description vide (null) : Shopify affiche alors le nom ou le début du texte de l'élément. L'assistant ne peut rien modifier : la modification se fait dans la section « Boutique Shopify ». " +
+          "Valeurs de la dernière lecture de la boutique (pas en direct). Un titre ou une description vide (null) : Shopify affiche alors le nom ou le début du texte de l'élément. analyse_de_la_page : verdict de la grille sur le titre et la description réellement affichés (pass = correct, warn/fail = à corriger) ; null si la page n'a pas été ouverte. Pour proposer des corrections, utilise uniquement proposer_corrections. " +
           UNTRUSTED,
       });
     }
     default:
       return fail("Outil inconnu", `L'outil « ${name.slice(0, 40)} » n'existe pas.`);
   }
+}
+
+// ───────── Outil d'écriture (asynchrone) : proposer_corrections
+
+export interface AsyncToolContext {
+  store: Store;
+  site: SiteRow;
+  shopify: ShopifyService | null;
+  batches: BatchService | null;
+}
+
+export interface AsyncToolOutcome extends ToolOutcome {
+  batchId: string | null;
+}
+
+/** Élément de la boutique désigné par l'assistant : identifiant connu, ou chemin d'un élément lu. */
+function resolveElement(shopify: ShopifyService, siteId: string, ref: string): string | null {
+  const r = ref.trim();
+  if (/^shr_[a-z0-9]{6,40}$/.test(r)) return shopify.storedRow(siteId, r) ? r : null;
+  let path = r;
+  try {
+    if (/^https?:\/\//i.test(r)) path = new URL(r).pathname;
+  } catch {
+    return null;
+  }
+  const key = pathKey(path);
+  const rows = shopify.storedRows(siteId);
+  const hit = rows.find((x) => x.row.path_key === key) ?? rows.find((x) => x.row.path_key === productAlias(key));
+  return hit?.row.id ?? null;
+}
+
+/** Ce que l'assistant doit dire après avoir créé un lot : il attend toujours une validation humaine. */
+const PENDING_TEXT =
+  "Le lot est en attente de validation : le propriétaire le relit et le valide lui-même dans la section « Boutique Shopify ». Rien n'a été modifié dans la boutique. Un lot préparé dans la conversation n'est jamais appliqué automatiquement, quelle que soit la règle d'automatisation.";
+
+/** Outils asynchrones (écriture) ; les autres outils passent par `runTool`. */
+export async function runToolAsync(ctx: AsyncToolContext, name: string, input: Record<string, unknown>): Promise<AsyncToolOutcome> {
+  if (name !== "proposer_corrections") return { ...runTool(ctx.store, ctx.site, name, input, ctx.shopify), batchId: null };
+  const label = "Préparation d'un lot de corrections";
+  const failOut = (message: string): AsyncToolOutcome => ({ ...fail(label, message), batchId: null });
+  const { shopify, batches, site, store } = ctx;
+  if (!shopify?.configured || !batches) return failOut("Aucune boutique Shopify n'est connectée à ce serveur : aucune correction ne peut être proposée.");
+  if (getPolicy(store.db, site.id).mode === "off") return failOut(`automation_off : ${automationErrors.off().message} Ne propose pas de lot ; donne le texte au propriétaire pour qu'il le saisisse lui-même s'il le souhaite.`);
+  const list = Array.isArray(input.corrections) ? (input.corrections as unknown[]).slice(0, 50) : [];
+  if (!list.length) return failOut("Aucune correction reçue.");
+  const ALLOWED = ["seo_title", "seo_description"];
+  try {
+    await batches.assertReady(site);
+  } catch (err) {
+    return failOut(err instanceof HttpError ? err.message : "La boutique n'est pas accessible pour le moment.");
+  }
+  const proposals: Proposal[] = [];
+  const unresolved: Array<{ correction: number; code: string; raison: string }> = [];
+  for (const [i, raw] of list.entries()) {
+    const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    if (!ALLOWED.includes(c.champ as string)) {
+      unresolved.push({
+        correction: i + 1,
+        code: "bad_request",
+        raison:
+          c.champ === "image_alt"
+            ? "Cet outil ne propose pas de texte alternatif d'image : le propriétaire peut le préparer depuis la section « Boutique Shopify » (« Préparer des corrections avec l'IA »), ou le saisir lui-même."
+            : "Champ inconnu : seuls seo_title (titre pour Google) et seo_description (description pour Google) sont possibles.",
+      });
+      continue;
+    }
+    const id = typeof c.element === "string" ? resolveElement(shopify, site.id, c.element) : null;
+    if (!id) {
+      unresolved.push({ correction: i + 1, code: "not_found", raison: "Élément introuvable parmi ceux lus dans la boutique." });
+      continue;
+    }
+    proposals.push({ resourceId: id, field: c.champ as Proposal["field"], locale: null, value: c.valeur, note: typeof c.justification === "string" ? c.justification : null });
+  }
+  const index = list.map((_, i) => i).filter((i) => !unresolved.some((u) => u.correction === i + 1));
+  let res;
+  try {
+    res = await batches.addProposals(site, null, "assistant", proposals, { title: "Corrections proposées par l'assistant" });
+  } catch (err) {
+    return failOut(err instanceof HttpError ? `${err.code} : ${err.message}` : "Le lot n'a pas pu être créé.");
+  }
+  const refused = [...unresolved, ...res.refused.map((r) => ({ correction: index[r.index] + 1, code: r.code, raison: r.message }))].sort((a, b) => a.correction - b.correction);
+  if (!res.batch) {
+    return {
+      ...out(label, "Lots de corrections", {
+        lot_cree: false,
+        modifications_faites_dans_la_boutique: 0,
+        refusees: refused,
+        consigne: "Aucun lot n'a été créé et rien n'a été modifié dans la boutique. Explique au propriétaire pourquoi chaque proposition a été refusée, sans prétendre avoir modifié quoi que ce soit.",
+      }),
+      batchId: null,
+    };
+  }
+  // Jamais d'écriture automatique pour un lot de l'assistant : il reste un brouillon à valider.
+  const batch = batches.get(site, res.batch.id);
+  return {
+    ...out(label, "Lots de corrections", {
+      lot_cree: true,
+      lot: { id: batch.id, etat: "en attente de validation", lignes: batch.counts.total },
+      modifications_faites_dans_la_boutique: 0,
+      refusees: refused,
+      consigne: PENDING_TEXT + " Dis-le clairement au propriétaire, avec le nombre de lignes, et cite les propositions refusées avec leur raison. Ne prétends jamais avoir modifié la boutique.",
+    }),
+    batchId: batch.id,
+  };
 }

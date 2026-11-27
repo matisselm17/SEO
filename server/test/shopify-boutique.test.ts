@@ -205,7 +205,7 @@ test("sync : tous les éléments, résumé, rapprochement avec l'analyse affich�
   const byPath = Object.fromEntries(list.resources.map((r: any) => [r.path, r]));
   assert.deepEqual(Object.keys(byPath).sort(), ["/blogs/conseils/entretenir-ses-bijoux", "/collections/bagues", "/pages/contact", "/products/bague-or", "/products/collier"]);
   const ring = byPath["/products/bague-or"];
-  assert.deepEqual(Object.keys(ring).sort(), ["changes", "id", "images", "imagesWithoutAlt", "pageId", "pageScore", "path", "seoDescription", "seoTitle", "title", "type"]);
+  assert.deepEqual(Object.keys(ring).sort(), ["audit", "changes", "id", "images", "imagesWithoutAlt", "pageId", "pageScore", "path", "seoDescription", "seoTitle", "title", "type"]);
   assert.match(ring.id, /^shr_[0-9a-f]{12}$/);
   assert.equal(ring.pageId, ctx.ids["/products/bague-or"]);
   assert.equal(typeof ring.pageScore, "number");

@@ -21,6 +21,11 @@ export interface GscImport {
   /** Position moyenne pondérée de la série, quand elle existe (pour les totaux). */
   seriesPosition: number | null;
   files: string[];
+  /**
+   * Requêtes par page (clé d'adresse `urlKey`), triées par clics décroissants. Seulement pour une lecture directe
+   * chez Google (dimensions page + requête) ; absent pour un export déposé, qui ne relie pas requêtes et pages.
+   */
+  pageQueries?: Record<string, OrganicQuery[]> | null;
 }
 
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;

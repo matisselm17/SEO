@@ -8,8 +8,15 @@ import path from "node:path";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type {
+  AutomationState,
   ChatEvent,
   ChatRequest,
+  CreateBatchRequest,
+  OptimizeRequest,
+  ShopifyBatchesResponse,
+  ShopifyBatchResponse,
+  UpdateAutomationRequest,
+  UpdateBatchItemRequest,
   ChatState,
   CompetitorsData,
   CoverageResponse,
@@ -50,6 +57,10 @@ import type { PageFacts } from "./analyse/grille.ts";
 import type { SiteRow, Store } from "./store.ts";
 import { coverage, isPageSort, issues, listPages, overview, recommendations } from "./views.ts";
 import { ShopifyService, type ResourceQuery } from "./shopify/service.ts";
+import { BatchService } from "./shopify/batches.ts";
+import { Optimizer } from "./automation/optimize.ts";
+import { getPolicy, getUsage, parsePolicy, POLICY_LIMITS, setPolicy } from "./automation/policy.ts";
+import { ALLOWED_DAYS, SearchConsoleClient, gscErrors } from "./gsc/google.ts";
 
 export interface AppDeps {
   config: Config;
@@ -62,10 +73,17 @@ export interface AppDeps {
   searchProvider: SearchProvider | null;
   /** Boutique Shopify ; construite depuis `config` si absente (les tests y passent un faux Shopify). */
   shopify?: ShopifyService;
+  /** Lots de corrections ; construits depuis `config` si absents. */
+  batches?: BatchService;
+  /** Optimisation par l'IA ; construite si absente. */
+  optimizer?: Optimizer;
+  /** Search Console en lecture directe ; construite depuis `config` si absente (les tests y passent un faux Google). */
+  searchConsole?: SearchConsoleClient;
 }
 
 const SHOPIFY_TYPES: ShopifyResourceType[] = ["product", "collection", "page", "article"];
 const SHOPIFY_MISSING = ["seo_title", "seo_description", "image_alt"] as const;
+const SHOPIFY_FIX = ["seo_title", "seo_description"] as const;
 
 export { MAX_PAGES_LIMITS };
 const PING_MS = 20_000;
@@ -104,13 +122,22 @@ async function readJson<T>(c: Context, optional = false): Promise<Partial<T>> {
 export function createApp(deps: AppDeps): Hono {
   const { config, store, hub, crawler } = deps;
   const shopify = deps.shopify ?? new ShopifyService(store, hub, { creds: config.shopify, writesEnabled: config.shopifyWritesEnabled });
+  const batches = deps.batches ?? new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply });
+  const optimizer = deps.optimizer ?? new Optimizer({ store, shopify, batches, client: deps.chatClient, model: config.anthropicModel });
+  const gsc = deps.searchConsole ?? new SearchConsoleClient({ file: config.googleServiceAccountFile, property: config.gscProperty });
   const app = new Hono();
-  /** 30 écritures par minute au plus dans la boutique. */
-  const shopifyWriteLimiter = new RateLimiter(30);
+  /** 30 écritures par minute au plus dans la boutique (partagées avec les lots, qui attendent leur tour). */
+  const shopifyWriteLimiter = shopify.writeLimiter;
+  /** Une lecture de la Search Console chez Google par minute et par site. */
+  const gscSyncLimiter = new RateLimiter(1);
   /** Une lecture complète de la boutique par minute au plus. */
   const shopifySyncLimiter = new RateLimiter(1);
   const chatLimiter = new RateLimiter(config.limits.chatPerMinute);
   const competitorsLimiter = new RateLimiter(config.limits.competitorsPerMinute);
+  /** Créations de lot (chacune relit jusqu'à 50 éléments chez Shopify), préparations par l'IA, enregistrements de règle. */
+  const batchCreateLimiter = new RateLimiter(10);
+  const optimizeLimiter = new RateLimiter(5);
+  const automationLimiter = new RateLimiter(10);
   /** Une seule réponse de l'assistant en cours par site. */
   const chatBusy = new Set<string>();
   const isUpload = (p: string, method: string) => method === "POST" && /^\/api\/sites\/[^/]+\/search-console$/.test(p);
@@ -128,6 +155,8 @@ export function createApp(deps: AppDeps): Hono {
       chat: { configured: !!deps.chatClient, model: deps.chatClient ? config.anthropicModel : null },
       competitors: { configured: !!deps.searchProvider },
       shopify: { configured: shopify.configured, writesEnabled: shopify.writesEnabled },
+      searchConsole: { configured: gsc.configured },
+      dataForSeo: { configured: !!config.dataForSeo },
     },
     version: config.version,
   });
@@ -376,6 +405,21 @@ export function createApp(deps: AppDeps): Hono {
     hub.emit(s.id, { type: "search_console", available: true });
     return json(store.searchConsole(s.id));
   });
+  app.post("/api/sites/:siteId/search-console/sync", async (c) => {
+    const s = site(c);
+    const body = await readJson<{ days: number }>(c, true);
+    const extra = Object.keys(body).filter((k) => k !== "days");
+    if (extra.length) throw errors.badRequest("Paramètre inconnu.", "Seul « days » est accepté.");
+    const days = body.days === undefined ? 28 : body.days;
+    if (!(ALLOWED_DAYS as readonly unknown[]).includes(days)) throw errors.badRequest("La période doit être de 28, 90 ou 480 jours.", "Choisissez 28, 90 ou 480.");
+    if (!gsc.configured) throw gscErrors.notConfigured();
+    gscSyncLimiter.take(`gsc:${s.id}`, "de lecture de la Search Console");
+    const { data } = await gsc.read(s.host, days as number);
+    if (!store.getSite(s.id)) throw errors.siteNotFound();
+    store.setGsc(s.id, data, "google");
+    hub.emit(s.id, { type: "search_console", available: true });
+    return json(store.searchConsole(s.id));
+  });
   app.delete("/api/sites/:siteId/search-console", (c) => {
     const s = site(c);
     store.deleteGsc(s.id);
@@ -456,7 +500,7 @@ export function createApp(deps: AppDeps): Hono {
         chain = chain.then(() => stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) })).catch(() => undefined);
       };
       try {
-        await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal, shopify });
+        await runChat({ client, model: config.anthropicModel, store, site: s, message, send, signal: controller.signal, shopify, batches });
         await chain;
       } finally {
         chatBusy.delete(s.id);
@@ -489,7 +533,9 @@ export function createApp(deps: AppDeps): Hono {
     if (type !== null && !(SHOPIFY_TYPES as string[]).includes(type)) throw errors.badRequest("Ce type d'élément n'existe pas.", "Utilisez product, collection, page ou article.");
     const missing = c.req.query("missing") || null;
     if (missing !== null && !(SHOPIFY_MISSING as readonly string[]).includes(missing)) throw errors.badRequest("Ce filtre n'existe pas.", "Utilisez seo_title, seo_description ou image_alt.");
-    const q: ResourceQuery = { type: type as ShopifyResourceType | null, missing: missing as ResourceQuery["missing"], q: (c.req.query("q") ?? "").slice(0, 200), ...pageParams(c) };
+    const fix = c.req.query("fix") || null;
+    if (fix !== null && !(SHOPIFY_FIX as readonly string[]).includes(fix)) throw errors.badRequest("Ce filtre n'existe pas.", "Utilisez fix=seo_title ou fix=seo_description.");
+    const q: ResourceQuery = { type: type as ShopifyResourceType | null, missing: missing as ResourceQuery["missing"], fix: fix as ResourceQuery["fix"], q: (c.req.query("q") ?? "").slice(0, 200), ...pageParams(c) };
     return getJson(c, await shopify.resources(s, q));
   });
   app.get("/api/sites/:siteId/shopify/resources/:resourceId", async (c) => {
@@ -514,6 +560,85 @@ export function createApp(deps: AppDeps): Hono {
     shopify.assertWritable();
     shopifyWriteLimiter.take("shopify", "de modification de la boutique");
     return json(await shopify.restore(s, c.req.param("changeId")), 201);
+  });
+
+  // ───────── Lots de corrections (docs/format-echange.md, « Lots de corrections »)
+
+  const batchesBase = "/api/sites/:siteId/shopify/batches";
+  app.get(batchesBase, async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    await shopify.connectedInfo(s).catch((err) => {
+      // Comme l'historique : les lots stockés restent consultables quand Shopify ne répond pas.
+      if (!(err instanceof HttpError && err.code === "shopify_unavailable")) throw err;
+    });
+    return getJson(c, { batches: batches.list(s) } satisfies ShopifyBatchesResponse);
+  });
+  app.post(batchesBase, async (c) => {
+    const s = site(c);
+    const body = await readJson<CreateBatchRequest>(c);
+    batchCreateLimiter.take("batches", "de création de lots");
+    return json({ batch: await batches.createManual(s, body) } satisfies ShopifyBatchResponse, 201);
+  });
+  app.get(`${batchesBase}/:batchId`, async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    return getJson(c, { batch: batches.get(s, c.req.param("batchId")) } satisfies ShopifyBatchResponse);
+  });
+  app.patch(`${batchesBase}/:batchId/items/:itemId`, async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    const body = await readJson<UpdateBatchItemRequest>(c);
+    return json({ batch: await batches.updateItem(s, c.req.param("batchId"), c.req.param("itemId"), body) } satisfies ShopifyBatchResponse);
+  });
+  app.post(`${batchesBase}/:batchId/apply`, async (c) => {
+    const s = site(c);
+    // Garde-fou n° 1 avant tout appel à Shopify : écritures activées côté serveur.
+    shopify.assertWritable();
+    return json({ batch: await batches.apply(s, c.req.param("batchId")) } satisfies ShopifyBatchResponse, 202);
+  });
+  app.post(`${batchesBase}/:batchId/restore`, async (c) => {
+    const s = site(c);
+    shopify.assertWritable();
+    return json({ batch: await batches.restore(s, c.req.param("batchId")) } satisfies ShopifyBatchResponse, 202);
+  });
+  app.post(`${batchesBase}/:batchId/stop`, async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    return json({ batch: await batches.stop(s, c.req.param("batchId")) } satisfies ShopifyBatchResponse);
+  });
+  app.delete(`${batchesBase}/:batchId`, async (c) => {
+    const s = site(c);
+    shopify.assertConfigured();
+    return json({ batch: batches.cancel(s, c.req.param("batchId")) } satisfies ShopifyBatchResponse);
+  });
+  app.post("/api/sites/:siteId/shopify/optimize", async (c) => {
+    const s = site(c);
+    const body = await readJson<OptimizeRequest>(c);
+    optimizeLimiter.take("optimize", "de préparation par l'IA");
+    return json({ batch: await optimizer.start(s, body, chatNotConfigured) } satisfies ShopifyBatchResponse, 202);
+  });
+
+  // ───────── Automatisation
+
+  const automationState = (s: SiteRow): AutomationState => ({
+    policy: getPolicy(store.db, s.id),
+    limits: POLICY_LIMITS,
+    autoAllowed: batches.autoAllowed,
+    writesEnabled: shopify.writesEnabled,
+    aiConfigured: !!deps.chatClient,
+    usage: getUsage(store.db, s.host, Date.now()),
+  });
+  app.get("/api/sites/:siteId/automation", (c) => getJson(c, automationState(site(c))));
+  app.put("/api/sites/:siteId/automation", async (c) => {
+    const s = site(c);
+    const body = await readJson<UpdateAutomationRequest>(c);
+    const extra = Object.keys(body).filter((k) => k !== "policy");
+    if (extra.length) throw errors.badRequest(`Réglage inconnu : ${extra[0].slice(0, 40)}.`, "Envoyez { policy: { … } }.");
+    const policy = parsePolicy(body.policy);
+    automationLimiter.take("automation", "d'enregistrement de la règle d'automatisation");
+    setPolicy(store.db, s.id, policy, new Date().toISOString());
+    return json(automationState(s));
   });
 
   // ───────── Routes inconnues et interface compilée

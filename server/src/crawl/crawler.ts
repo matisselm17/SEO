@@ -199,6 +199,7 @@ export class Crawler {
       finished_at: new Date().toISOString(),
       current_url: null,
       pages_queued: 0,
+      paused_until: null,
       error_json: error ? JSON.stringify(error) : null,
     });
     this.emitAudit(siteId, auditId);
@@ -322,6 +323,13 @@ export class Crawler {
       store.setCoverageState(audit.id, state);
     };
 
+    /** Date de reprise réelle de la pause en cours (fixée par le rythme adaptatif), null hors pause. */
+    const pausedIso = () => {
+      const t = throttle.pausedUntil();
+      return t === null ? null : new Date(t).toISOString();
+    };
+    // Une pause qui commence (ou s'allonge) est publiée tout de suite, même au milieu de la lecture du catalogue.
+    throttle.onPause = () => sync();
     const remainingSlots = () => Math.max(0, maxPages - done - failed - inflight);
     const sync = () => {
       store.updateAudit(audit.id, {
@@ -329,6 +337,7 @@ export class Crawler {
         pages_failed: failed,
         pages_queued: Math.min(queuedCount, remainingSlots()),
         current_url: inflight > 0 ? lastStarted : phaseUrl,
+        paused_until: pausedIso(),
       });
       writeCoverage();
       this.emitAudit(site.id, audit.id);

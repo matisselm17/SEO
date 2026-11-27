@@ -138,22 +138,24 @@ export interface ChangeRow {
   kind: "edit" | "restore";
   restores_change_id: string | null;
   restored_by_change_id: string | null;
+  /** Lot de corrections de cette écriture ; NULL pour une modification isolée. Figé dès l'insertion. */
+  batch_id: string | null;
   /** Ordre d'insertion (rowid), pour départager deux écritures de la même milliseconde. */
   rid?: number;
 }
 
-export type PendingInput = Omit<ChangeRow, "id" | "restored_by_change_id" | "rid" | "status" | "after_value" | "after_verified">;
+export type PendingInput = Omit<ChangeRow, "id" | "restored_by_change_id" | "rid" | "status" | "after_value" | "after_verified" | "batch_id"> & { batch_id?: string | null };
 
 /** Enregistre l'écriture AVANT l'appel à Shopify (statut « pending »). */
 export function insertPending(db: DB, c: PendingInput): ChangeRow {
   const id = newId("chg");
   db.prepare(
     `INSERT INTO shopify_changes (id, site_host, resource_id, resource_gid, resource_type, resource_title, path, field, image_id, image_gid, image_url, locale,
-      before_value, requested_value, after_value, after_verified, status, applied_at, kind, restores_change_id, restored_by_change_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'pending', ?, ?, ?, NULL)`,
+      before_value, requested_value, after_value, after_verified, status, applied_at, kind, restores_change_id, restored_by_change_id, batch_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'pending', ?, ?, ?, NULL, ?)`,
   ).run(
     id, c.site_host, c.resource_id, c.resource_gid, c.resource_type, c.resource_title, c.path, c.field, c.image_id, c.image_gid,
-    c.image_url, c.locale, c.before_value, c.requested_value, c.applied_at, c.kind, c.restores_change_id,
+    c.image_url, c.locale, c.before_value, c.requested_value, c.applied_at, c.kind, c.restores_change_id, c.batch_id ?? null,
   );
   return getChange(db, id)!;
 }
@@ -233,6 +235,7 @@ export function toChange(c: ChangeRow, latest: Map<string, string>): ShopifyChan
     kind: c.kind,
     restoresChangeId: c.restores_change_id,
     restoredByChangeId: c.restored_by_change_id,
+    batchId: c.batch_id ?? null,
     restorable: latest.get(fieldKey(c)) === c.id && c.restored_by_change_id === null,
   };
 }

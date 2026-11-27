@@ -68,6 +68,8 @@ export class Throttle {
   concurrency: number;
   delayMs: number;
   private pauseUntil = 0;
+  /** Appelé chaque fois que la pause commune commence ou s'allonge (le parcours publie alors la date de reprise). */
+  onPause: (() => void) | null = null;
   private waited: Record<Pool, number> = { pages: 0, catalogue: 0 };
 
   constructor(
@@ -83,6 +85,11 @@ export class Throttle {
   /** Temps d'attente déjà ajouté, par usage (pour le journal et les tests). */
   waitedMs(pool: Pool): number {
     return this.waited[pool];
+  }
+
+  /** Date de reprise prévue (millisecondes depuis l'époque) si une pause est en cours ; null sinon. */
+  pausedUntil(): number | null {
+    return this.pauseUntil > this.now() ? this.pauseUntil : null;
   }
 
   /** Temps restant avant la fin de la pause en cours (0 s'il n'y en a pas). */
@@ -130,6 +137,11 @@ export class Throttle {
     if (allowed <= 0) return;
     this.pauseUntil = Math.max(this.pauseUntil, now) + allowed;
     this.waited[pool] += allowed;
+    try {
+      this.onPause?.();
+    } catch {
+      /* la publication de la pause n'interrompt jamais le parcours */
+    }
   }
 
   /** Délai à observer après une requête de page ; le ralentissement compte dans le budget d'attente des pages. */

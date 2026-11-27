@@ -60,7 +60,7 @@ test("flux : au plus un message audit par 250 ms, le dernier état est toujours 
   const got: Array<{ t: number; n: number }> = [];
   hub.subscribe("s", (ev) => ev.type === "audit" && got.push({ t: Date.now(), n: ev.audit.pagesDone }));
   let n = 0;
-  const build = () => ({ type: "audit" as const, score: null, audit: { id: "a", state: "running" as const, startedAt: "", finishedAt: null, maxPages: 10, pagesDone: n, pagesFailed: 0, pagesQueued: 0, currentUrl: null, error: null } });
+  const build = () => ({ type: "audit" as const, score: null, audit: { id: "a", state: "running" as const, startedAt: "", finishedAt: null, maxPages: 10, pagesDone: n, pagesFailed: 0, pagesQueued: 0, currentUrl: null, pausedUntil: null, error: null } });
   for (let i = 0; i < 50; i++) {
     n = i;
     hub.emitAudit("s", build);

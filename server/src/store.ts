@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   CompetitorsData,
   OrganicPage,
+  OrganicQuery,
   PageCheck,
   PageDetail,
   PageSummary,
@@ -46,6 +47,8 @@ export interface AuditRow {
   pages_queued: number;
   current_url: string | null;
   error_json: string | null;
+  /** Pause du parcours après un refus passager du site : date de reprise prévue ; NULL hors pause. */
+  paused_until?: string | null;
   /** État de l'inventaire écrit par le parcours ; NULL pour une analyse antérieure à l'inventaire. */
   coverage_json?: string | null;
 }
@@ -140,7 +143,7 @@ export class Store {
   getAudit(id: string): AuditRow | null {
     return (this.db.prepare("SELECT * FROM audits WHERE id = ?").get(id) as unknown as AuditRow) ?? null;
   }
-  updateAudit(id: string, patch: Partial<Pick<AuditRow, "state" | "finished_at" | "pages_done" | "pages_failed" | "pages_queued" | "current_url" | "error_json">>): void {
+  updateAudit(id: string, patch: Partial<Pick<AuditRow, "state" | "finished_at" | "pages_done" | "pages_failed" | "pages_queued" | "current_url" | "error_json" | "paused_until">>): void {
     const keys = Object.keys(patch) as Array<keyof typeof patch>;
     if (!keys.length) return;
     const sql = `UPDATE audits SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`;
@@ -294,22 +297,49 @@ export class Store {
 
   // ───────── Search Console
 
-  getGsc(siteId: string): { importedAt: string; data: GscImport } | null {
-    const r = this.db.prepare("SELECT imported_at, data_json FROM search_console WHERE site_id = ?").get(siteId) as Row | undefined;
+  getGsc(siteId: string): { importedAt: string; source: "file" | "google"; data: GscImport } | null {
+    const r = this.db.prepare("SELECT imported_at, data_json, source FROM search_console WHERE site_id = ?").get(siteId) as Row | undefined;
     if (!r) return null;
-    return { importedAt: r.imported_at as string, data: JSON.parse(r.data_json as string) };
+    return { importedAt: r.imported_at as string, source: r.source === "google" ? "google" : "file", data: JSON.parse(r.data_json as string) };
   }
-  setGsc(siteId: string, data: GscImport): string {
+  /** Enregistre un import (fichier déposé ou lecture directe chez Google) ; remplace le précédent. */
+  setGsc(siteId: string, data: GscImport, source: "file" | "google" = "file"): string {
     const at = now();
     this.db
-      .prepare("INSERT INTO search_console (site_id, imported_at, data_json) VALUES (?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET imported_at = excluded.imported_at, data_json = excluded.data_json")
-      .run(siteId, at, JSON.stringify(data));
+      .prepare(
+        "INSERT INTO search_console (site_id, imported_at, data_json, source) VALUES (?, ?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET imported_at = excluded.imported_at, data_json = excluded.data_json, source = excluded.source",
+      )
+      .run(siteId, at, JSON.stringify(data), source);
     this.gscIndexCache.delete(siteId);
+    this.gscQueriesCache.delete(siteId);
     return at;
+  }
+  private gscQueriesCache = new Map<string, { importedAt: string; index: Map<string, OrganicQuery[]> | null }>();
+  /**
+   * Requêtes Search Console d'une page (par clé d'adresse) : seulement quand l'import relie les requêtes aux pages
+   * (lecture directe chez Google). null sinon ; [] si l'import les relie mais qu'aucune ne mène à cette page.
+   */
+  gscQueriesFor(siteId: string, key: string): OrganicQuery[] | null {
+    const at = this.getGscMeta(siteId);
+    if (!at) return null;
+    let cached = this.gscQueriesCache.get(siteId);
+    if (!cached || cached.importedAt !== at) {
+      const data = this.getGsc(siteId)!.data;
+      let index: Map<string, OrganicQuery[]> | null = null;
+      if (data.pageQueries) {
+        index = new Map();
+        for (const [k, list] of Object.entries(data.pageQueries)) index.set(k, list);
+      }
+      cached = { importedAt: at, index };
+      this.gscQueriesCache.set(siteId, cached);
+    }
+    if (!cached.index) return null;
+    return cached.index.get(key) ?? [];
   }
   deleteGsc(siteId: string): void {
     this.db.prepare("DELETE FROM search_console WHERE site_id = ?").run(siteId);
     this.gscIndexCache.delete(siteId);
+    this.gscQueriesCache.delete(siteId);
   }
   private gscIndexCache = new Map<string, { importedAt: string; index: Map<string, { clicks: number; impressions: number; position: number }> }>();
   /** Données Search Console par clé d'adresse, pour rapprocher les pages analysées. */
@@ -351,14 +381,15 @@ export class Store {
       content: r.content as string,
       createdAt: r.created_at as string,
       sources: JSON.parse(r.sources_json as string),
+      batchIds: r.batch_ids_json ? (JSON.parse(r.batch_ids_json as string) as string[]) : [],
     }));
   }
-  insertChatMessage(siteId: string, role: "user" | "assistant", content: string, sources: string[]): ChatMessage {
+  insertChatMessage(siteId: string, role: "user" | "assistant", content: string, sources: string[], batchIds: string[] = []): ChatMessage {
     const seq = ((this.db.prepare("SELECT MAX(seq) AS m FROM chat_messages WHERE site_id = ?").get(siteId) as Row).m as number | null) ?? 0;
-    const msg: ChatMessage = { id: newId("msg"), role, content, createdAt: now(), sources };
+    const msg: ChatMessage = { id: newId("msg"), role, content, createdAt: now(), sources, batchIds };
     this.db
-      .prepare("INSERT INTO chat_messages (id, site_id, seq, role, content, created_at, sources_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(msg.id, siteId, seq + 1, role, content, msg.createdAt, JSON.stringify(sources));
+      .prepare("INSERT INTO chat_messages (id, site_id, seq, role, content, created_at, sources_json, batch_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(msg.id, siteId, seq + 1, role, content, msg.createdAt, JSON.stringify(sources), JSON.stringify(batchIds));
     return msg;
   }
   clearChat(siteId: string): void {
@@ -400,6 +431,8 @@ export class Store {
       pagesFailed: a.pages_failed,
       pagesQueued: a.pages_queued,
       currentUrl: a.current_url,
+      // Seule une analyse en cours peut être en pause ; la date est celle prévue par le parcours, pas une estimation.
+      pausedUntil: a.state === "running" ? (a.paused_until ?? null) : null,
       error: a.error_json ? (JSON.parse(a.error_json) as ApiError["error"]) : null,
     };
   }
@@ -455,8 +488,8 @@ export class Store {
         title: facts.title ? cut(facts.title, 60) : null,
         description: facts.description ? cut(facts.description, 158) : null,
       },
-      // L'export « Performances » ne relie pas les requêtes aux pages.
-      queries: null,
+      // L'export « Performances » ne relie pas les requêtes aux pages ; la lecture directe chez Google, si.
+      queries: this.gscQueriesFor(r.site_id, r.url_key),
       // Renseigné par la route (ShopifyService.resourceIdForPage) : dépend de la boutique configurée et lue.
       shopifyResourceId: null,
     };
@@ -487,6 +520,7 @@ export class Store {
     return {
       available: true,
       importedAt: gsc.importedAt,
+      source: gsc.source,
       matching: pages ? { matched: pages.filter((p) => p.pageId !== null).length, total: pages.length } : null,
       period: gsc.data.period,
       totals: totalsOf(gsc.data),
