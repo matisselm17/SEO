@@ -1,6 +1,34 @@
 # Plan de validation des corrections Shopify sur un échantillon
 
-État au 27 novembre 2026 : **plan proposé, en attente de validation. Aucune de ces écritures n'a été faite.** Le mode automatique reste désactivé (`SHOPIFY_AUTO_APPLY` vide).
+État au 27 novembre 2026, 17 h 30 : **plan validé par le propriétaire et exécuté ; les huit tests sont conformes.** Le mode automatique est resté désactivé (`SHOPIFY_AUTO_APPLY` vide, aucune écriture automatique).
+
+## Résultats
+
+| # | Test | Écriture relue | Reste de l'élément | Annulation | Réapplication |
+|---|---|---|---|---|---|
+| 1 | Créer une description (produit) | identique | inchangé | champ redevenu vide | conforme |
+| 2 | Titre pour Google (produit) | identique | inchangé | champ redevenu vide | conforme |
+| 3 | Titre pour Google (collection) | identique | inchangé, voir note a | valeur d'origine exacte, espace final compris | conforme |
+| 4 | Traduction anglaise | identique | inchangé | « Hello » remis, voir note b | conforme |
+| 5 | Texte alternatif (image de produit) | identique | image inchangée (identifiant, fichier, dimensions) | redevenu vide | conforme |
+| 6 | Créer une description (page) | identique | inchangé | champ redevenu vide | conforme |
+| 7 | Titre pour Google (article) | identique | inchangé | champ redevenu vide | conforme |
+| 8 | Lot de 4 descriptions | 4 sur 4 | inchangé | lot annulé en bloc, 4 sur 4 | nouveau lot, 4 sur 4 |
+
+- 36 lignes d'historique (24 modifications, 12 annulations), toutes relues, sur 10 éléments.
+- Comparaison de la boutique entière avec la sauvegarde d'avant les tests : 214 éléments, 10 modifiés, tous dans le plan, et seulement sur les champs visés.
+- Un champ créé par le logiciel est de type `single_line_text_field` ; un champ existant garde son type (`string`).
+- Les écritures ont été envoyées par l'API du logiciel (mêmes garde-fous que l'interface, sans la fenêtre de confirmation) ; les relevés d'état ont été faits à part, directement dans Shopify.
+
+**Note a.** Modifier le titre d'une collection marque ses traductions anglaise et allemande de ce titre comme « à revoir » chez Shopify. C'est le comportement normal de Shopify ; les anciennes traductions restent affichées en attendant.
+
+**Note b.** Après l'annulation d'une traduction, le texte revient mais pas son indicateur « à revoir » : « Hello » était marqué périmé avant le test, il ne l'était plus après l'annulation. Sans effet sur ce que voient les visiteurs ; à corriger ou à documenter.
+
+**Non vérifié par ces tests :** que les pages publiques affichent les nouvelles valeurs et que les problèmes SEO correspondants sont résolus. C'est l'objet de la vérification par le moteur, qui reste à développer (voir plus bas).
+
+## Plan d'origine
+
+Le mode automatique reste désactivé.
 
 Déjà validé en réel : modifier une description pour Google existante sur un produit, puis l'annuler (`docs/premier-test-ecriture.md`).
 
