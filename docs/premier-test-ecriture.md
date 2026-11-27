@@ -12,7 +12,7 @@
 | Historique | deux lignes : la modification (marquée annulée) et l'annulation |
 | Écritures automatiques | aucune, `SHOPIFY_AUTO_APPLY` vide |
 
-Fait par l'interface (fiche du produit, confirmation avant/après, puis Historique → Annuler). La description fautive `llo` est donc toujours en place : la bonne description reste à réappliquer, sur décision du propriétaire.
+Fait par l'interface (fiche du produit, confirmation avant/après, puis Historique → Annuler). À 17 h 09, sur décision du propriétaire, la bonne description a été réappliquée par le même chemin : c'est la troisième écriture, et la valeur aujourd'hui en place. Elle reste annulable depuis l'historique.
 
 Toujours non vérifié en réel : la création d'un champ qui n'existe pas encore, le vidage d'un champ, le titre pour Google, le texte alternatif d'une image, les traductions, les pages et articles, les lots et le mode automatique.
 
