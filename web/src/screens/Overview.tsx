@@ -16,6 +16,8 @@ import { TrendChart } from "../ui/TrendChart";
 import { useMedia } from "../ui/useVirtual";
 import { CoverageSection } from "./Coverage";
 import { FailedPagesToggle, NoResults, QueryError, RelaunchButton, ReliabilityNote, auditLine, isRunning } from "./common";
+import { EvolutionSection } from "./Evolution";
+import { useFeature } from "../lib/features";
 
 function Delta({ value, previous }: { value: number; previous: number | null }) {
   if (previous === null) return <span className="delta delta--none">Première analyse</span>;
@@ -200,7 +202,7 @@ function OverviewSkeleton() {
 export function OverviewScreen({ site }: { site: SiteSummary }) {
   const q = useOverview(site.id);
   const settings = useSettings();
-  const chatReady = settings.data?.integrations.chat.configured === true;
+  const chatReady = useFeature("assistant") && settings.data?.integrations.chat.configured === true;
   const data = q.data;
   const reason = noResultsReason(site);
   const totalIssues = data ? data.counts.issues.critical + data.counts.issues.warning + data.counts.issues.info : 0;
@@ -262,6 +264,8 @@ export function OverviewScreen({ site }: { site: SiteSummary }) {
                   )}
                 </Section>
               </div>
+
+              <EvolutionSection site={site} />
 
               <Section
                 id="organic"

@@ -42,6 +42,8 @@ export function invalidateShopify(siteId: string) {
   invalidate(keys.shopifyAll(siteId));
   invalidate(`/sites/${encodeURIComponent(siteId)}/issues/`);
   invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
+  // Le bilan des corrections de l'évolution suit l'historique de la boutique.
+  invalidate(keys.progress(siteId));
 }
 
 const RESULT_KEYS = (id: string) => [keys.overview(id), keys.issues(id), keys.recommendations(id), keys.failedPages(id)];
@@ -53,6 +55,7 @@ export function invalidateSiteResults(siteId: string) {
   invalidate(`/sites/${encodeURIComponent(siteId)}/pages/`);
   invalidate(keys.chat(siteId));
   invalidate(keys.competitors(siteId));
+  invalidate(keys.progress(siteId));
 }
 
 /** Les résultats affichés ont changé d'analyse, ou d'état : tout ce qui en dépend est relu. */

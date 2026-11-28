@@ -18,10 +18,12 @@ import type { OptimizeRequest, ShopifyBatch, ShopifyBatchItem, ShopifyBatchSumma
 import { useAutomation, useShopifyBatch, useShopifyBatches } from "../lib/queries";
 import { NEW_BATCH, navigate, shopPath, sitePath } from "../lib/router";
 import {
-  BATCH_STATE, FIELD_COUNT, FIELD_GUIDE, FIELD_LABEL, FIELD_MAX, ITEM_STATE, ORIGIN_LABEL, OTHER_BATCH_RUNNING, SCOPE_TEXT, TOKENS_HINT, TOKENS_SCOPE, TYPE_LABEL,
+  BATCH_STATE, automationTabLabel, FIELD_COUNT, FIELD_GUIDE, FIELD_LABEL, FIELD_MAX, ITEM_STATE, ORIGIN_LABEL, OTHER_BATCH_RUNNING, SCOPE_TEXT, TOKENS_HINT, tokensScope, TYPE_LABEL,
   TYPE_ORDER, VERDICT_LABEL, applyBatch, batchBusy, cancelBatch, codeLength, createBatch, emptyMeaning, localeLabel, normalizeValue, optimize,
   processedCount, restoreBatch, stopBatch, updateBatchItem, valueProblem,
 } from "../lib/shopify";
+import { isEmbedded } from "../lib/embedded";
+import { useFeature } from "../lib/features";
 import { MAX_LINES, clearDraft, removeDraftLine, setDraftValue, useDraftLines, type DraftLine } from "../lib/batchDraft";
 import { fmtDateTime, fmtInt, fmtRelative, fmtWhen, pl, plural } from "../lib/format";
 import { Button, ButtonLink, Link } from "../ui/Button";
@@ -34,6 +36,7 @@ import { Skeleton, SkeletonRows, LoadingLabel } from "../ui/Skeleton";
 import { useToast } from "../ui/Toast";
 import { QueryError } from "./common";
 import { Thumb, Value } from "./ShopifyChanges";
+import { CorrectionStatus } from "../ui/CorrectionStatus";
 import { READONLY_ID, useSticky } from "./shopShared";
 
 const cut = (s: string, n: number) => (codeLength(s) > n ? [...s].slice(0, n - 1).join("").trimEnd() + "…" : s);
@@ -413,7 +416,7 @@ function BatchItemRow({ site, b, it, onBusy }: { site: SiteSummary; b: ShopifyBa
 
   const stateWord = it.state === "pending" && b.state === "applying" && it.selected ? "En attente d'écriture" : it.state === "pending" && b.state === "partial" && it.selected ? "Pas écrite" : ITEM_STATE[it.state];
   const StateIcon = it.state === "applied" ? CircleCheck : it.state === "conflict" ? TriangleAlert : it.state === "failed" ? CircleAlert : it.state === "restored" ? Undo2 : it.state === "skipped" ? CircleMinus : CircleDashed;
-  const tone = it.state === "applied" ? "good" : it.state === "conflict" ? "warning" : it.state === "failed" ? "critical" : "neutral";
+  const tone = it.state === "applied" ? "neutral" : it.state === "conflict" ? "warning" : it.state === "failed" ? "critical" : "neutral";
 
   return (
     <li className={`bline ${off ? "is-off" : ""} ${it.state === "conflict" || it.state === "failed" ? "is-problem" : ""} ${held ? "is-held" : ""}`}>
@@ -442,9 +445,9 @@ function BatchItemRow({ site, b, it, onBusy }: { site: SiteSummary; b: ShopifyBa
           {held ? (
             <span className="istate istate--warning"><Eye size={13} aria-hidden />À relire par vous</span>
           ) : draft || b.state === "preparing" ? (
-            off ? <span className="istate istate--neutral"><CircleMinus size={13} aria-hidden />Écartée</span> : null
+            off ? <span className="istate istate--neutral"><CircleMinus size={13} aria-hidden />Écartée</span> : draft && it.state === "pending" ? <CorrectionStatus status="proposed" /> : null
           ) : (
-            <span className={`istate istate--${tone}`}><StateIcon size={13} aria-hidden />{stateWord}</span>
+            it.state === "applied" ? <CorrectionStatus status={it.correctionStatus ?? "applied"} /> : it.state === "restored" ? <CorrectionStatus status="cancelled" /> : <span className={`istate istate--${tone}`}><StateIcon size={13} aria-hidden />{stateWord}</span>
           )}
           {it.autoApplied && <span className="bauto"><Zap size={12} aria-hidden />Sans validation humaine</span>}
         </span>
@@ -505,7 +508,7 @@ function BatchItemRow({ site, b, it, onBusy }: { site: SiteSummary; b: ShopifyBa
           )}
           {it.changeId && (it.state === "applied" || it.state === "restored") && (
             <Link to={`${sitePath(site.id, "shopify", it.resourceId)}?modif=${encodeURIComponent(it.changeId)}`} className="text-link bline__hist">
-              <HistoryIcon size={13} aria-hidden /> Voir la modification dans l'historique de l'élément
+              <HistoryIcon size={13} aria-hidden /> {it.state === "applied" && !it.locale ? "Voir la vérification dans l'historique de l'élément" : "Voir la modification dans l'historique de l'élément"}
             </Link>
           )}
           {it.field !== "image_alt" && (
@@ -986,6 +989,7 @@ export function OptimizeDialog({ site, open, onClose }: { site: SiteSummary; ope
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const max = p?.maxChangesPerRun ?? 10;
+  const assistant = useFeature("assistant");
   useEffect(() => {
     if (!open) return;
     setError(null);
@@ -1038,14 +1042,14 @@ export function OptimizeDialog({ site, open, onClose }: { site: SiteSummary; ope
       <div className="notice notice--info" role="note">
         <CircleMinus size={16} className="notice__icon" aria-hidden />
         <div className="notice__body">
-          <p className="notice__title">L'automatisation est arrêtée pour ce site</p>
-          <p className="notice__text">Le niveau choisi est « L'IA ne prépare rien ». Choisissez « L'IA prépare, vous validez » dans l'onglet Automatisation pour lui demander des propositions.</p>
-          <div className="notice__actions"><ButtonLink to={shopPath(site.id, "automation")} size="sm" onClick={onClose}>Ouvrir l'automatisation</ButtonLink></div>
+          <p className="notice__title">{isEmbedded() ? "Les propositions de l'IA sont arrêtées pour ce site" : "L'automatisation est arrêtée pour ce site"}</p>
+          <p className="notice__text">Le niveau choisi est « L'IA ne prépare rien ». Choisissez « L'IA prépare, vous validez » dans l'onglet {automationTabLabel(isEmbedded())} pour lui demander des propositions.</p>
+          <div className="notice__actions"><ButtonLink to={shopPath(site.id, "automation")} size="sm" onClick={onClose}>{isEmbedded() ? "Ouvrir les propositions de l'IA" : "Ouvrir l'automatisation"}</ButtonLink></div>
         </div>
       </div>
     );
   } else if (fields.length === 0) {
-    body = <p className="muted">La règle n'autorise l'IA sur aucun champ. Ajoutez-en dans l'onglet Automatisation.</p>;
+    body = <p className="muted">La règle n'autorise l'IA sur aucun champ. Ajoutez-en dans l'onglet {automationTabLabel(isEmbedded())}.</p>;
   } else {
     body = (
       <div className="optim">
@@ -1073,14 +1077,14 @@ export function OptimizeDialog({ site, open, onClose }: { site: SiteSummary; ope
             <div className={`field__control optim__count ${countError ? "is-invalid" : ""}`}>
               <input id="optim-count" className="field__input" type="number" inputMode="numeric" min={1} max={max} value={count} onChange={(e) => setCount(e.target.value)} aria-describedby="optim-count-hint" aria-invalid={countError ? true : undefined} />
             </div>
-            <p className={countError ? "field__error" : "field__hint"} id="optim-count-hint">{countError ?? `${fmtInt(max)} au plus par lot (règle d'automatisation).`}</p>
+            <p className={countError ? "field__error" : "field__hint"} id="optim-count-hint">{countError ?? `${fmtInt(max)} au plus par lot (règle ${isEmbedded() ? "des propositions de l'IA" : "d'automatisation"}).`}</p>
           </div>
         </div>
         <ul className="optim__facts">
           <li><span className="optim__k">L'IA remplace</span><span>{SCOPE_TEXT[s.policy.scope].label}. D'abord les éléments dont la page analysée est en défaut.</span></li>
           <li>
             <span className="optim__k">Jetons d'IA</span>
-            <span>{tokensLeft === 0 ? <strong>Limite de préparation du jour atteinte</strong> : <>{fmtTokens(tokensLeft)} restants aujourd'hui sur {fmtTokens(s.policy.aiTokensPerDay)}</>}{tokensLeft === 0 ? `, remise à zéro ${fmtWhen(s.usage.resetsAt)}` : ""}. <span className="subtle">{TOKENS_SCOPE} {TOKENS_HINT}</span></span>
+            <span>{tokensLeft === 0 ? <strong>Limite de préparation du jour atteinte</strong> : <>{fmtTokens(tokensLeft)} restants aujourd'hui sur {fmtTokens(s.policy.aiTokensPerDay)}</>}{tokensLeft === 0 ? `, remise à zéro ${fmtWhen(s.usage.resetsAt)}` : ""}. <span className="subtle">{tokensScope(assistant)} {TOKENS_HINT}</span></span>
           </li>
           <li>
             <span className="optim__k">Ensuite</span>

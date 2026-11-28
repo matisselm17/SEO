@@ -19,6 +19,7 @@
  */
 import type {
   Evidence,
+  Progress,
   IssueDetail,
   ShopifyChange,
   ShopifyChangeRequest,
@@ -40,14 +41,17 @@ import { errors, HttpError } from "../errors.ts";
 import type { EventHub } from "../events.ts";
 import { RateLimiter } from "../http.ts";
 import type { SiteRow, Store } from "../store.ts";
-import { ShopifyAuth, ShopifyError, ShopifyWritesDisabledError, type ShopifyCredentials } from "./auth.ts";
+import { ShopifyAuth, ShopifyError, ShopifyWritesDisabledError, type ShopifyAppMode, type ShopifyCredentials, type TokenStore } from "./auth.ts";
 import { readAllResources, readerFor, readLocales, readResource, readResourceText, readShopInfo, readTranslations, toResourceInput, type Gql, type LiveImage, type LiveResource, type LiveTranslations } from "./read.ts";
 import {
   changeCounts,
   changesFor,
+  correctionStatus,
   getChange,
   getResource,
   insertPending,
+  lastVerification,
+  lastVerifications,
   latestByField,
   markApplied,
   markFailed,
@@ -67,6 +71,7 @@ import {
   type ResourceRow,
 } from "./repo.ts";
 import { ShopifyUserError, writeProductImageAlt, writerFor, writeSeo, writeTranslation, type Mutate } from "./write.ts";
+import { CorrectionVerifier, type VerifierOptions } from "./verification.ts";
 
 export const CONNECTION_TTL_MS = 60_000;
 const ERROR_TTL_MS = 10_000;
@@ -184,6 +189,10 @@ export const shopifyErrors = {
 export function fromShopify(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
   if (err instanceof ShopifyWritesDisabledError) return shopifyErrors.writesDisabled();
+  if (err instanceof ShopifyError && (err.code === "no_session" || err.code === "session_rejected")) {
+    // Mode intégré : pas d'accès à la boutique tant qu'une requête identifiée n'en a pas obtenu un.
+    return new HttpError(502, "shopify_unavailable", "La connexion à la boutique Shopify doit être rétablie.", "Ouvrez l'application depuis votre administration Shopify.", { retryable: true });
+  }
   if (err instanceof ShopifyError) {
     const scope = /Required access:\s*`?([a-z_]+)`?/i.exec(err.message)?.[1];
     if (err.code === "graphql" && scope) return shopifyErrors.missingScope(scope);
@@ -221,8 +230,16 @@ interface ConnectionInfo {
 export interface ShopifyServiceOptions {
   creds: ShopifyCredentials | null;
   writesEnabled: boolean;
+  /** Stratégie d'obtention du jeton (SHOPIFY_APP_MODE) ; `local` par défaut. */
+  appMode?: ShopifyAppMode;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** Vérification des corrections sur la page publique (les tests y passent un faux chargement). */
+  verification?: VerifierOptions;
+  /** Mode intégré : magasin du couple de jetons de cette boutique (chiffré en base en production). */
+  tokenStore?: TokenStore;
+  /** Limite des écritures par minute, partagée entre les boutiques (limites communes au serveur). */
+  writeLimiter?: RateLimiter;
 }
 
 export interface ResourceQuery {
@@ -277,8 +294,11 @@ export interface LineRequest {
 export class ReadQueue {
   private tail: Promise<unknown> = Promise.resolve();
   private last = 0;
+  /** Lectures en file ou en cours. */
+  pending = 0;
   constructor(private gapMs: number) {}
   run<T>(fn: () => Promise<T>): Promise<T> {
+    this.pending++;
     const go = async (): Promise<T> => {
       const wait = this.last + this.gapMs - Date.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -286,6 +306,7 @@ export class ReadQueue {
         return await fn();
       } finally {
         this.last = Date.now();
+        this.pending--;
       }
     };
     const p = this.tail.then(go, go);
@@ -306,6 +327,7 @@ export class ShopifyService {
   readonly writeLimiter: RateLimiter;
   private readonly gql: Gql | null;
   private readonly mutate: Mutate | null;
+  private readonly auth: ShopifyAuth | null;
   private readonly now: () => number;
   private cache: { at: number; ok: true; info: ConnectionInfo } | { at: number; ok: false; error: HttpError } | null = null;
   private pendingInfo: Promise<ConnectionInfo> | null = null;
@@ -313,6 +335,8 @@ export class ShopifyService {
   private syncing = new Map<string, Promise<ShopifyState>>();
   /** Écritures en cours dans ce processus (lignes « pending » à ne pas réconcilier). */
   private inflight = new Set<string>();
+  /** Relecture de la page publique après une correction (aucune écriture dans la boutique). */
+  readonly verifier: CorrectionVerifier;
 
   constructor(
     private store: Store,
@@ -322,12 +346,113 @@ export class ShopifyService {
     this.configured = !!opts.creds;
     this.writesEnabled = this.configured && opts.writesEnabled === true;
     this.now = opts.now ?? Date.now;
-    this.writeLimiter = new RateLimiter(30, this.now);
+    this.writeLimiter = opts.writeLimiter ?? new RateLimiter(30, this.now);
     const fetchImpl = opts.fetchImpl ?? fetch;
-    const auth = opts.creds ? new ShopifyAuth(opts.creds, fetchImpl, this.now) : null;
+    const auth = opts.creds ? new ShopifyAuth(opts.creds, fetchImpl, this.now, { mode: opts.appMode ?? "local", tokenStore: opts.tokenStore }) : null;
+    this.auth = auth;
     this.gql = auth ? readerFor(auth, fetchImpl) : null;
     // Le chemin d'écriture n'existe que si les écritures sont activées ; `shopifyMutate` le revérifie.
     this.mutate = auth ? writerFor(auth, this.writesEnabled, fetchImpl) : null;
+    this.verifier = new CorrectionVerifier(store, hub, opts.verification);
+  }
+
+  /**
+   * Mode intégré, après la vérification du jeton de session d'une requête : obtient un jeton d'accès par échange
+   * s'il n'y en a pas. `rejected` : Shopify a refusé le jeton de session (la requête reçoit 401). Tout autre échec
+   * ne bloque pas la requête : les routes qui appellent Shopify répondront `shopify_unavailable`.
+   */
+  async ensureSession(sessionToken: string): Promise<"ok" | "rejected"> {
+    if (!this.auth || this.auth.mode !== "embedded") return "ok";
+    try {
+      // Un échange vient d'aboutir : l'erreur de connexion gardée en mémoire n'a plus cours.
+      if (await this.auth.ensureSession(sessionToken)) {
+        if (this.cache && !this.cache.ok) this.cache = null;
+      }
+      return "ok";
+    } catch (err) {
+      if (err instanceof ShopifyError && err.code === "session_rejected") return "rejected";
+      // Ni jeton, ni secret, ni domaine dans ce journal : seulement le code et le statut.
+      console.warn(`[shopify] Échange du jeton de session impossible pour le moment (${err instanceof ShopifyError ? `${err.code}${err.status ? ` ${err.status}` : ""}` : "erreur"}).`);
+      return "ok";
+    }
+  }
+
+  /**
+   * Travail en cours dans ce jeu de services (lecture de la boutique, écriture, verrou, lecture qui prépare un lot,
+   * vérification en file ou en cours, demande de jeton en cours) : il ne doit pas être libéré de la mémoire.
+   */
+  busy(): boolean {
+    return this.syncing.size > 0 || this.inflight.size > 0 || this.locks.size > 0 || this.prepReads.pending > 0 || this.verifier.busy() || !!this.auth?.busy();
+  }
+
+  /** Désinstallation (mode intégré) : jetons oubliés en mémoire et en base, état de connexion gardé oublié. */
+  forgetSession(): void {
+    this.auth?.forget();
+    this.cache = null;
+  }
+
+  /**
+   * Mode intégré : l'application est-elle encore installée ? Lecture de l'identité de la boutique avec ses jetons, sans
+   * cache (docs/format-echange.md, « Appels de Shopify : désinstallation et vie privée (mode intégré) »).
+   * - `installed` : Shopify accepte les jetons ;
+   * - `refused` : jetons refusés définitivement, et seulement ainsi : le renouvellement reçoit un refus `401`
+   *   `invalid_request` pour le jeton de renouvellement encore enregistré en base, sans qu'un nouveau couple ait été
+   *   enregistré entre-temps (preuve que l'application n'est plus installée) ;
+   * - `no_tokens` : aucun jeton lisible (jetons absents, ou illisibles après un changement de clé) : pas une preuve ;
+   * - `unknown` : tout le reste (Shopify injoignable, 429, 5xx, réponse inattendue, erreur GraphQL, lecture refusée,
+   *   jetons expirés — renouvellement impossible —, tout autre refus du renouvellement : 400, 403, `invalid_client`,
+   *   autre code) : à reposer, jamais une preuve.
+   * Seul `refused` est une preuve ; `no_tokens` et `unknown` ne marquent ni n'effacent jamais rien.
+   * Pendant la vérification, un refus du renouvellement qui n'est pas définitif ne fait pas oublier les jetons.
+   */
+  async installationCheck(): Promise<"installed" | "refused" | "no_tokens" | "unknown"> {
+    const auth = this.auth;
+    if (!this.gql || !auth || auth.mode !== "embedded") return "unknown";
+    if (!auth.hasTokens()) return "no_tokens";
+    const saved = auth.pairsSaved;
+    return auth.verifying(async () => {
+      try {
+        await readShopInfo(this.gql!, true);
+        return "installed" as const;
+      } catch (err) {
+        if (err instanceof ShopifyError && err.code === "no_session" && err.revoked && auth.pairsSaved === saved && !auth.hasTokens()) return "refused" as const;
+        return "unknown" as const;
+      }
+    });
+  }
+
+  /** Forme de l'API des modifications d'un site, avec le statut de correction et la dernière relecture. */
+  private views(siteHost: string, rows: ChangeRow[], latest: Map<string, string>): ShopifyChange[] {
+    const last = rows.length ? lastVerifications(this.store.db, siteHost) : new Map();
+    return rows.map((c) => toChange(c, latest, { last: last.get(c.id) ?? null, verifying: this.verifier.isVerifying(c.id) }));
+  }
+
+  private view(c: ChangeRow, latest: Map<string, string>): ShopifyChange {
+    return toChange(c, latest, { last: lastVerification(this.store.db, c.id), verifying: this.verifier.isVerifying(c.id) });
+  }
+
+  /**
+   * POST …/shopify/changes/:changeId/verify : relit tout de suite la page publique de cette correction.
+   * Aucun appel à Shopify, aucune écriture : ne demande pas SHOPIFY_WRITES_ENABLED.
+   */
+  /** Statut de correction d'une modification (pour une ligne de lot) ; null si introuvable ou ligne « restore ». */
+  correctionStatusOf(changeId: string): ShopifyChange["correctionStatus"] {
+    const c = getChange(this.store.db, changeId);
+    if (!c || c.status !== "applied") return null;
+    return this.view(c, new Map()).correctionStatus;
+  }
+
+  /** Contrôles de la route verify avant de compter la demande dans la limite. */
+  assertVerifiable(site: SiteRow, changeId: string): void {
+    if (!this.configured) throw shopifyErrors.notConfigured();
+    this.verifier.assertVerifiable(site, changeId);
+  }
+
+  async verify(site: SiteRow, changeId: string): Promise<ShopifyChange> {
+    if (!this.configured) throw shopifyErrors.notConfigured();
+    await this.verifier.verifyNow(site, changeId);
+    const c = getChange(this.store.db, changeId)!;
+    return this.view(c, latestByField(this.store.db, site.host, c.resource_id));
   }
 
   // ───── Connexion
@@ -341,7 +466,7 @@ export class ShopifyService {
     }
     this.pendingInfo ??= (async () => {
       try {
-        const shop = await readShopInfo(this.gql!);
+        const shop = await readShopInfo(this.gql!, this.auth?.mode === "embedded");
         let locales = { primary: null as string | null, others: [] as string[] };
         if (hasScope(shop.scopes, "read_locales")) {
           try {
@@ -364,11 +489,30 @@ export class ShopifyService {
     return this.pendingInfo;
   }
 
+  /**
+   * Mode intégré : nom et domaine principal de la boutique (sans `www.` ; son domaine myshopify si elle n'a pas de
+   * domaine public), pour créer son site. Lève l'erreur affichable si Shopify ne répond pas ou si aucun jeton n'est utilisable.
+   */
+  async shopIdentity(): Promise<{ name: string | null; host: string | null }> {
+    const info = await this.info();
+    return { name: info.name, host: info.host };
+  }
+
   /** Connexion de la boutique de ce site ; lève l'erreur de l'état (non configurée, autre boutique, Shopify injoignable). */
   private async connected(site: SiteRow): Promise<ConnectionInfo> {
     const info = await this.info();
-    if (!info.host || info.host !== site.host) throw shopifyErrors.otherShop(info.host);
+    if (!this.owns(site, info)) throw shopifyErrors.otherShop(info.host);
     return info;
+  }
+
+  /**
+   * Ce site est-il celui de la boutique connectée ? Mode local : l'hôte du site est le domaine principal de la
+   * boutique. Mode intégré : le site est rattaché à cette boutique (`shop_domain`), preuve directe de propriété ;
+   * le domaine principal peut avoir changé depuis la création du site sans que la boutique perde son accès.
+   */
+  private owns(site: SiteRow, info: ConnectionInfo): boolean {
+    if (this.auth?.mode === "embedded") return !!site.shop_domain && site.shop_domain === this.auth.storeDomain;
+    return !!info.host && info.host === site.host;
   }
 
   async connection(site: SiteRow): Promise<ShopifyConnection> {
@@ -390,7 +534,7 @@ export class ShopifyService {
     } catch (err) {
       return { ...base, state: "error", error: fromShopify(err).toErrorObject() };
     }
-    if (!info.host || info.host !== site.host) return { ...base, state: "other_shop", shopName: info.name, shopHost: info.host };
+    if (!this.owns(site, info)) return { ...base, state: "other_shop", shopName: info.name, shopHost: info.host };
     return {
       ...base,
       state: "connected",
@@ -668,7 +812,7 @@ export class ShopifyService {
       audit: page?.audit ?? null,
       imageList: live.imageList.map((i) => ({ id: i.id, url: i.url, alt: i.alt })),
       translations: this.translationList(info, live, tr),
-      history: history.map((c) => toChange(c, latest)),
+      history: this.views(site.host, history, latest),
       editable: {
         seo_title: !reasons.seo_title,
         seo_description: !reasons.seo_description,
@@ -915,6 +1059,14 @@ export class ShopifyService {
         } catch (err) {
           console.error("[shopify] modification acceptée par Shopify mais non finalisée dans le journal :", err instanceof Error ? scrub(err.message) : "erreur");
         }
+        // Une écriture acceptée n'est pas une correction vérifiée : la page publique sera relue. Jamais bloquant.
+        if (row.status === "applied" && row.kind === "edit") {
+          try {
+            this.verifier.schedule(site.id, row.id);
+          } catch (err) {
+            console.error("[vérification] relecture non programmée :", err instanceof Error ? scrub(err.message).slice(0, 200) : "erreur");
+          }
+        }
         if (verified) {
           try {
             updateResource(this.store.db, site.id, toResourceInput(verified.live));
@@ -924,7 +1076,12 @@ export class ShopifyService {
         }
         this.hub.emit(site.id, { type: "shopify" });
         const latest = latestByField(this.store.db, site.host, row.resource_id);
-        const change = toChange(getChange(this.store.db, pending.id) ?? row, latest);
+        let change: ShopifyChange;
+        try {
+          change = this.view(getChange(this.store.db, pending.id) ?? row, latest);
+        } catch {
+          change = toChange(getChange(this.store.db, pending.id) ?? row, latest);
+        }
         if (!withResource) return { change, resource: null };
         const shown = verified ?? { live: patched(before.live, w), tr: patchedTr(before.tr, w) };
         const tr = verified ? await this.translations(info, verified.live.gid).catch(() => verified!.tr) : shown.tr;
@@ -1034,8 +1191,39 @@ export class ShopifyService {
     await this.connectedOrLocal(site, () => !!syncedAt(this.store.db, site.id) || changesFor(this.store.db, site.host).length > 0);
     const all = changesFor(this.store.db, site.host);
     const latest = latestByField(this.store.db, site.host);
-    const changes: ShopifyChange[] = all.slice(offset, offset + limit).map((c) => toChange(c, latest));
+    const changes: ShopifyChange[] = this.views(site.host, all.slice(offset, offset + limit), latest);
     return { changes, total: all.length, offset, limit };
+  }
+
+  /**
+   * Compteurs des corrections du site pour l'évolution (Progress.corrections) : modifications appliquées depuis la
+   * création du site, lignes « restore » exclues, chacune comptée selon son statut de correction actuel (mêmes règles
+   * que `ShopifyChange.correctionStatus`). Aucun appel à Shopify. Tous à 0 sans boutique configurée.
+   */
+  correctionCounts(site: SiteRow): Progress["corrections"] {
+    const out: Progress["corrections"] = { verified: 0, applied: 0, failed: 0, cancelled: 0, resourcesOptimized: 0, firstAt: null, lastAt: null };
+    if (!this.configured) return out;
+    const rows = changesFor(this.store.db, site.host).filter((c) => c.kind !== "restore" && c.status === "applied" && c.applied_at >= site.created_at);
+    if (!rows.length) return out;
+    const last = lastVerifications(this.store.db, site.host);
+    const optimized = new Set<string>();
+    for (const c of rows) {
+      const status = correctionStatus(c, { last: last.get(c.id) ?? null, verifying: this.verifier.isVerifying(c.id) });
+      if (status === null) continue;
+      if (status === "verified") {
+        out.verified++;
+        optimized.add(c.resource_id);
+      } else if (status === "applied" || status === "verifying") out.applied++;
+      else if (status === "failed") out.failed++;
+      else if (status === "cancelled") out.cancelled++;
+      // Encore en place : tout sauf une correction annulée.
+      if (status !== "cancelled") {
+        if (out.firstAt === null || c.applied_at < out.firstAt) out.firstAt = c.applied_at;
+        if (out.lastAt === null || c.applied_at > out.lastAt) out.lastAt = c.applied_at;
+      }
+    }
+    out.resourcesOptimized = optimized.size;
+    return out;
   }
 
   /** Données stockées pour l'outil de l'assistant (aucun appel à Shopify). null sans lecture. */

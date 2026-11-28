@@ -15,6 +15,8 @@ import { ConfirmButton } from "../ui/ConfirmButton";
 import { Skeleton, LoadingLabel } from "../ui/Skeleton";
 import { useToast } from "../ui/Toast";
 import { QueryError, RelaunchButton } from "./common";
+import { isEmbedded } from "../lib/embedded";
+import { useFeatures } from "../lib/features";
 
 function Row({ title, hint, children }: { title: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -93,6 +95,9 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
   const toast = useToast();
   const [deleting, setDeleting] = useState(false);
   const s = q.data;
+  const embedded = isEmbedded();
+  // Sections facultatives masquées par le serveur : leur ligne n'apparaît pas ici non plus.
+  const f = useFeatures().on;
 
   const remove = async () => {
     setDeleting(true);
@@ -111,10 +116,11 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
 
   return (
     <>
-      <PageHeader title="Paramètres" description="Réglages de l'analyse, état des services connectés, et gestion de ce site." />
+      <PageHeader title="Paramètres" description={embedded ? "État des services connectés et informations sur votre boutique." : "Réglages de l'analyse, état des services connectés, et gestion de ce site."} />
       <QueryError q={q} />
 
-      <section className="settings-group" aria-labelledby="set-analysis">
+      {/* Mode intégré à Shopify : le plafond de pages se règle sur le serveur, et le site de la boutique ne se supprime pas. */}
+      {!embedded && <section className="settings-group" aria-labelledby="set-analysis">
         <h2 id="set-analysis" className="settings-group__title">Analyse</h2>
         <Row
           title="Plafond de pages par analyse"
@@ -122,7 +128,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
         >
           {s ? <MaxPagesForm s={s} /> : <Skeleton w={260} h={36} r={6} />}
         </Row>
-      </section>
+      </section>}
 
       <section className="settings-group" aria-labelledby="set-int">
         <h2 id="set-int" className="settings-group__title">Services connectés</h2>
@@ -130,20 +136,20 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
         {!s && <><LoadingLabel /><Skeleton h={64} /><div style={{ height: 8 }} /><Skeleton h={64} /><div style={{ height: 8 }} /><Skeleton h={64} /></>}
         {s && (
           <>
-            <Row
+            {f.assistant && <Row
               title="Assistant IA"
               hint={s.integrations.chat.configured ? <>Modèle utilisé : <span className="mono">{s.integrations.chat.model ?? "par défaut"}</span>.</> : <>Pour l'activer, ajoutez la variable <span className="mono">ANTHROPIC_API_KEY</span> dans l'environnement du serveur, puis redémarrez-le.</>}
             >
               <span className="setting__icon" aria-hidden><Bot size={16} /></span>
               <Status on={s.integrations.chat.configured} label={s.integrations.chat.configured ? "Activé" : "Non configuré"} />
-            </Row>
-            <Row
+            </Row>}
+            {f.competitors && <Row
               title="Relevé des concurrents"
               hint={s.integrations.competitors.configured ? "Les recherches Google sont relevées à la demande, depuis la section Concurrents." : <>Pour l'activer, ajoutez la variable <span className="mono">FIRECRAWL_API_KEY</span> dans l'environnement du serveur, puis redémarrez-le.</>}
             >
               <span className="setting__icon" aria-hidden><Users size={16} /></span>
               <Status on={s.integrations.competitors.configured} label={s.integrations.competitors.configured ? "Activé" : "Non configuré"} />
-            </Row>
+            </Row>}
             <Row
               title="Boutique Shopify"
               hint={
@@ -164,7 +170,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
               {s.integrations.shopify.configured && <Tag>{!s.integrations.shopify.writesEnabled ? "Lecture seule" : auto ? "Écritures automatiques actives" : "Modifications activées"}</Tag>}
               <Status on={s.integrations.shopify.configured} label={s.integrations.shopify.configured ? "Configurée" : "Non configurée"} />
             </Row>
-            <Row
+            {f.searchConsoleSync && <Row
               title="Lecture directe de la Search Console"
               hint={
                 s.integrations.searchConsole.configured ? (
@@ -176,8 +182,8 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
             >
               <span className="setting__icon" aria-hidden><BarChart3 size={16} /></span>
               <Status on={s.integrations.searchConsole.configured} label={s.integrations.searchConsole.configured ? "Compte présent" : "Non configurée"} />
-            </Row>
-            <Row
+            </Row>}
+            {f.analytics && <Row
               title="Google Analytics"
               hint={
                 s.integrations.analytics.configured ? (
@@ -189,8 +195,8 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
             >
               <span className="setting__icon" aria-hidden><MousePointerClick size={16} /></span>
               <Status on={s.integrations.analytics.configured} label={s.integrations.analytics.configured ? "Configuré" : "Non configuré"} />
-            </Row>
-            <Row
+            </Row>}
+            {f.pageSpeed && <Row
               title="Vitesse des pages (PageSpeed Insights)"
               hint={
                 s.integrations.pageSpeed.configured ? (
@@ -202,7 +208,7 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
             >
               <span className="setting__icon" aria-hidden><Gauge size={16} /></span>
               <Status on={s.integrations.pageSpeed.configured} label={s.integrations.pageSpeed.configured ? "Configurée" : "Non configurée"} />
-            </Row>
+            </Row>}
           </>
         )}
       </section>
@@ -218,12 +224,12 @@ export function SettingsScreen({ site }: { site: SiteSummary }) {
         <div className="settings-actions"><RelaunchButton site={site} /></div>
       </section>
 
-      <section className="settings-group settings-group--danger" aria-labelledby="set-danger">
+      {!embedded && <section className="settings-group settings-group--danger" aria-labelledby="set-danger">
         <h2 id="set-danger" className="settings-group__title">Supprimer ce site</h2>
-        <Row title={`Supprimer ${site.host}`} hint="Les analyses, les pages notées, l'export Search Console et la conversation avec l'assistant sont supprimés définitivement.">
+        <Row title={`Supprimer ${site.host}`} hint={f.assistant ? "Les analyses, les pages notées, l'export Search Console et la conversation avec l'assistant sont supprimés définitivement." : "Les analyses, les pages notées et l'export Search Console sont supprimés définitivement."}>
           <ConfirmButton icon={<Trash2 size={15} aria-hidden />} confirmLabel="Confirmer la suppression" onConfirm={remove} loading={deleting}>Supprimer le site</ConfirmButton>
         </Row>
-      </section>
+      </section>}
 
       {s && <p className="muted small settings-version">Chat SEO, version {s.version}</p>}
     </>

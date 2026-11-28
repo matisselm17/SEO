@@ -7,7 +7,7 @@ import { invalidateShopify } from "./live";
 import type {
   AutomationPolicy, AutomationState, CheckStatus, CreateBatchRequest, OptimizeRequest, ProposalOrigin, ShopifyBatch, ShopifyBatchItem,
   ShopifyBatchResponse, ShopifyBatchSummary, ShopifyBatchesResponse, ShopifyChange, ShopifyChangeRequest, ShopifyChangeResponse, ShopifyField,
-  ShopifyResourceResponse, ShopifyResourceType, ShopifyState, UpdateAutomationRequest, UpdateBatchItemRequest,
+  ShopifyResourceResponse, ShopifyResourceType, ShopifyState, ShopifyVerifyResponse, UpdateAutomationRequest, UpdateBatchItemRequest,
 } from "./types";
 
 export const FIELD_LABEL: Record<ShopifyField, string> = {
@@ -184,6 +184,31 @@ export async function restoreShopifyChange(siteId: string, changeId: string): Pr
   return res;
 }
 
+// ───────── Vérification d'une correction sur la page publique
+
+/**
+ * Relit la page publique pour une correction (rien n'est écrit dans la boutique). La réponse arrive quand la
+ * relecture est finie, jusqu'à une vingtaine de secondes. Disponible même quand les écritures sont désactivées.
+ */
+export async function verifyShopifyChange(siteId: string, changeId: string): Promise<ShopifyChange> {
+  const res = await sendJSON<ShopifyVerifyResponse>("POST", keys.shopifyVerify(siteId, changeId));
+  invalidateShopify(siteId);
+  return res.change;
+}
+
+/** Verdict d'un critère avant et après une correction, en mots simples. */
+export const CRITERION_LABEL: Record<CheckStatus, string> = { pass: "Validé", warn: "À améliorer", fail: "Non validé" };
+
+/** Une adresse venue du serveur n'est rendue en lien que si elle est en https. */
+export function safeHttpsUrl(url: string | null): string | null {
+  if (!url || !url.startsWith("https://")) return null;
+  try {
+    return new URL(url).href;
+  } catch {
+    return null;
+  }
+}
+
 // ───────── Ce que l'analyse a vu sur la page affichée
 
 /** Verdict de l'analyse sur le texte réellement affiché, en mots simples (jamais la couleur seule). */
@@ -223,12 +248,12 @@ export const BATCH_STATE: Record<ShopifyBatchSummary["state"], { label: string; 
 };
 
 export const ITEM_STATE: Record<ShopifyBatchItem["state"], string> = {
-  pending: "En attente",
-  applied: "Écrite",
+  pending: "Correction proposée",
+  applied: "Correction appliquée",
   conflict: "Valeur changée entre-temps",
   failed: "Refusée par Shopify",
   skipped: "Écartée",
-  restored: "Annulée",
+  restored: "Correction annulée",
 };
 
 /** Le lot est en cours de traitement côté serveur : on le relit régulièrement en plus du flux en direct. */
@@ -332,8 +357,22 @@ export const MODE_TEXT: Record<AutomationPolicy["mode"], { label: string; text: 
 /** « jetons d'IA » : l'unité de consommation de l'IA. */
 export const TOKENS_HINT = "Un jeton est l'unité de consommation de l'IA : environ trois quarts d'un mot lu ou écrit.";
 
+/** Texte d'un niveau, sans citer l'assistant quand cette section est masquée (Settings.features.assistant). */
+export function modeText(mode: AutomationPolicy["mode"], assistant: boolean): string {
+  if (assistant || mode === "propose") return MODE_TEXT[mode].text;
+  if (mode === "off") return "L'IA ne propose aucune correction. Vous pouvez toujours composer vos lots vous-même.";
+  const t = MODE_TEXT.auto.text;
+  const k = t.indexOf(" Ce que l'assistant");
+  const end = k >= 0 ? t.indexOf(".", k + 1) : -1;
+  return k >= 0 && end >= 0 ? t.slice(0, k) + t.slice(end + 1) : t;
+}
+
 /** Ce que limite le plafond de jetons : la préparation, pas l'écriture, ni la conversation avec l'assistant. */
 export const TOKENS_SCOPE = "Limite seulement « Préparer des corrections avec l'IA » : ce n'est pas une limite d'écriture, et la conversation avec l'assistant n'est pas comptée.";
+export const tokensScope = (assistant: boolean) => (assistant ? TOKENS_SCOPE : TOKENS_SCOPE.slice(0, TOKENS_SCOPE.indexOf(", et la conversation")) + ".");
+
+/** Nom de l'onglet de la règle : dans l'application Shopify, l'IA ne fait que proposer (jamais d'écriture seule). */
+export const automationTabLabel = (embedded: boolean) => (embedded ? "Propositions de l'IA" : "Automatisation");
 
 /** Filtre de contenu des écritures automatiques, en mots simples (format d'échange). */
 export const CONTENT_FILTER_TEXT = "Une proposition écrite sans relecture ne doit contenir ni adresse web, ni nom de domaine, ni adresse e-mail, ni numéro de téléphone, et doit reprendre un mot du nom de l'élément. Sinon elle reste dans le lot, à relire par vous.";

@@ -90,6 +90,8 @@ export interface FakeOptions {
   failReadsAfterMutation?: boolean;
   /** La mutation est appliquée, mais sa réponse se perd (Shopify injoignable). */
   loseMutationResponse?: boolean;
+  /** Domaine myshopify servi par ce faux Shopify (FAKE_CREDS.storeDomain par défaut). */
+  domain?: string;
 }
 
 export function fakeShopify(state: FakeState = defaultState(), opts: FakeOptions = {}) {
@@ -220,7 +222,7 @@ export function fakeShopify(state: FakeState = defaultState(), opts: FakeOptions
   const impl = (async (url: string, init: RequestInit) => {
     calls.all++;
     if (control.down) throw new TypeError("Shopify injoignable (simulé)");
-    if (!url.startsWith(`https://${FAKE_CREDS.storeDomain}/`)) throw new Error("adresse inattendue");
+    if (!url.startsWith(`https://${opts.domain ?? FAKE_CREDS.storeDomain}/`)) throw new Error("adresse inattendue");
     if (url.endsWith("/admin/oauth/access_token")) {
       calls.token++;
       return Response.json({ access_token: `jeton-secret-${calls.token}`, scope: state.scopes.join(","), expires_in: 86399 });

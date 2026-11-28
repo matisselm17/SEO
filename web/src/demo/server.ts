@@ -18,16 +18,17 @@
 import examples from "../../../docs/exemples/exemples.json";
 import type {
   ApiError, AuditStatus, ChatMessage, CompetitorsData, Coverage, CoverageRow, ErrorCode, FailedPage, IssueDetail, Overview, PageType,
-  SearchConsoleData, Settings, SiteEvent, SiteSummary,
+  Progress, ProgressPoint, SearchConsoleData, Settings, SiteEvent, SiteSummary,
 } from "../lib/types";
 import {
   LUNE, LUNE_CATALOGUE, LUNE_QUERIES, ORLUX, attachOrganic, buildCompetitors, buildPages, buildSearchConsole, catalogueIssuesOf, categoriesOf,
   issuesOf, mergeIssues, pageTypeOf, recommendationsOf, siteScore, strengthsOf, toIssue, type DemoPage, type SiteProfile,
 } from "./data";
 import {
-  DEMO_BATCH_IDS, aiConfiguredDemo, assistantBatch, ensureShop, handleAutomation, handleShopify, resourceIdForPath, shopifyConfigured,
+  DEMO_BATCH_IDS, aiConfiguredDemo, assistantBatch, demoCorrections, ensureShop, handleAutomation, handleShopify, resourceIdForPath, shopifyConfigured,
   shopifyWritesEnabled, type ShopCtx,
 } from "./shopify";
+import { demoEmbeddedMode } from "../lib/embedded";
 import { analyticsConfiguredDemo, handleAnalytics, handlePageSpeed, pageSpeedConfiguredDemo, speedFor, visitsFor, type GoogleCtx } from "./google";
 
 type Scenario =
@@ -72,8 +73,102 @@ function readGsc(): GscMode {
 }
 const gscMode = readGsc();
 
+/**
+ * Refus d'identification du mode intégré à Shopify, choisi avec ?acces=… (mémorisé pour l'onglet) :
+ *   (absent)        accès normal
+ *   refuse          toute requête répond 401 unauthorized (page ouverte hors de l'administration Shopify)
+ *   autre-boutique  toute requête répond 403 shop_not_allowed (le serveur ne sert plus cette boutique : application désinstallée)
+ *   illisible       toute requête répond 401 avec un corps illisible (texte de repli de l'interface)
+ */
+type AccessMode = "normal" | "refuse" | "autre-boutique" | "illisible";
+const ACCESS_MODES: AccessMode[] = ["normal", "refuse", "autre-boutique", "illisible"];
+function readAccess(): AccessMode {
+  const fromUrl = new URLSearchParams(location.search).get("acces") as AccessMode | null;
+  if (fromUrl && ACCESS_MODES.includes(fromUrl)) {
+    sessionStorage.setItem("demo-acces", fromUrl);
+    return fromUrl;
+  }
+  const saved = sessionStorage.getItem("demo-acces") as AccessMode | null;
+  return saved && ACCESS_MODES.includes(saved) ? saved : "normal";
+}
+const accessMode = readAccess();
+
+/** Lit un paramètre d'adresse de la démonstration, mémorisé pour l'onglet. */
+function readParam<T extends string>(name: string, values: readonly T[], fallback: T): T {
+  try {
+    const fromUrl = new URLSearchParams(location.search).get(name) as T | null;
+    if (fromUrl && values.includes(fromUrl)) {
+      sessionStorage.setItem(`demo-${name}`, fromUrl);
+      return fromUrl;
+    }
+    const saved = sessionStorage.getItem(`demo-${name}`) as T | null;
+    return saved && values.includes(saved) ? saved : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Sections masquées (Settings.features), avec ?masquer=… (liste séparée par des virgules, mémorisée pour l'onglet) :
+ *   rien (défaut)  toutes les sections présentes, comme en mode local
+ *   tout           toutes masquées, comme le mode intégré sans EMBEDDED_FEATURES
+ *   concurrents, visites, vitesse, assistant, lecture-gsc : seulement celles-là
+ * Les routes d'une section masquée répondent 403 not_in_embedded_mode, comme le serveur.
+ */
+const HIDE_NAMES = { concurrents: "competitors", visites: "analytics", vitesse: "pageSpeed", assistant: "assistant", "lecture-gsc": "searchConsoleSync" } as const;
+function readHidden(): Set<keyof Settings["features"]> {
+  const all = Object.values(HIDE_NAMES);
+  try {
+    const raw = new URLSearchParams(location.search).get("masquer");
+    if (raw !== null) sessionStorage.setItem("demo-masquer", raw);
+    const v = (raw ?? sessionStorage.getItem("demo-masquer") ?? "rien").trim();
+    if (v === "tout") return new Set(all);
+    return new Set(v.split(",").map((x) => HIDE_NAMES[x.trim() as keyof typeof HIDE_NAMES]).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+const hidden = readHidden();
+// Mode intégré (?integre=…) : la lecture de Google Analytics et de la Search Console n'y existe jamais.
+if (demoEmbeddedMode !== "non") {
+  hidden.add("analytics");
+  hidden.add("searchConsoleSync");
+}
+
+/**
+ * Évolution du site Atelier Lune (GET …/progress), avec ?evolution=… (mémorisé pour l'onglet) :
+ *   plusieurs (défaut)  six analyses terminées, comparaison à périmètre égal (40 pages communes)
+ *   une                 une seule analyse terminée : pas de comparaison
+ *   sans-comparaison    six analyses, mais le détail des pages de la première n'est plus conservé (comparison: null)
+ * « Aucune analyse terminée » : ?demo=analyse-figee (première analyse en cours) ou ?verrou=premiere.
+ */
+type EvolutionMode = "plusieurs" | "une" | "sans-comparaison";
+const evolutionMode = readParam<EvolutionMode>("evolution", ["plusieurs", "une", "sans-comparaison"], "plusieurs");
+
+/**
+ * Boutique protégée par un mot de passe (storefront_locked), avec ?verrou=… (mémorisé pour l'onglet) :
+ *   non (défaut)
+ *   premiere  la première analyse d'Atelier Lune a échoué : aucun résultat
+ *   relance   la dernière analyse a échoué ; les résultats de la précédente restent affichés
+ * « Relancer l'analyse » échoue de nouveau après 1,5 s tant que le paramètre est actif.
+ */
+type LockMode = "non" | "premiere" | "relance";
+const lockMode = readParam<LockMode>("verrou", ["non", "premiere", "relance"], "non");
+const LOCKED_ERROR = {
+  code: "storefront_locked" as const,
+  message: "Votre boutique en ligne est protégée par un mot de passe : ses pages publiques ne peuvent pas être analysées.",
+  action: "Retirez le mot de passe (Boutique en ligne > Préférences), puis relancez l'analyse. En attendant, les titres, descriptions et textes d'images lus dans Shopify restent disponibles dans la section Boutique Shopify.",
+};
+
 const settings: Settings = {
   ...exSettings,
+  features: {
+    competitors: !hidden.has("competitors"),
+    analytics: !hidden.has("analytics"),
+    pageSpeed: !hidden.has("pageSpeed"),
+    assistant: !hidden.has("assistant"),
+    searchConsoleSync: !hidden.has("searchConsoleSync"),
+  },
   integrations: {
     chat: scenario === "sans-config" || !aiConfiguredDemo ? { configured: false, model: null } : exSettings.integrations.chat,
     competitors: { configured: scenario !== "sans-config" },
@@ -111,6 +206,11 @@ interface DemoSite {
   /** Dernière analyse lancée (SiteSummary.audit). */
   current: Run | null;
   previousScore: number | null;
+  /**
+   * Analyses terminées avant celle affichée, de la plus ancienne à la plus récente. `pages` : le détail de ses
+   * pages, gardé pour la première seulement (comparaison à périmètre égal) ; null s'il n'est plus conservé.
+   */
+  past: { point: ProgressPoint; pages: DemoPage[] | null }[];
   gsc: Extract<SearchConsoleData, { available: true }> | null;
   competitors: CompetitorsData;
   chat: ChatMessage[];
@@ -142,7 +242,11 @@ function sync(site: DemoSite) {
   const cur = site.current;
   if (cur) {
     if (cur.audit.state === "done") {
-      if (site.shown && site.shown !== cur && site.shown.audit.state === "done") site.previousScore = siteScore(site.shown.pages);
+      if (site.shown && site.shown !== cur && site.shown.audit.state === "done") {
+        site.previousScore = siteScore(site.shown.pages);
+        // L'analyse affichée jusqu'ici rejoint l'évolution (ses pages, si c'est la première).
+        site.past.push({ point: pointOf(site.shown, severityCounts(issuesFor(site))), pages: site.past.length === 0 ? site.shown.pages : null });
+      }
       site.shown = cur;
     } else if ((!site.shown || site.shown.audit.state !== "done") && cur.pages.length > 0) {
       site.shown = cur;
@@ -194,7 +298,7 @@ function makeSite(id: string, name: string, profile: SiteProfile, createdAt: str
     },
     profile, truth, inventory, inventoryMode: opts.inventoryMode ?? "sitemap", platform: opts.platform === undefined ? "shopify" : opts.platform,
     catalogueOk: opts.catalogueOk ?? true, otherLocales: opts.otherLocales ?? [],
-    shown: run, current: run, previousScore: opts.previous, gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
+    shown: run, current: run, previousScore: opts.previous, past: [], gsc, competitors: opts.competitors, chat: opts.chat, timer: null, listeners: new Set(),
   };
   sync(site);
   return site;
@@ -221,6 +325,64 @@ if (scenario !== "vide") {
       competitors: scenario === "sans-config" ? { available: false, reason: "not_configured" } : { available: false, reason: "not_run" }, chat: [],
     }),
   );
+}
+
+/**
+ * Évolution d'Atelier Lune (?evolution=…) : une première analyse plus faible, le 20 novembre, dont deux pages
+ * n'existent plus, puis quatre analyses intermédiaires jusqu'à celle d'avant (note 61, comme `score.previous`).
+ * Les compteurs de la première sont calculés sur ses pages ; ceux de l'affichée, comme la Vue d'ensemble.
+ */
+function seedLuneHistory(site: DemoSite) {
+  if (evolutionMode === "une" || site.shown?.audit.state !== "done") {
+    site.previousScore = null;
+    return;
+  }
+  const worse: SiteProfile = {
+    ...site.profile,
+    seed: site.profile.seed + 40,
+    fail: Object.fromEntries(Object.entries(site.profile.fail).map(([k, v]) => [k, v === 0 ? 0 : Math.min(0.95, v + 0.2)])),
+    paths: [
+      ...site.profile.paths.slice(0, site.truth.length - 2),
+      { path: "/pages/promotions-ete", title: "Promotions", h1: "Promotions d'été", words: 120 },
+      { path: "/pages/ancien-atelier", title: null, h1: "Notre ancien atelier", words: 210 },
+    ],
+  };
+  const start = "2026-11-20T09:31:00.000Z";
+  const initialPages = buildPages(worse, start);
+  const initialRun: Run = doneRun(initialPages, start, []);
+  const initialPoint = pointOf(initialRun, severityCounts(issuesOf(initialPages)));
+  const currentCounts = severityCounts(issuesFor(site));
+  const dates = ["2026-11-21T16:05:00.000Z", "2026-11-22T10:12:00.000Z", "2026-11-24T08:47:00.000Z", "2026-11-25T11:20:00.000Z"];
+  const target = site.previousScore ?? 61;
+  const mid = dates.map((d, k) => {
+    const t = (k + 1) / dates.length;
+    const lerp = (a: number, b: number) => Math.round(a + (b - a) * t);
+    const run = doneRun(site.truth, d, []);
+    return {
+      point: {
+        ...pointOf(run, {
+          critical: lerp(initialPoint.issues.critical, currentCounts.critical),
+          warning: lerp(initialPoint.issues.warning, currentCounts.warning),
+          info: lerp(initialPoint.issues.info, currentCounts.info),
+        }),
+        score: k === dates.length - 1 ? target : Math.round(initialPoint.score + (target - initialPoint.score) * t * (0.8 + 0.1 * (k % 2))),
+      },
+      pages: null,
+    };
+  });
+  site.past = [{ point: initialPoint, pages: evolutionMode === "sans-comparaison" ? null : initialPages }, ...mid];
+}
+
+function lockedRun(): Run {
+  const at = new Date(Date.now() - 4 * 60_000).toISOString();
+  return {
+    audit: {
+      id: nextId("aud"), state: "failed", startedAt: at, finishedAt: new Date(Date.parse(at) + 3000).toISOString(), maxPages: settings.maxPagesDefault,
+      pagesDone: 0, pagesFailed: 0, pagesQueued: 0, currentUrl: null, pausedUntil: null, error: { ...LOCKED_ERROR },
+    },
+    pages: [],
+    failed: [],
+  };
 }
 
 if (scenario === "echec") {
@@ -388,6 +550,61 @@ function overviewOf(site: DemoSite): Overview {
   };
 }
 
+// ───────── Évolution (GET …/progress)
+
+function severityCounts(issues: IssueDetail[]): ProgressPoint["issues"] {
+  const c = { critical: 0, warning: 0, info: 0 };
+  issues.forEach((i) => c[i.severity]++);
+  return c;
+}
+
+function pointOf(run: Run, issues: ProgressPoint["issues"]): ProgressPoint {
+  return {
+    auditId: run.audit.id, finishedAt: run.audit.finishedAt ?? run.audit.startedAt, score: siteScore(run.pages) ?? 0,
+    pagesAnalyzed: run.pages.length, maxPages: run.audit.maxPages, issues,
+  };
+}
+
+/** Comparaison à périmètre égal, calculée pour de vrai sur les pages communes (même chemin). */
+function compare(initial: DemoPage[], current: DemoPage[]): Progress["comparison"] {
+  const before = new Map(initial.map((p) => [p.summary.path, p]));
+  const common = current.filter((p) => before.has(p.summary.path));
+  if (!common.length) return null;
+  let fixed = 0, remaining = 0, added = 0;
+  for (const cur of common) {
+    const old = before.get(cur.summary.path)!;
+    for (const k of cur.detail.checks) {
+      const was = old.detail.checks.find((x) => x.id === k.id);
+      if (!was) continue;
+      const failed = was.status !== "pass";
+      const fails = k.status !== "pass";
+      if (failed && !fails) fixed++;
+      else if (failed && fails) remaining++;
+      else if (!failed && fails) added++;
+    }
+  }
+  const avg = (list: DemoPage[]) => Math.round(list.reduce((t, p) => t + p.summary.score, 0) / list.length);
+  return {
+    pagesInCommon: common.length, pagesOnlyInitial: initial.length - common.length, pagesOnlyCurrent: current.length - common.length,
+    scoreInitial: avg(common.map((p) => before.get(p.summary.path)!)), scoreCurrent: avg(common),
+    issuesFixed: fixed, issuesRemaining: remaining, issuesNew: added,
+  };
+}
+
+function progressOf(site: DemoSite): Progress {
+  const corrections = demoCorrections(shopCtx(site));
+  const done = site.shown && site.shown.audit.state === "done" ? site.shown : null;
+  const timeline = [...site.past.map((x) => x.point), ...(done ? [pointOf(done, severityCounts(issuesFor(site)))] : [])].slice(-50);
+  if (!timeline.length) {
+    return { available: false, initial: null, current: null, timeline: [], comparison: null, corrections };
+  }
+  const initial = site.past[0]?.point ?? timeline[0];
+  const current = timeline[timeline.length - 1];
+  const first = site.past[0];
+  const comparison = done && first && first.pages ? compare(first.pages, done.pages) : null;
+  return { available: true, initial, current, timeline, comparison, corrections };
+}
+
 // ───────── Flux
 
 function emit(site: DemoSite, e: SiteEvent) {
@@ -433,6 +650,16 @@ function startAudit(site: DemoSite, maxPages: number, frozenAt?: number) {
   site.current = run;
   sync(site);
   emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
+  if (lockMode !== "non" && site.summary.id === "site_8fk2") {
+    // Boutique toujours protégée : la page de départ mène à /password, l'analyse s'arrête aussitôt.
+    site.timer = setTimeout(() => {
+      run.audit = { ...run.audit, state: "failed", finishedAt: new Date().toISOString(), pagesQueued: 0, currentUrl: null, error: { ...LOCKED_ERROR } };
+      sync(site);
+      emit(site, { type: "audit", audit: run.audit, score: site.summary.score });
+      site.timer = null;
+    }, 1500) as unknown as ReturnType<typeof setInterval>;
+    return;
+  }
   let i = 0;
   const failAt = Math.min(13, truth.length - 1);
   const interval = truth.length > 100 ? 140 : 420;
@@ -469,6 +696,7 @@ if (scenario === "analyse" || scenario === "analyse-figee") {
     s.shown = null;
     s.current = null;
     s.previousScore = null;
+    s.past = [];
     startAudit(s, 100, scenario === "analyse-figee" ? 17 : undefined);
   }
 }
@@ -477,6 +705,8 @@ if (scenario === "inventaire") {
   const s = sites[0];
   if (s) {
     s.shown = null;
+    s.past = [];
+    s.previousScore = null;
     s.current = {
       audit: {
         id: nextId("aud"), state: "running", startedAt: new Date().toISOString(), finishedAt: null, maxPages: settings.maxPagesDefault,
@@ -575,6 +805,49 @@ function assistantAnswer(site: DemoSite, q: string): { tools: string[]; text: st
   };
 }
 
+// ───────── Évolution et boutique protégée : appliquées une fois tout le faux serveur initialisé
+
+{
+  const lune = sites.find((s) => s.summary.id === "site_8fk2");
+  if (lune) seedLuneHistory(lune);
+}
+
+if (lockMode !== "non") {
+  // Boutique protégée par un mot de passe : la dernière analyse d'Atelier Lune s'arrête à la page de départ.
+  const lune = sites.find((s) => s.summary.id === "site_8fk2");
+  if (lune) {
+    if (lockMode === "premiere") {
+      lune.shown = null;
+      lune.past = [];
+      lune.previousScore = null;
+    }
+    lune.current = lockedRun();
+    sync(lune);
+  }
+}
+
+// ───────── Mode intégré à Shopify (?integre=…, voir lib/embedded.ts)
+
+const embedded = demoEmbeddedMode !== "non";
+let embeddedReads = 0;
+
+/** Le site de la boutique : Atelier Lune (ou, à défaut, le premier site), aucun en « vide ». */
+function embeddedSite(): DemoSite[] {
+  if (demoEmbeddedMode === "vide") return [];
+  const own = sites.find((s) => s.summary.id === "site_8fk2") ?? sites[0];
+  return own ? [own] : [];
+}
+
+/** La première lecture attend la « création » du site par le serveur ; en « echec », elle échoue. */
+async function embeddedSites(): Promise<Response> {
+  const first = embeddedReads++ === 0;
+  if (first) await delay(2600);
+  if (first && demoEmbeddedMode === "echec") {
+    return apiError(503, "shopify_unavailable", "Shopify ne répond pas pour le moment.", "Réessayez dans quelques instants.", { retryable: true });
+  }
+  return json({ sites: embeddedSite().map((s) => s.summary) });
+}
+
 // ───────── Routeur
 
 let eventsConnections = 0;
@@ -589,7 +862,21 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
   if (!isStream) await delay(latency(path));
   if (init?.signal?.aborted) throw new DOMException("Abandon", "AbortError");
 
+  if (accessMode === "refuse") {
+    return apiError(401, "unauthorized", "Votre session Shopify n'a pas pu être vérifiée.", "Ouvrez l'application depuis la section Applications de votre administration Shopify.");
+  }
+  if (accessMode === "autre-boutique") {
+    return apiError(403, "shop_not_allowed", "Chat SEO n'est plus installé sur cette boutique.", "Réinstallez l'application depuis l'App Store Shopify pour retrouver vos analyses.");
+  }
+  if (accessMode === "illisible") return new Response("Unauthorized", { status: 401, headers: { "content-type": "text/plain" } });
   if (path === "/health") return json({ ok: true, version: "0.1.0" });
+  if (embedded) {
+    // Mode intégré (?integre=…) : une boutique, un site, créé par le serveur.
+    const refused = (method === "POST" && path === "/sites") || (method === "DELETE" && parts[0] === "sites" && parts.length === 2) || (method === "PATCH" && path === "/settings");
+    if (refused) return apiError(403, "not_in_embedded_mode", "Cette action n'existe pas dans l'application Shopify.", "Votre boutique a un seul site, géré automatiquement.");
+    if (method === "GET" && path === "/sites") return embeddedSites();
+    if (parts[0] === "sites" && parts[1] && !embeddedSite().some((s) => s.summary.id === parts[1])) return notFound();
+  }
   if (path === "/settings") {
     if (method === "PATCH") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { maxPagesDefault?: number };
@@ -681,6 +968,18 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
     return json({ audit: site.summary.audit }, 202);
   }
 
+  // Section masquée (Settings.features) : ses routes répondent 403, lectures comprises, comme le serveur.
+  const closed =
+    (sub === "competitors" && hidden.has("competitors")) ||
+    (sub === "analytics" && hidden.has("analytics")) ||
+    (sub === "pagespeed" && hidden.has("pageSpeed")) ||
+    (sub === "chat" && hidden.has("assistant")) ||
+    (sub === "search-console" && parts[3] === "sync" && hidden.has("searchConsoleSync"));
+  if (closed) {
+    console.warn(`[démo] route d'une section masquée appelée : ${method} ${path}`);
+    return apiError(403, "not_in_embedded_mode", "Cette section n'existe pas dans cette installation.", null);
+  }
+
   const failure = method === "GET" ? maybeFail() : null;
   if (failure) return failure;
 
@@ -690,6 +989,8 @@ export async function demoFetch(input: string, init?: RequestInit): Promise<Resp
       return json(overviewOf(site));
     case "coverage":
       return json({ coverage: coverageOf(site) });
+    case "progress":
+      return json({ progress: progressOf(site) });
     case "issues": {
       const issues = issuesFor(site);
       if (parts[3]) {

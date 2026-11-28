@@ -3,6 +3,7 @@ import { Check, ChevronsUpDown, Plus } from "lucide-react";
 import type { SiteSummary } from "../lib/types";
 import { navigate, sitePath, type SectionName } from "../lib/router";
 import { ScorePill } from "../ui/Badge";
+import { isEmbedded } from "../lib/embedded";
 
 function Monogram({ name }: { name: string }) {
   const letter = (name.trim()[0] ?? "?").toUpperCase();
@@ -31,6 +32,21 @@ export function SiteSwitcher({ sites, current, section, collapsed }: { sites: Si
     setOpen(false);
     navigate(sitePath(id, section === "settings" ? "settings" : section === "audit" || section === "pages" ? section : section));
   };
+
+  // Mode intégré à Shopify : un seul site, celui de la boutique. Ni liste, ni ajout.
+  if (isEmbedded()) {
+    return (
+      <div className={`switcher switcher--static ${collapsed ? "switcher--collapsed" : ""}`}>
+        <div className="switcher__button" title={current ? (current.name === current.host ? current.host : `${current.name} — ${current.host}`) : undefined}>
+          <Monogram name={current?.name ?? "?"} />
+          <span className="switcher__text">
+            <span className="switcher__name">{current?.name ?? "Votre boutique"}</span>
+            {current && <span className="switcher__host">{current.host}</span>}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`switcher ${collapsed ? "switcher--collapsed" : ""}`} ref={root}>

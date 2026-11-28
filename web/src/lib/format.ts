@@ -23,6 +23,8 @@ export function parseDay(day: string): Date {
 export const fmtDay = (day: string) => dayFmt.format(parseDay(day));
 export const fmtDayLong = (day: string) => dayLongFmt.format(parseDay(day));
 export const fmtDate = (iso: string) => dateFmt.format(new Date(iso));
+/** « 26 nov. » à partir d'une date complète (ISO). */
+export const fmtShortDate = (iso: string) => dayFmt.format(new Date(iso));
 export const fmtDateTime = (iso: string) => dateTimeFmt.format(new Date(iso));
 export const fmtPeriod = (p: { start: string; end: string }) => `du ${dateFmt.format(parseDay(p.start))} au ${dateFmt.format(parseDay(p.end))}`;
 

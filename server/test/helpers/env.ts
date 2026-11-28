@@ -9,6 +9,7 @@ import { openDb } from "../../src/db.ts";
 import { EventHub } from "../../src/events.ts";
 import { Store } from "../../src/store.ts";
 import { ShopifyService } from "../../src/shopify/service.ts";
+import type { VerifierOptions } from "../../src/shopify/verification.ts";
 import { FAKE_CREDS } from "./fake-shopify.ts";
 import { BatchService } from "../../src/shopify/batches.ts";
 import { Optimizer } from "../../src/automation/optimize.ts";
@@ -16,6 +17,11 @@ import { SearchConsoleClient } from "../../src/gsc/google.ts";
 import { AnalyticsClient } from "../../src/google/analytics.ts";
 import { PageSpeedClient } from "../../src/google/pagespeed.ts";
 import { PageSpeedService } from "../../src/speed/service.ts";
+import { createEmbeddedRegistry, ShopifyRegistry } from "../../src/shopify/registry.ts";
+import { ShopifyWebhooks, type WebhookTimers } from "../../src/shopify/webhooks.ts";
+
+/** Clé de chiffrement des jetons des tests (32 octets) : jamais une vraie clé. */
+export const TEST_TOKEN_KEY = Buffer.alloc(32, 7);
 
 /** Conduite face aux refus passagers, en millisecondes, pour des tests rapides. */
 export const FAST_RETRY: RetryPolicy = {
@@ -34,11 +40,16 @@ export function testEnv(
     /** Conduite face aux refus passagers ; par défaut des délais de quelques millisecondes (tests rapides). */
     retry?: RetryPolicy;
     /** Boutique Shopify simulée (faux fetch) ; sans elle, la boutique n'est pas configurée. */
-    shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; now?: () => number; autoApply?: boolean; sleep?: (ms: number) => Promise<void> };
+    shopify?: { fetchImpl: typeof fetch; writesEnabled?: boolean; /** Mode intégré (SHOPIFY_APP_MODE=embedded). */ embedded?: boolean; webDist?: string; now?: () => number; autoApply?: boolean; sleep?: (ms: number) => Promise<void>; verification?: VerifierOptions;
+      /** Mode intégré : clé de chiffrement des jetons (TEST_TOKEN_KEY par défaut). */ encryptionKey?: Buffer };
     /** Search Console simulée : fichier du compte de service et faux fetch de Google. */
     google?: { file: string; fetchImpl: typeof fetch; property?: string | null; now?: () => number; ga4PropertyId?: string | null };
     /** PageSpeed Insights simulé : clé d'essai et faux fetch de Google. */
     pagespeed?: { apiKey: string | null; fetchImpl: typeof fetch; now?: () => number; timeoutMs?: number };
+    /** Mode intégré : horloge et minuterie des appels signés de Shopify. */
+    webhooks?: { now?: () => number; timers?: WebhookTimers; readTimeoutMs?: number };
+    /** Réglages du serveur ajoutés ou remplacés (sections ouvertes, plafonds…). */
+    config?: Partial<Config>;
   } = {},
 ) {
   const limits = { ...DEFAULT_LIMITS, ...opts.limits };
@@ -50,7 +61,15 @@ export function testEnv(
     anthropicApiKey: opts.chatClient ? "sk-ant-test-SECRET-KEY" : null,
     anthropicModel: "claude-sonnet-5-5",
     firecrawlApiKey: opts.searchProvider ? "fc-test" : null,
-    shopify: opts.shopify ? FAKE_CREDS : null,
+    // Mode intégré : SHOPIFY_STORE_DOMAIN est ignorée ; l'application sert toute boutique identifiée.
+    shopify: opts.shopify && !opts.shopify.embedded ? FAKE_CREDS : null,
+    ...(opts.shopify?.embedded
+      ? {
+          shopifyAppMode: "embedded" as const,
+          shopifyApp: { clientId: FAKE_CREDS.clientId, clientSecret: FAKE_CREDS.clientSecret },
+          tokenEncryptionKey: opts.shopify.encryptionKey ?? TEST_TOKEN_KEY,
+        }
+      : {}),
     shopifyWritesEnabled: opts.shopify?.writesEnabled ?? false,
     shopifyAutoApply: opts.shopify?.autoApply ?? false,
     googleServiceAccountFile: opts.google?.file ?? "/nonexistent/google-service-account.json",
@@ -61,21 +80,47 @@ export function testEnv(
     allowedHosts: [],
     allowPrivateHosts: true,
     version: "0.1.0",
-    webDist: "/nonexistent",
+    webDist: opts.shopify?.webDist ?? "/nonexistent",
+    ...opts.config,
   };
   const store = new Store(openDb(opts.dataDir ?? ":memory:"));
   const hub = new EventHub();
   const crawler = new Crawler(store, hub, { concurrency: 3, delayMs: opts.delayMs ?? 20, pageTimeoutMs: 5000, maxPageBytes: 5 * 1024 * 1024, cataloguePageSize: opts.cataloguePageSize, retry: opts.retry ?? FAST_RETRY }, limits.maxConcurrentAudits);
-  const shopify = new ShopifyService(store, hub, {
-    creds: config.shopify,
-    writesEnabled: config.shopifyWritesEnabled,
-    fetchImpl: opts.shopify?.fetchImpl ?? (async () => {
-      throw new Error("aucun appel réseau à Shopify dans ce test");
-    }),
-    now: opts.shopify?.now,
+  const shopifyFetch = opts.shopify?.fetchImpl ?? (async () => {
+    throw new Error("aucun appel réseau à Shopify dans ce test");
   });
-  const batches = new BatchService(store, hub, shopify, { autoAllowed: config.shopifyAutoApply, sleep: opts.shopify?.sleep });
-  const optimizer = new Optimizer({ store, shopify, batches, client: opts.chatClient ?? null, model: config.anthropicModel });
+  // Relecture des pages publiques : jamais de chargement réel dans les tests.
+  const verification: VerifierOptions = {
+    fetchPage: async () => {
+      throw new Error("aucun chargement de page publique dans ce test");
+    },
+    ...opts.shopify?.verification,
+  };
+  let shopifyRegistry: ShopifyRegistry;
+  if (config.shopifyAppMode === "embedded") {
+    shopifyRegistry = createEmbeddedRegistry({
+      store,
+      hub,
+      clientId: config.shopifyApp!.clientId,
+      clientSecret: config.shopifyApp!.clientSecret,
+      encryptionKey: config.tokenEncryptionKey!,
+      writesEnabled: config.shopifyWritesEnabled,
+      chatClient: opts.chatClient ?? null,
+      model: config.anthropicModel,
+      fetchImpl: shopifyFetch,
+      now: opts.shopify?.now,
+      verification,
+      sleep: opts.shopify?.sleep,
+      aiTokensMax: config.aiTokensPerDayMax,
+    });
+  } else {
+    const local = new ShopifyService(store, hub, { creds: config.shopify, writesEnabled: config.shopifyWritesEnabled, appMode: "local", fetchImpl: shopifyFetch, now: opts.shopify?.now, verification });
+    const localBatches = new BatchService(store, hub, local, { autoAllowed: config.shopifyAutoApply, sleep: opts.shopify?.sleep });
+    shopifyRegistry = ShopifyRegistry.local({ shopify: local, batches: localBatches, optimizer: new Optimizer({ store, shopify: local, batches: localBatches, client: opts.chatClient ?? null, model: config.anthropicModel }) });
+  }
+  // Mode intégré : les services de la boutique d'essai (FAKE_CREDS.storeDomain), pour les tests qui les appellent.
+  const bundle = config.shopifyAppMode === "embedded" ? shopifyRegistry.forShop(FAKE_CREDS.storeDomain) : shopifyRegistry.forSite({ shop_domain: null })!;
+  const { shopify, batches, optimizer } = bundle;
   const searchConsole = new SearchConsoleClient({
     file: config.googleServiceAccountFile,
     property: config.gscProperty,
@@ -93,8 +138,12 @@ export function testEnv(
     now: opts.pagespeed?.now,
     timeoutMs: opts.pagespeed?.timeoutMs,
   }));
-  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopify, batches, optimizer, searchConsole, analytics, pagespeed });
-  return { app, store, hub, crawler, config, shopify, batches, optimizer, searchConsole, analytics, pagespeed };
+  const webhooks =
+    config.shopifyAppMode === "embedded"
+      ? new ShopifyWebhooks({ store, registry: shopifyRegistry, hub, crawler, pagespeed, secret: config.shopifyApp!.clientSecret, now: opts.webhooks?.now, timers: opts.webhooks?.timers, readTimeoutMs: opts.webhooks?.readTimeoutMs })
+      : null;
+  const app = createApp({ config, store, hub, crawler, chatClient: opts.chatClient ?? null, searchProvider: opts.searchProvider ?? null, shopifyRegistry, searchConsole, analytics, pagespeed, ...(webhooks ? { webhooks } : {}) });
+  return { app, store, hub, crawler, config, shopify, batches, optimizer, shopifyRegistry, searchConsole, analytics, pagespeed, webhooks };
 }
 
 /** Lit un flux SSE complet et renvoie les événements { event, data }. */

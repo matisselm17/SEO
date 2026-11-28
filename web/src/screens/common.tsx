@@ -1,9 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
-import { ChevronDown, CircleAlert, CirclePause, Play, RefreshCw, TriangleAlert } from "lucide-react";
+import { ChevronDown, CircleAlert, CirclePause, Lock, Play, RefreshCw, ShoppingBag, TriangleAlert } from "lucide-react";
 import type { UseQueryResult } from "../lib/cache";
 import type { SiteSummary } from "../lib/types";
 import { ErrorState, EmptyState } from "../ui/States";
-import { Button } from "../ui/Button";
+import { Button, ButtonLink } from "../ui/Button";
+import { useShopifySection } from "../lib/features";
+import { sitePath } from "../lib/router";
 import { useToast } from "../ui/Toast";
 import { startAudit } from "../lib/actions";
 import { useFailedPages } from "../lib/queries";
@@ -61,6 +63,12 @@ export function RelaunchButton({ site, variant = "secondary" }: { site: SiteSumm
   return <RelaunchAction site={site} variant={variant} />;
 }
 
+/** Bouton pour lancer ou relancer une analyse, quel que soit l'état de la dernière (rien pendant une analyse en cours). */
+export function AuditButton({ site, variant = "secondary" }: { site: SiteSummary; variant?: "secondary" | "ghost" | "primary" }) {
+  if (isRunning(site)) return null;
+  return <RelaunchAction site={site} variant={variant} label={resultsOf(site) || site.audit ? "Relancer l'analyse" : "Lancer l'analyse"} />;
+}
+
 function RelaunchAction({ site, variant, label = "Relancer l'analyse" }: { site: SiteSummary; variant: "secondary" | "ghost" | "primary"; label?: string }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -91,6 +99,7 @@ export function NoResults({ site, running }: { site: SiteSummary; running: React
     return <EmptyState title="Les premiers résultats arrivent">{running}</EmptyState>;
   }
   const err = site.audit?.error;
+  if (reason === "failed" && err?.code === "storefront_locked") return <StorefrontLocked site={site} />;
   if (reason === "failed") {
     return (
       <EmptyState
@@ -114,6 +123,31 @@ export function NoResults({ site, running }: { site: SiteSummary; running: React
   return (
     <EmptyState tone="framed" title="Aucune analyse pour l'instant" actions={<RelaunchAction site={site} variant="primary" label="Lancer l'analyse" />}>
       Lancez une analyse : chaque page sera lue et notée sur 100.
+    </EmptyState>
+  );
+}
+
+/**
+ * Boutique protégée par un mot de passe (`storefront_locked`) : l'analyse n'a pu lire aucune page publique.
+ * Message et action du serveur, accès à la section Boutique Shopify (ce qui y est lu reste utile), et relance.
+ */
+function StorefrontLocked({ site }: { site: SiteSummary }) {
+  const shopify = useShopifySection();
+  const err = site.audit?.error;
+  return (
+    <EmptyState
+      tone="framed"
+      icon={<Lock size={20} />}
+      title="Boutique protégée par un mot de passe"
+      actions={
+        <>
+          <RelaunchAction site={site} variant="primary" />
+          {shopify && <ButtonLink to={sitePath(site.id, "shopify")} icon={<ShoppingBag size={15} aria-hidden />}>Ouvrir la section Boutique Shopify</ButtonLink>}
+        </>
+      }
+    >
+      <p>{err?.message}</p>
+      {err?.action && <p>{err.action}</p>}
     </EmptyState>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, Pause, RefreshCw, Square } from "lucide-react";
+import { CircleAlert, Lock, Pause, RefreshCw, Square } from "lucide-react";
 import type { AuditResponse, SiteSummary } from "../lib/types";
 import { sendJSON, toAppError } from "../lib/api";
 import { keys } from "../lib/queries";
@@ -9,6 +9,9 @@ import { Button } from "../ui/Button";
 import { fmtClock, fmtDateTime, fmtInt, pl, plural } from "../lib/format";
 import { startAudit } from "../lib/actions";
 import { applyAudit, isNewerAudit, resultsOf } from "../lib/results";
+import { useShopifySection } from "../lib/features";
+import { sitePath } from "../lib/router";
+import { Link } from "../ui/Button";
 
 /** Adresse d'inventaire : un plan du site (sitemap) ou le catalogue d'une boutique. */
 function isInventoryUrl(url: string) {
@@ -58,6 +61,7 @@ export function AuditBar({ site }: { site: SiteSummary }) {
   const now = useNow(site.audit?.state === "running" ? site.audit.pausedUntil : null);
   const [stopping, setStopping] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const shopify = useShopifySection();
   const a = site.audit;
   const lastUrl = useLastUrl(a?.id, a?.currentUrl);
   if (!a) return null;
@@ -66,14 +70,17 @@ export function AuditBar({ site }: { site: SiteSummary }) {
   const olderLine = older && r ? `Les résultats affichés sont ceux de l'analyse ${r.finishedAt ? `du ${fmtDateTime(r.finishedAt)}` : "précédente"}.` : null;
 
   if (a.state === "failed") {
+    // Boutique protégée par un mot de passe : état dédié, avec un accès à la section Boutique Shopify.
+    const locked = a.error?.code === "storefront_locked";
     return (
       <div className="auditbar auditbar--failed" role="alert">
-        <CircleAlert size={16} aria-hidden className="auditbar__icon" />
+        {locked ? <Lock size={16} aria-hidden className="auditbar__icon" /> : <CircleAlert size={16} aria-hidden className="auditbar__icon" />}
         <div className="auditbar__text">
           <p>
-            <strong>{older ? "La nouvelle analyse a échoué." : "L'analyse a échoué."}</strong> {a.error?.message ?? "Le site n'a pas pu être analysé."}
+            <strong>{locked ? (older ? "Nouvelle analyse impossible." : "Analyse impossible.") : older ? "La nouvelle analyse a échoué." : "L'analyse a échoué."}</strong> {a.error?.message ?? "Le site n'a pas pu être analysé."}
             {a.error?.action && <span className="auditbar__muted"> {a.error.action}</span>}
           </p>
+          {locked && shopify && <p className="auditbar__note"><Link to={sitePath(site.id, "shopify")} className="text-link">Ouvrir la section Boutique Shopify</Link></p>}
           {olderLine && <p className="auditbar__note">{olderLine}</p>}
         </div>
         <Button

@@ -1,0 +1,35 @@
+# Configuration de l'application publique Shopify (lue par Shopify CLI : `shopify app deploy`).
+# Préparé le 28 novembre 2026, jamais déployé : à compléter puis à valider avec Shopify CLI.
+# Ce fichier ne contient aucun secret. Le Client Secret reste dans les variables du serveur.
+
+# Identifiant de l'application publique (tableau de bord Shopify). À renseigner.
+client_id = ""
+name = "Chat SEO"
+# Adresse publique HTTPS du serveur déployé. À renseigner.
+application_url = "https://exemple.invalid"
+embedded = true
+
+[access_scopes]
+# Le strict nécessaire aux lectures et corrections de la V1. La modification des thèmes n'en fait pas partie.
+scopes = "read_products,write_products,read_content,write_content,write_files,read_translations,write_translations,read_locales"
+# Installation gérée par Shopify : pas de page de connexion côté serveur, jetons obtenus par échange.
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = ["https://exemple.invalid/"]
+
+[webhooks]
+api_version = "2026-07"
+
+# Désinstallation : jetons effacés, travaux arrêtés. Les données sont gardées jusqu'à l'effacement.
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "/webhooks/shopify"
+
+# Appels obligatoires de vie privée. shop/redact (48 h après la désinstallation) efface les données de la boutique.
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+uri = "/webhooks/shopify"
+
+[pos]
+embedded = false

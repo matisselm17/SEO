@@ -4,6 +4,7 @@ import { analysePage } from "../../src/analyse/grille.ts";
 import { urlKey } from "../../src/crawl/url.ts";
 import type { Store } from "../../src/store.ts";
 import type { ChatClient } from "../../src/chat/assistant.ts";
+import type { VerifierOptions } from "../../src/shopify/verification.ts";
 import { postEmpty, testEnv } from "./env.ts";
 import { defaultState, fakeShopify, SHOP_HOST } from "./fake-shopify.ts";
 
@@ -51,6 +52,8 @@ export interface ShopSetup {
   sleep?: (ms: number) => Promise<void>;
   /** Remplace le fetch du faux Shopify (pour bloquer ou ralentir une écriture). */
   wrapFetch?: (impl: typeof fetch) => typeof fetch;
+  /** Relecture des pages publiques (faux chargement, horloge, minuteries). */
+  verification?: VerifierOptions;
 }
 
 export async function shop(opts: ShopSetup = {}) {
@@ -59,7 +62,7 @@ export async function shop(opts: ShopSetup = {}) {
   const env = testEnv({
     chatClient: opts.chatClient ?? null,
     dataDir: opts.dataDir,
-    shopify: { fetchImpl, writesEnabled: opts.writesEnabled ?? true, autoApply: opts.autoApply ?? false, now: opts.now, sleep: opts.sleep },
+    shopify: { fetchImpl, writesEnabled: opts.writesEnabled ?? true, autoApply: opts.autoApply ?? false, now: opts.now, sleep: opts.sleep, verification: opts.verification },
   });
   const site = env.store.insertSite(`https://${SHOP_HOST}/`, SHOP_HOST, "Boutique Essai");
   const { ids } = insertDoneAudit(env.store, site.id, SHOP_HOST, PAGES, opts.html);

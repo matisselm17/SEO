@@ -7,7 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { ApiError, ChatEvent, ChatMessage } from "../../../shared/api.ts";
 import { HttpError } from "../errors.ts";
 import type { SiteRow, Store } from "../store.ts";
-import { runToolAsync, TOOLS } from "./tools.ts";
+import { runToolAsync, toolsFor, type HiddenSections } from "./tools.ts";
 import type { ShopifyService } from "../shopify/service.ts";
 import type { BatchService } from "../shopify/batches.ts";
 
@@ -31,6 +31,16 @@ export const chatNotConfigured = () =>
     "chat_not_configured",
     "L'assistant n'est pas configuré sur ce serveur.",
     "Ajoutez une clé ANTHROPIC_API_KEY dans la configuration du serveur, puis redémarrez-le.",
+  );
+
+/** Mode intégré : plafond du jour de jetons d'IA du site atteint (assistant et préparation des corrections). */
+export const chatBudgetExceeded = (resetsAt: string) =>
+  new HttpError(
+    429,
+    "budget_exceeded",
+    "Le plafond du jour de jetons d'IA de ce site est atteint (assistant et préparation des corrections).",
+    "Attendez minuit (heure UTC) ou relevez le plafond dans les réglages d'automatisation.",
+    { resetsAt },
   );
 
 export function systemPrompt(site: SiteRow): string {
@@ -107,7 +117,18 @@ export interface ChatRunOptions {
   shopify?: ShopifyService | null;
   /** Lots de corrections, pour l'outil « proposer_corrections » (le seul moyen d'écrire de l'assistant). */
   batches?: BatchService | null;
+  /** Mode intégré : sections masquées, dont l'assistant n'a pas les outils. */
+  hidden?: HiddenSections;
+  /**
+   * Mode intégré : plafond de jetons d'IA du jour du site. `exceeded` est consulté avant chaque appel à l'IA (renvoie
+   * l'erreur à émettre, ou null) ; `charge` compte les jetons consommés par chaque tour (entrée et sortie).
+   */
+  budget?: { exceeded(): ApiError["error"] | null; charge(tokens: number): void };
 }
+
+/** Jetons d'un tour (entrée, sortie, cache), comme pour la préparation par l'IA. */
+const usageTokens = (u: Partial<Anthropic.Usage> | null | undefined) =>
+  (u?.input_tokens ?? 0) + (u?.output_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0);
 
 /** Fait tourner un tour de conversation et émet les événements du flux. Ne lève pas : les erreurs deviennent un « error ». */
 export async function runChat(o: ChatRunOptions): Promise<void> {
@@ -138,31 +159,57 @@ export async function runChat(o: ChatRunOptions): Promise<void> {
     if (!text.trim()) store.deleteChatMessage(userMessage.id);
   };
   try {
+    const tools = toolsFor(o.hidden);
     for (let round = 0; round < MAX_ROUNDS && !o.signal.aborted; round++) {
+      // Plafond du jour atteint (par ce tour ou par la préparation des corrections) : aucun nouvel appel à l'IA.
+      const over = o.budget?.exceeded() ?? null;
+      if (over) {
+        if (text.trim()) store.insertChatMessage(site.id, "assistant", text, sources, batchIds);
+        else dropQuestion();
+        send({ type: "error", error: over });
+        return;
+      }
       const stream = o.client.messages.stream(
-        { model: o.model, max_tokens: 2048, system: systemPrompt(site), tools: TOOLS, messages },
+        { model: o.model, max_tokens: 2048, system: systemPrompt(site), tools, messages },
         { signal: o.signal },
       );
       let roundText = "";
-      for await (const ev of stream) {
-        if (o.signal.aborted) break;
-        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
-          let chunk = ev.delta.text;
-          if (!roundText && text && chunk) chunk = (text.endsWith("\n") ? "\n" : "\n\n") + chunk.replace(/^\n+/, "");
-          roundText += ev.delta.text;
-          text += chunk;
-          if (chunk) send({ type: "delta", text: chunk });
+      // Jetons du tour : lus dans le flux (un tour coupé compte aussi), remplacés par ceux du message final s'il arrive.
+      let started: Partial<Anthropic.Usage> | null = null;
+      let outTokens: number | null = null;
+      let final: Anthropic.Message | null = null;
+      try {
+        for await (const ev of stream) {
+          if (ev.type === "message_start") started = ev.message.usage ?? null;
+          if (ev.type === "message_delta" && typeof ev.usage?.output_tokens === "number") outTokens = ev.usage.output_tokens;
+          if (o.signal.aborted) break;
+          if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+            let chunk = ev.delta.text;
+            if (!roundText && text && chunk) chunk = (text.endsWith("\n") ? "\n" : "\n\n") + chunk.replace(/^\n+/, "");
+            roundText += ev.delta.text;
+            text += chunk;
+            if (chunk) send({ type: "delta", text: chunk });
+          }
+        }
+        if (!o.signal.aborted) final = await stream.finalMessage();
+      } finally {
+        if (o.budget) {
+          const used = final ? usageTokens(final.usage) : usageTokens(started ? { ...started, output_tokens: outTokens ?? started.output_tokens ?? 0 } : null);
+          try {
+            o.budget.charge(used);
+          } catch {
+            console.warn("[assistant] Les jetons consommés n'ont pas pu être comptés.");
+          }
         }
       }
-      if (o.signal.aborted) break;
-      const final = await stream.finalMessage();
+      if (o.signal.aborted || !final) break;
       if (final.stop_reason === "tool_use") {
         messages.push({ role: "assistant", content: final.content as Anthropic.ContentBlockParam[] });
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const block of final.content) {
           if (block.type !== "tool_use") continue;
           if (block.name === "proposer_corrections") send({ type: "tool", label: "Préparation d'un lot de corrections" });
-          const outcome = await runToolAsync({ store, site, shopify: o.shopify ?? null, batches: o.batches ?? null }, block.name, (block.input ?? {}) as Record<string, unknown>);
+          const outcome = await runToolAsync({ store, site, shopify: o.shopify ?? null, batches: o.batches ?? null, hidden: o.hidden }, block.name, (block.input ?? {}) as Record<string, unknown>);
           if (block.name !== "proposer_corrections") send({ type: "tool", label: outcome.label });
           if (outcome.batchId && !batchIds.includes(outcome.batchId)) batchIds.push(outcome.batchId);
           if (outcome.source && !sources.includes(outcome.source)) sources.push(outcome.source);

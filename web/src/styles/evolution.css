@@ -1,0 +1,148 @@
+/*
+ * Évolution du site (bloc de la Vue d'ensemble), courbe des notes, rapport d'optimisation et impression.
+ * Uniquement des tokens : voir tokens.css et web/DESIGN.md.
+ */
+
+/* ───────────────────────── Évolution ───────────────────────── */
+.evo { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: var(--space-10); align-items: start; }
+.evo__main { min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); }
+.evo__side { min-width: 0; display: flex; flex-direction: column; gap: var(--space-8); }
+.evo__note { font-size: var(--text-sm); color: var(--text-muted); max-width: 64ch; }
+.evo__report-link { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Note de départ → note actuelle */
+.journey { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--space-3) var(--space-5); }
+.journey__step { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.journey__label { font-size: var(--text-sm); color: var(--text-muted); }
+.journey__value { font-size: var(--text-3xl); font-weight: var(--weight-semibold); letter-spacing: -0.03em; line-height: 1.1; color: var(--text-muted); }
+.journey__step--now .journey__value { color: var(--text); }
+.journey__max { font-size: var(--text-md); font-weight: var(--weight-medium); color: var(--text-subtle); letter-spacing: 0; margin-left: 2px; }
+.journey__meta { font-size: var(--text-xs); color: var(--text-subtle); }
+.journey__arrow { color: var(--text-subtle); margin-bottom: 26px; flex: none; }
+.journey .delta { margin-bottom: 22px; font-weight: var(--weight-medium); }
+
+/* Blocs de la colonne de droite : séparés par l'espace et un filet, pas par une carte */
+.evo-block { border-top: 1px solid var(--line); padding-top: var(--space-4); }
+.evo-block__title { font-size: var(--text-md); font-weight: var(--weight-semibold); margin-bottom: var(--space-2); }
+.evo-block__lead { font-size: var(--text-sm); color: var(--text-muted); line-height: var(--leading-normal); }
+.evo-block__lead strong { color: var(--text); font-weight: var(--weight-semibold); }
+.evo-block__foot { margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-subtle); line-height: var(--leading-normal); }
+
+.evo-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+.evo-stats--four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4) var(--space-5); }
+.evo-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* Le libellé prend la hauteur libre : les chiffres d'une même rangée restent alignés même si un libellé passe à la ligne. */
+.evo-stat__label { display: flex; align-items: flex-start; gap: 6px; flex: 1 0 auto; font-size: var(--text-sm); color: var(--text-muted); }
+.evo-stat__icon { margin-top: 2px; }
+.evo-stat__icon { flex: none; }
+.evo-stat--good .evo-stat__icon { color: var(--good); }
+.evo-stat--warning .evo-stat__icon { color: var(--warning-mark); }
+.evo-stat--critical .evo-stat__icon { color: var(--critical); }
+.evo-stat--info .evo-stat__icon { color: var(--info); }
+.evo-stat--neutral .evo-stat__icon { color: var(--text-subtle); }
+.evo-stat__value { font-size: var(--text-xl); font-weight: var(--weight-semibold); letter-spacing: -0.01em; line-height: var(--leading-tight); }
+.evo-stat__hint { font-size: var(--text-xs); color: var(--text-subtle); }
+
+/* Aucune analyse terminée */
+.evo-empty { max-width: 620px; }
+.evo-empty__title { font-size: var(--text-md); font-weight: var(--weight-semibold); }
+.evo-empty__text { margin-top: var(--space-1); font-size: var(--text-sm); color: var(--text-muted); line-height: var(--leading-normal); }
+.evo-empty__actions:not(:empty) { margin-top: var(--space-4); }
+
+/* ───────────────────────── Courbe des notes ───────────────────────── */
+.stl { position: relative; min-width: 0; }
+.stl__bar { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-2); }
+.stl__scale { font-size: var(--text-xs); color: var(--text-subtle); }
+.stl__toggle { flex: none; }
+.stl__plot { position: relative; width: 100%; }
+.stl__svg { display: block; touch-action: pan-y; cursor: crosshair; overflow: visible; }
+.stl__svg:focus-visible { box-shadow: var(--focus); border-radius: var(--radius-sm); }
+.stl__grid { stroke: var(--chart-grid); stroke-width: 1; }
+.stl__grid--base { stroke: var(--line-strong); }
+.stl__ytick, .stl__xtick { fill: var(--chart-axis); font-size: 11px; font-family: var(--font-sans); }
+.stl__line { fill: none; stroke: var(--chart-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.stl__area { fill: var(--chart-1); opacity: 0.07; }
+.stl__cross { stroke: var(--line-strong); stroke-width: 1; }
+.stl__dot { fill: var(--chart-1); stroke: var(--bg); stroke-width: 2; }
+.stl__dot--last { stroke-width: 2.5; }
+.stl__value { fill: var(--text); font-size: 12px; font-weight: 600; font-family: var(--font-sans); font-variant-numeric: tabular-nums; }
+.stl__value--muted { fill: var(--text-muted); font-weight: 500; }
+.stl__tip { transform: translateX(-50%); }
+.stl__tip--above { transform: translate(-50%, -100%); }
+.stl__tip-issues { margin-top: 4px; font-size: var(--text-xs); color: var(--text-muted); }
+.stl__table { max-height: 300px; overflow-y: auto; }
+
+/* ───────────────────────── Rapport d'optimisation ───────────────────────── */
+.report__back { margin: calc(var(--space-2) * -1) 0 var(--space-4) calc(var(--space-2) * -1); }
+.report-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4) var(--space-6); padding: var(--space-4) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-size: var(--text-sm); }
+.report-meta dt { color: var(--text-muted); font-size: var(--text-xs); margin-bottom: 2px; }
+.report-meta dd { font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+.report-meta dd .muted { font-weight: var(--weight-regular); }
+.report__section { margin-top: var(--space-10); }
+
+.rcorr__count { margin-bottom: var(--space-3); }
+.rcorr { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--line); }
+.rcorr__item { padding: var(--space-4) 0; border-bottom: 1px solid var(--line); break-inside: avoid; }
+.rcorr__title { font-size: var(--text-md); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.rcorr__meta { display: flex; flex-wrap: wrap; gap: 2px var(--space-3); margin-top: 2px; font-size: var(--text-xs); color: var(--text-muted); }
+.rcorr__path { color: var(--text-subtle); overflow-wrap: anywhere; }
+.rcorr__values { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); margin-top: var(--space-3); }
+.rcorr__value { min-width: 0; padding-left: var(--space-3); border-left: 2px solid var(--line); }
+.rcorr__value--after { border-left-color: var(--good-line); }
+.rcorr__k { display: block; font-size: var(--text-xs); font-weight: var(--weight-medium); color: var(--text-subtle); margin-bottom: 2px; }
+.rcorr__value--after .rcorr__k { color: var(--good); }
+.rcorr__text { font-size: var(--text-sm); line-height: var(--leading-normal); white-space: pre-wrap; overflow-wrap: anywhere; }
+.rcorr__value--before .rcorr__text { color: var(--text-muted); }
+.rcorr__empty { color: var(--text-subtle); font-style: italic; }
+
+.shop-history__report { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 4px; margin: calc(var(--space-2) * -1) 0 var(--space-4); font-size: var(--text-sm); }
+.shop-history__report .text-link { display: inline-flex; align-items: center; gap: 6px; align-self: center; }
+
+/* ───────────────────────── Tablette et téléphone ───────────────────────── */
+@media (max-width: 1099px) {
+  .evo { grid-template-columns: 1fr; gap: var(--space-8); }
+  .report-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  .evo-stats { gap: var(--space-3); }
+  .evo-stat__value { font-size: var(--text-lg); }
+  .journey { gap: var(--space-2) var(--space-4); }
+  .journey__value { font-size: var(--text-2xl); }
+  .journey__arrow { margin-bottom: 22px; }
+  .journey .delta { flex-basis: 100%; margin-bottom: 0; }
+  .rcorr__values { grid-template-columns: 1fr; gap: var(--space-3); }
+}
+
+/* ───────────────────────── Impression ───────────────────────── */
+/*
+ * Une page propre, sans navigation ni bandeaux : seul le contenu de l'écran est imprimé, en thème clair.
+ * Vaut pour tout écran ; le rapport d'optimisation est fait pour cela.
+ */
+@media print {
+  :root, [data-theme="dark"] {
+    color-scheme: light;
+    --bg: #ffffff; --bg-subtle: #ffffff; --bg-muted: #efefec; --bg-inset: #f8f8f6; --surface: #ffffff; --surface-raised: #ffffff;
+    --line: #dcdcd7; --line-strong: #c4c4bd;
+    --text: #16181d; --text-muted: #4a4e57; --text-subtle: #6b6f78;
+    --accent: #2337c6; --accent-text: #2337c6; --accent-soft: #eceffd;
+    --critical: #c42f27; --critical-soft: #fcefed; --critical-line: #f1c9c4;
+    --warning: #9a5b00; --warning-mark: #d98a12; --warning-soft: #fdf4e4; --warning-line: #f0d9ad;
+    --good: #1b7547; --good-mark: #23905a; --good-soft: #eaf6ef; --good-line: #c3e3d0;
+    --info: #555d6b; --info-soft: #f0f1f3; --info-line: #d9dce1;
+    --chart-1: #2337c6; --chart-2: #6f7a8c; --chart-grid: #e6e6e1; --chart-axis: #6b6f78;
+  }
+  @page { margin: 16mm 14mm; }
+  html, body { background: #ffffff !important; }
+  .sidebar, .drawer, .topbar, .auditbar, .connbar, .skip-link, .toasts, .no-print, .stl__bar, .chart-tip { display: none !important; }
+  .main { margin-left: 0 !important; min-height: 0; }
+  .content { padding: 0 !important; max-width: none !important; }
+  .screen { animation: none !important; }
+  .page-head { margin-bottom: var(--space-6); }
+  .page-head__actions { display: none; }
+  .evo { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--space-8); }
+  .report-meta { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .report__section { margin-top: var(--space-8); break-inside: auto; }
+  .section__head { break-after: avoid; }
+  .evo__main, .evo-block, .rcorr__item { break-inside: avoid; }
+  a { color: inherit; text-decoration: none; }
+}

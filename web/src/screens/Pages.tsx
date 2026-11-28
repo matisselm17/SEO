@@ -19,6 +19,7 @@ import { useMedia, useWindowVirtual } from "../ui/useVirtual";
 import { FailedPagesToggle, NoResults, QueryError, ReliabilityNote, isRunning } from "./common";
 import { PageVisitsBlock } from "./Visits";
 import { PageSpeedBlock } from "./Speed";
+import { useFeature } from "../lib/features";
 
 type SortKey = "path" | "type" | "score" | "issues" | "words" | "clicks" | "position";
 type Band = "all" | "critical" | "warning" | "good";
@@ -96,6 +97,8 @@ function CheckRow({ c }: { c: PageCheck }) {
 
 function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName: string; siteId: string }) {
   const shopWrites = useSettings().data?.integrations.shopify.writesEnabled === true;
+  const speed = useFeature("pageSpeed");
+  const visits = useFeature("analytics");
   const byCat = CAT_ORDER.map((id) => {
     const checks = page.checks.filter((c) => c.category === id).sort((a, b) => (a.status === "pass" ? 1 : 0) - (b.status === "pass" ? 1 : 0));
     return { id, checks, pts: checks.reduce((s, c) => s + c.points, 0), max: checks.reduce((s, c) => s + c.max, 0) };
@@ -113,7 +116,7 @@ function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName
         )}
       </section>
 
-      <PageSpeedBlock siteId={siteId} pageId={page.id} pageUrl={page.url} pagePath={page.path} speed={page.speed} />
+      {speed && <PageSpeedBlock siteId={siteId} pageId={page.id} pageUrl={page.url} pagePath={page.path} speed={page.speed} />}
 
       {page.organic && (
         <section className="detail-block">
@@ -142,7 +145,7 @@ function PageDetailBody({ page, siteName, siteId }: { page: PageDetail; siteName
         </section>
       )}
 
-      <PageVisitsBlock siteId={siteId} visits={page.visits} />
+      {visits && <PageVisitsBlock siteId={siteId} visits={page.visits} />}
 
       <section className="detail-block">
         <h3 className="detail-block__title">Critères de la grille</h3>

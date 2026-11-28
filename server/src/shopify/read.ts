@@ -63,15 +63,19 @@ export interface ShopInfo {
   scopes: string[];
 }
 
-export async function readShopInfo(gql: Gql): Promise<ShopInfo> {
+/**
+ * `allowTechnicalHost` (mode intégré) : une boutique sans domaine public (boutique d'essai) a pour hôte son domaine
+ * `*.myshopify.com`, montré seulement à son propre marchand. En mode local, ce domaine n'est jamais exposé.
+ */
+export async function readShopInfo(gql: Gql, allowTechnicalHost = false): Promise<ShopInfo> {
   const d = await gql<{ currentAppInstallation: { accessScopes: Array<{ handle: string }> } | null; shop: { name: string; primaryDomain: { host: string } | null } }>(
     "{ currentAppInstallation { accessScopes { handle } } shop { name primaryDomain { host } } }",
   );
   const host = typeof d.shop?.primaryDomain?.host === "string" ? d.shop.primaryDomain.host.toLowerCase().replace(/\.$/, "").replace(/^www\./, "") : null;
   return {
     name: cleanText(d.shop?.name, 200),
-    // Le domaine technique *.myshopify.com n'est jamais exposé : sans domaine public, l'hôte est inconnu.
-    host: host && /^[a-z0-9.-]+$/.test(host) && !host.endsWith(".myshopify.com") ? host : null,
+    // Mode local : le domaine technique *.myshopify.com n'est jamais exposé ; sans domaine public, l'hôte est inconnu.
+    host: host && /^[a-z0-9.-]+$/.test(host) && (allowTechnicalHost || !host.endsWith(".myshopify.com")) ? host : null,
     scopes: (d.currentAppInstallation?.accessScopes ?? []).map((s) => s.handle).filter((s): s is string => typeof s === "string" && /^[a-z_]+$/.test(s)),
   };
 }

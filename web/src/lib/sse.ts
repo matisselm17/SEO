@@ -46,8 +46,11 @@ export async function readSSE(res: Response, onMessage: (m: SSEMessage) => void,
   }
 }
 
-/** "gone" : le serveur répond 404 (site supprimé) ; plus aucune tentative. */
-export type StreamStatus = "connecting" | "open" | "retrying" | "gone";
+/**
+ * "gone" : le serveur répond 404 (site supprimé) ; plus aucune tentative.
+ * "denied" : le serveur refuse l'accès (401, ou 403 shop_not_allowed) ; plus aucune tentative, l'écran d'accès refusé prend le relais.
+ */
+export type StreamStatus = "connecting" | "open" | "retrying" | "gone" | "denied";
 
 /**
  * Ouvre un flux GET qui reste ouvert, et se reconnecte après une coupure
@@ -72,6 +75,11 @@ export function openLiveStream(
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 404) {
         onStatus("gone");
+        return;
+      }
+      // Seuls les refus d'identification arrêtent le flux ; un autre 403 suit le chemin d'erreur habituel.
+      if (err instanceof ApiRequestError && (err.status === 401 || (err.status === 403 && err.code === "shop_not_allowed"))) {
+        onStatus("denied");
         return;
       }
       /* coupure ou erreur : on retente */

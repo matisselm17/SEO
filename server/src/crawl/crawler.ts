@@ -25,7 +25,7 @@ import {
 } from "./inventory.ts";
 import { readShopifyCatalogue, toCatalogueProduct, type CatalogueProduct } from "./shopify.ts";
 import { DEFAULT_RETRY, isTransientStatus, parseRetryAfter, sleep, Throttle, type RetryPolicy } from "./throttle.ts";
-import { displayPath, exclusionReason, normalizeUrl, sameSite, urlKey } from "./url.ts";
+import { bareHost, displayPath, exclusionReason, normalizeUrl, sameSite, urlKey } from "./url.ts";
 
 export interface CrawlOptions {
   concurrency: number;
@@ -62,6 +62,27 @@ export const INTERRUPTED: ApiError["error"] = {
   message: "L'analyse a été interrompue par un redémarrage du serveur. Les pages déjà notées sont conservées.",
   action: "Relancez l'analyse.",
 };
+
+/** Boutique Shopify protégée par un mot de passe (docs/format-echange.md, « Évolution et rapport »). */
+export const STOREFRONT_LOCKED: ApiError["error"] = {
+  code: "storefront_locked",
+  message: "Votre boutique en ligne est protégée par un mot de passe : ses pages publiques ne peuvent pas être analysées.",
+  action:
+    "Retirez le mot de passe (Boutique en ligne > Préférences), puis relancez l'analyse. En attendant, les titres, descriptions et textes d'images lus dans Shopify restent disponibles dans la section Boutique Shopify.",
+};
+
+/** Chemin sans paramètres, sans barre finale, en minuscules. */
+const plainPath = (p: string) => (p.toLowerCase().replace(/\/+$/, "") || "/");
+
+/**
+ * La page de départ a-t-elle été redirigée vers la page du mot de passe de la boutique (`/password`, même hôte, au
+ * « www. » près) ? Une redirection est exigée : une page `/password` demandée telle quelle ne compte pas.
+ */
+export function isPasswordRedirect(requested: URL, final: URL): boolean {
+  if (plainPath(final.pathname) !== "/password") return false;
+  if (plainPath(requested.pathname) === "/password") return false;
+  return bareHost(final.hostname) === bareHost(requested.hostname);
+}
 
 /** Raison lisible d'un échec HTTP. */
 export function httpFailureReason(status: number): string {
@@ -411,6 +432,8 @@ export class Crawler {
     };
 
     let startFailure: string | null = null;
+    /** La page de départ redirige vers la page du mot de passe de la boutique. */
+    let storefrontLocked = false;
     const fail = (item: QueueItem, url: string, reason: string, status: number | null) => {
       failed++;
       failedKeys.add(item.key);
@@ -443,6 +466,13 @@ export class Crawler {
         return;
       }
       const finalUrl = new URL(res.url);
+      // Seulement pour une boutique Shopify (site rattaché à une boutique, ou reconnu comme Shopify par l'analyse, y
+      // compris par la page du mot de passe elle-même) ; sinon la page suit le chemin ordinaire.
+      if (item.depth === 0 && isPasswordRedirect(item.url, finalUrl) && (!!(store.getSite(site.id)?.shop_domain ?? site.shop_domain) || platform === "shopify" || detectShopify(res.body ? decodeHtml(res.body, res.contentType) : "", res.headers))) {
+        storefrontLocked = true;
+        fail(item, finalUrl.href, "Boutique protégée par un mot de passe", res.status);
+        return;
+      }
       if (isTransientStatus(res.status)) {
         const retries = item.retries ?? 0;
         const d = throttle.onRefusal({ attempt: retries, retryAfterMs: parseRetryAfter(res.headers["retry-after"]), startedEpoch: epoch, pool: "pages" });
@@ -651,6 +681,7 @@ export class Crawler {
     }
 
     sync();
+    if (done === 0 && storefrontLocked) return this.finish(site.id, audit.id, "failed", STOREFRONT_LOCKED);
     if (done === 0) {
       return this.finish(site.id, audit.id, "failed", {
         code: "site_unreachable",

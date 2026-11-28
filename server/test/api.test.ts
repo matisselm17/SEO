@@ -236,7 +236,7 @@ test("santé et paramètres", async () => {
   const { app } = testEnv();
   assert.deepEqual(await (await app.request("/api/health")).json(), { ok: true, version: "0.1.0" });
   const st = (await (await app.request("/api/settings")).json()) as any;
-  assert.deepEqual(st, { maxPagesDefault: 100, maxPagesLimits: { min: 1, max: 100 }, integrations: { chat: { configured: false, model: null }, competitors: { configured: false }, shopify: { configured: false, writesEnabled: false }, searchConsole: { configured: false }, dataForSeo: { configured: false }, analytics: { configured: false }, pageSpeed: { configured: false } }, version: "0.1.0" });
+  assert.deepEqual(st, { maxPagesDefault: 100, maxPagesLimits: { min: 1, max: 100 }, integrations: { chat: { configured: false, model: null }, competitors: { configured: false }, shopify: { configured: false, writesEnabled: false }, searchConsole: { configured: false }, dataForSeo: { configured: false }, analytics: { configured: false }, pageSpeed: { configured: false } }, features: { competitors: true, analytics: true, pageSpeed: true, assistant: true, searchConsoleSync: true }, version: "0.1.0" });
   const patched = await app.request("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPagesDefault: 40 }) });
   assert.equal(((await patched.json()) as any).maxPagesDefault, 40);
   const wrong = await app.request("/api/settings", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxPagesDefault: 0 }) });

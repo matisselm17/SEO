@@ -9,7 +9,8 @@ import { CircleAlert, CircleCheck, CircleMinus, Info, ShieldCheck, Zap } from "l
 import type { AutomationPolicy, AutomationState, ShopifyField, ShopifyResourceType, SiteSummary } from "../lib/types";
 import { useAutomation } from "../lib/queries";
 import { toAppError, type AppError } from "../lib/api";
-import { CONTENT_FILTER_TEXT, FIELD_COUNT, FIELD_LABEL, MODE_TEXT, SCOPE_TEXT, TOKENS_HINT, TOKENS_SCOPE, TYPE_LABEL, TYPE_ORDER, saveAutomation } from "../lib/shopify";
+import { CONTENT_FILTER_TEXT, FIELD_COUNT, FIELD_LABEL, MODE_TEXT, SCOPE_TEXT, TOKENS_HINT, TOKENS_SCOPE, TYPE_LABEL, TYPE_ORDER, modeText, saveAutomation, tokensScope } from "../lib/shopify";
+import { useFeature } from "../lib/features";
 import { fmtInt, fmtWhen, plural } from "../lib/format";
 import { Button } from "../ui/Button";
 import { Dialog } from "../ui/Dialog";
@@ -114,12 +115,28 @@ function Locks({ s, saved }: { s: AutomationState; saved: AutomationPolicy }) {
   );
 }
 
-function Usage({ s, policy }: { s: AutomationState; policy: AutomationPolicy }) {
+/**
+ * Mode automatique non autorisé sur ce serveur (toujours le cas dans l'application Shopify) : il n'est pas
+ * proposé, et cet encadré remplace les quatre verrous. Rien n'est écrit sans validation humaine.
+ */
+function HumanValidation({ assistant }: { assistant: boolean }) {
+  return (
+    <section className="auto-locks" aria-labelledby="auto-human-t">
+      <h3 className="auto-aside__title" id="auto-human-t"><ShieldCheck size={15} aria-hidden /> Vous validez chaque proposition</h3>
+      <p className="auto-aside__lead">L'IA rédige des propositions dans un lot de corrections. Rien n'est écrit dans la boutique avant que vous les ayez relues et validées.</p>
+      <p className="auto-aside__note">Chaque correction validée reste dans l'historique de la boutique et peut être annulée, seule ou avec tout son lot.</p>
+      {assistant && <p className="auto-aside__note">La règle vaut aussi pour ce que l'assistant propose dans la conversation.</p>}
+    </section>
+  );
+}
+
+function Usage({ s, policy, assistant }: { s: AutomationState; policy: AutomationPolicy; assistant: boolean }) {
   const u = s.usage;
   const tokensOut = u.aiTokens >= policy.aiTokensPerDay;
   return (
     <section className="auto-usage" aria-labelledby="auto-usage-t">
       <h3 className="auto-aside__title" id="auto-usage-t">Consommation du jour</h3>
+      {s.autoAllowed && <>
       <dl className="usage">
         <div className="usage__row">
           <dt>Écritures automatiques</dt>
@@ -128,6 +145,7 @@ function Usage({ s, policy }: { s: AutomationState; policy: AutomationPolicy }) 
         </div>
       </dl>
       <h4 className="auto-usage__sub">Limite de préparation</h4>
+      </>}
       <dl className="usage">
         <div className="usage__row">
           <dt>Jetons d'IA</dt>
@@ -135,7 +153,7 @@ function Usage({ s, policy }: { s: AutomationState; policy: AutomationPolicy }) 
           <Meter value={u.aiTokens} max={Math.max(1, policy.aiTokensPerDay)} tone={tokensOut ? "warning" : "neutral"} />
         </div>
       </dl>
-      <p className="auto-aside__note">{tokensOut ? "Atteinte : « Préparer des corrections avec l'IA » attend la remise à zéro. " : ""}{TOKENS_SCOPE}</p>
+      <p className="auto-aside__note">{tokensOut ? "Atteinte : « Préparer des corrections avec l'IA » attend la remise à zéro. " : ""}{tokensScope(assistant)}</p>
       <p className="auto-aside__note">Remise à zéro {fmtWhen(u.resetsAt)} (minuit, heure universelle).</p>
     </section>
   );
@@ -190,6 +208,7 @@ function ConfirmAuto({ open, policy, widen, s, onClose, onConfirm, busy, error, 
 export function AutomationPanel({ site }: { site: SiteSummary }) {
   const q = useAutomation(site.id);
   const toast = useToast();
+  const assistant = useFeature("assistant");
   const s = q.data;
   const [draft, setDraft] = useState<AutomationPolicy | null>(null);
   const [caps, setCaps] = useState<Record<Caps, string> | null>(null);
@@ -210,6 +229,8 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
     const out: Partial<Record<Caps, string>> = {};
     if (!s || !caps) return out;
     for (const c of CAPS) {
+      // Plafond des écritures automatiques : ni affiché ni vérifié quand le mode automatique n'est pas autorisé.
+      if (c.key === "maxAutoChangesPerDay" && !s.autoAllowed) continue;
       const v = caps[c.key].trim();
       const r = s.limits[c.key];
       if (!/^\d+$/.test(v) || Number(v) < r.min || Number(v) > r.max) out[c.key] = `Entre ${fmtInt(r.min)} et ${fmtInt(r.max)}.`;
@@ -232,7 +253,9 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
   const ruleErrors: string[] = [];
   if (policy.mode !== "off" && policy.fields.length === 0) ruleErrors.push("Choisissez au moins un champ.");
   if (policy.mode !== "off" && policy.resourceTypes.length === 0) ruleErrors.push("Choisissez au moins un type d'élément.");
-  const invalid = Object.keys(capErrors).length > 0 || ruleErrors.length > 0;
+  // Niveau « auto » enregistré alors que le serveur ne l'autorise pas : il faut en choisir un autre pour enregistrer.
+  const autoUnavailable = policy.mode === "auto" && !s.autoAllowed;
+  const invalid = Object.keys(capErrors).length > 0 || ruleErrors.length > 0 || autoUnavailable;
   const set = (patch: Partial<AutomationPolicy>) => setDraft((d) => ({ ...(d ?? s.policy), ...patch }));
   const reset = () => {
     setDraft(s.policy);
@@ -241,6 +264,11 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
   };
 
   const save = async () => {
+    // Jamais de mode automatique envoyé quand le serveur ne l'autorise pas (ou plus).
+    if (policy.mode === "auto" && !s.autoAllowed) {
+      setConfirming(false);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -248,7 +276,7 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
       setDraft(next.policy);
       setCaps({ maxChangesPerRun: String(next.policy.maxChangesPerRun), maxAutoChangesPerDay: String(next.policy.maxAutoChangesPerDay), aiTokensPerDay: String(next.policy.aiTokensPerDay) });
       setConfirming(false);
-      toast.show({ tone: "success", title: "Règle d'automatisation enregistrée", text: MODE_TEXT[next.policy.mode].label + "." });
+      toast.show({ tone: "success", title: next.autoAllowed ? "Règle d'automatisation enregistrée" : "Règle des propositions de l'IA enregistrée", text: MODE_TEXT[next.policy.mode].label + "." });
     } catch (err) {
       setError(toAppError(err));
     } finally {
@@ -257,7 +285,7 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
   };
   // Passer en « auto », ou élargir une règle déjà en « auto », demande la même confirmation.
   const widen = policy.mode === "auto" && s.policy.mode === "auto" ? widenings(s.policy, policy) : [];
-  const needsConfirm = policy.mode === "auto" && (s.policy.mode !== "auto" || widen.length > 0);
+  const needsConfirm = s.autoAllowed && policy.mode === "auto" && (s.policy.mode !== "auto" || widen.length > 0);
   const onSave = () => {
     if (invalid) return;
     if (needsConfirm) setConfirming(true);
@@ -267,7 +295,8 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
   return (
     <div className="auto">
       <p className="shop-history__lead">
-        Ce que l'IA a le droit de faire dans cette boutique. La règle vaut pour l'assistant comme pour « Préparer des corrections avec l'IA », pas pour les lots que vous composez vous-même. Le serveur la vérifie à chaque ligne : le contenu de la boutique ne peut pas la modifier.
+        {s.autoAllowed ? "Ce que l'IA a le droit de faire dans cette boutique." : "Ce que l'IA a le droit de vous proposer dans cette boutique."}{" "}
+        {assistant ? "La règle vaut pour l'assistant comme pour « Préparer des corrections avec l'IA »" : "La règle vaut pour « Préparer des corrections avec l'IA »"}, pas pour les lots que vous composez vous-même. Le serveur la vérifie à chaque ligne : le contenu de la boutique ne peut pas la modifier.
       </p>
       {!s.aiConfigured && (
         <div className="notice notice--info notice--compact" role="note">
@@ -281,24 +310,25 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
 
       <div className="auto__layout">
         <div className="auto__form">
-          <Group title="Niveau" hint="Du plus prudent au plus autonome.">
+          <Group title="Niveau" hint={s.autoAllowed ? "Du plus prudent au plus autonome." : "Ce que l'IA peut faire pour vous."}>
+            {autoUnavailable && (
+              <p className="auto-warn" role="note">
+                <Info size={14} aria-hidden />
+                <span><strong>Le niveau enregistré, « L'IA applique seule », n'est pas disponible ici.</strong> Il se comporte comme « L'IA prépare, vous validez » : rien n'est écrit sans vous. Choisissez l'un des niveaux ci-dessous.</span>
+              </p>
+            )}
             <div className="modes">
-              {MODES.map((m) => (
+              {/* Le mode automatique n'est proposé que si le serveur l'autorise. */}
+              {MODES.filter((m) => m !== "auto" || s.autoAllowed).map((m) => (
                 <label key={m} className={`mode ${draft.mode === m ? "is-on" : ""}`}>
                   <input type="radio" name="auto-mode" value={m} checked={draft.mode === m} onChange={() => set({ mode: m })} />
                   <span className="mode__body">
                     <span className="mode__label">{m === "auto" && <Zap size={14} aria-hidden />}{MODE_TEXT[m].label}</span>
-                    <span className="mode__text">{MODE_TEXT[m].text}</span>
+                    <span className="mode__text">{modeText(m, assistant)}</span>
                   </span>
                 </label>
               ))}
             </div>
-            {draft.mode === "auto" && !s.autoAllowed && (
-              <p className="auto-warn" role="note">
-                <Info size={14} aria-hidden />
-                <span><strong>Ce niveau se comportera comme « L'IA prépare, vous validez »</strong> tant que la personne qui gère l'installation ne l'a pas autorisé côté serveur. Rien ne sera écrit sans vous d'ici là.</span>
-              </p>
-            )}
             {draft.mode === "auto" && s.autoAllowed && !s.writesEnabled && (
               <p className="auto-warn" role="note"><Info size={14} aria-hidden /><span>Les modifications de la boutique sont désactivées sur le serveur : rien ne sera écrit, même automatiquement, tant qu'elles ne sont pas activées.</span></p>
             )}
@@ -350,7 +380,7 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
 
           <Group title="Plafonds" hint="Bornés par le serveur.">
             <div className="caps">
-              {CAPS.map((c) => {
+              {CAPS.filter((c) => c.key !== "maxAutoChangesPerDay" || s.autoAllowed).map((c) => {
                 const r = s.limits[c.key];
                 const err = capErrors[c.key];
                 return (
@@ -371,7 +401,7 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
                       />
                       <span className="field__affix field__affix--suf">{c.unit}</span>
                     </div>
-                    <p className={err ? "field__error" : "field__hint"} id={`cap-${c.key}-h`}>{err ?? `${c.hint} Entre ${fmtInt(r.min)} et ${fmtInt(r.max)}.`}</p>
+                    <p className={err ? "field__error" : "field__hint"} id={`cap-${c.key}-h`}>{err ?? `${c.key === "aiTokensPerDay" ? `${tokensScope(assistant)} ${TOKENS_HINT}` : c.hint} Entre ${fmtInt(r.min)} et ${fmtInt(r.max)}.`}</p>
                   </div>
                 );
               })}
@@ -380,8 +410,8 @@ export function AutomationPanel({ site }: { site: SiteSummary }) {
         </div>
 
         <aside className="auto__aside">
-          <Locks s={s} saved={s.policy} />
-          <Usage s={s} policy={s.policy} />
+          {s.autoAllowed ? <Locks s={s} saved={s.policy} /> : <HumanValidation assistant={assistant} />}
+          <Usage s={s} policy={s.policy} assistant={assistant} />
         </aside>
       </div>
 

@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import { sendJSON, toAppError, type AppError } from "../lib/api";
 import { setQueryData } from "../lib/cache";
 import { keys, useSettings } from "../lib/queries";
+import { useFeature } from "../lib/features";
 import { navigate, sitePath } from "../lib/router";
 import type { CreateSiteRequest, SiteResponse, SitesResponse } from "../lib/types";
 import { Button, Link } from "../ui/Button";
@@ -41,6 +42,7 @@ const GRID = [
 
 export function AddSite({ hasSites }: { hasSites: boolean }) {
   const settings = useSettings();
+  const assistant = useFeature("assistant");
   const [value, setValue] = useState("");
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [serverError, setServerError] = useState<AppError | null>(null);
@@ -94,7 +96,7 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
         <section className="onboard__intro">
           <h1 className="onboard__title">{hasSites ? "Ajouter un site" : "Quel site voulez-vous analyser ?"}</h1>
           <p className="onboard__lead">
-            Indiquez son adresse. Chaque page est lue et notée sur 100, puis vous obtenez les problèmes expliqués, les actions à mener en priorité et un assistant qui connaît votre site.
+            Indiquez son adresse. Chaque page est lue et notée sur 100, puis vous obtenez les problèmes expliqués{assistant ? ", les actions à mener en priorité et un assistant qui connaît votre site." : " et les actions à mener en priorité."}
           </p>
 
           <form className="onboard__form" onSubmit={submit} noValidate>
@@ -157,8 +159,8 @@ export function AddSite({ hasSites }: { hasSites: boolean }) {
               <span>Chaque problème est expliqué simplement, avec les pages concernées et la correction à appliquer.</span>
             </li>
             <li>
-              <strong>Plan d'action et assistant</strong>
-              <span>Les actions sont classées par effet et par effort. Posez vos questions à l'assistant à partir de vos données.</span>
+              <strong>{assistant ? "Plan d'action et assistant" : "Plan d'action"}</strong>
+              <span>Les actions sont classées par effet et par effort.{assistant ? " Posez vos questions à l'assistant à partir de vos données." : ""}</span>
             </li>
           </ol>
         </section>

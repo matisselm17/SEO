@@ -5,7 +5,7 @@ import type {
   ChatState, CompetitorsData, IssueResponse, IssuesResponse, Overview, PageResponse, PageSummary, PagesResponse,
   FailedPagesResponse, RecommendationsResponse, SearchConsoleData, Settings, ShopifyChangesResponse, ShopifyField, ShopifyResourceResponse,
   ShopifyResourceType, ShopifyResourcesResponse, ShopifyState, SiteResponse, SitesResponse, ShopifyBatchesResponse, ShopifyBatchResponse,
-  AutomationState, AnalyticsData, PageSpeedState,
+  AutomationState, AnalyticsData, PageSpeedState, ProgressResponse,
 } from "./types";
 
 const s = (id: string) => `/sites/${encodeURIComponent(id)}`;
@@ -45,6 +45,8 @@ export const keys = {
   shopifyChanges: (id: string, offset: number) => `${s(id)}/shopify/changes?offset=${offset}&limit=${SHOPIFY_PAGE}`,
   shopifyChangesPost: (id: string) => `${s(id)}/shopify/changes`,
   shopifyRestore: (id: string, changeId: string) => `${s(id)}/shopify/changes/${encodeURIComponent(changeId)}/restore`,
+  /** Relecture à la demande de la page publique après une correction (lecture seule côté boutique). */
+  shopifyVerify: (id: string, changeId: string) => `${s(id)}/shopify/changes/${encodeURIComponent(changeId)}/verify`,
   /** Lots de corrections (sous le préfixe de la boutique : relus à l'événement « shopify »). */
   shopifyBatches: (id: string) => `${s(id)}/shopify/batches`,
   shopifyBatch: (id: string, batchId: string) => `${s(id)}/shopify/batches/${encodeURIComponent(batchId)}`,
@@ -59,6 +61,8 @@ export const keys = {
   analyticsSync: (id: string) => `${s(id)}/analytics/sync`,
   pageSpeed: (id: string) => `${s(id)}/pagespeed`,
   pageSpeedCancel: (id: string) => `${s(id)}/pagespeed/cancel`,
+  /** Évolution entre la première et la dernière analyse terminée, et bilan des corrections. */
+  progress: (id: string) => `${s(id)}/progress`,
 };
 
 /** Taille d'une page de liste de la boutique (éléments, historique). */
@@ -127,3 +131,4 @@ export const useShopifyBatch = (id: string, batchId: string | null) => useQuery<
 export const useAutomation = (id: string, enabled = true) => useQuery<AutomationState>(enabled ? keys.automation(id) : null);
 export const useAnalytics = (id: string, enabled = true) => useQuery<AnalyticsData>(enabled ? keys.analytics(id) : null);
 export const usePageSpeed = (id: string, enabled = true) => useQuery<PageSpeedState>(enabled ? keys.pageSpeed(id) : null);
+export const useProgress = (id: string, enabled = true) => useQuery<ProgressResponse>(enabled ? keys.progress(id) : null);

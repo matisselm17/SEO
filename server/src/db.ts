@@ -17,6 +17,8 @@ const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 3000;
+-- Les lignes supprimées sont écrasées par des zéros (effacement d'une boutique : rien ne reste dans les pages libres).
+PRAGMA secure_delete = ON;
 
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,
@@ -156,6 +158,39 @@ BEGIN
 END;
 -- Le déclencheur des mises à jour est (re)créé par migrate(), après l'ajout des colonnes du journal.
 
+-- Relectures de la page publique après une correction (vérification). Ajout seul : une ligne par relecture,
+-- jamais modifiée ni supprimée (déclencheurs). Sans lien vers sites, comme l'historique qu'elle complète.
+CREATE TABLE IF NOT EXISTS shopify_verifications (
+  id TEXT PRIMARY KEY,
+  change_id TEXT NOT NULL,
+  site_host TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  message TEXT NOT NULL,
+  url TEXT,
+  displayed INTEGER,
+  rendered TEXT,
+  criterion_id TEXT,
+  criterion_before TEXT,
+  criterion_after TEXT,
+  criterion_points INTEGER,
+  criterion_max INTEGER,
+  criterion_message TEXT,
+  page_score_before INTEGER,
+  page_score_after INTEGER
+);
+CREATE INDEX IF NOT EXISTS shopify_verifications_change ON shopify_verifications(change_id);
+CREATE INDEX IF NOT EXISTS shopify_verifications_site ON shopify_verifications(site_host);
+CREATE TRIGGER IF NOT EXISTS shopify_verifications_no_update BEFORE UPDATE ON shopify_verifications
+BEGIN
+  SELECT RAISE(ABORT, 'vérifications Shopify : modification interdite');
+END;
+CREATE TRIGGER IF NOT EXISTS shopify_verifications_no_delete BEFORE DELETE ON shopify_verifications
+BEGIN
+  SELECT RAISE(ABORT, 'vérifications Shopify : suppression interdite');
+END;
+
 -- Lots de corrections. Sans lien vers sites (comme l'historique) : un lot n'est jamais supprimé.
 CREATE TABLE IF NOT EXISTS shopify_batches (
   id TEXT PRIMARY KEY,
@@ -258,7 +293,141 @@ export function openDb(dataDir: string | ":memory:"): DB {
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
   migrate(db);
+  runMigrations(db);
   return db;
+}
+
+/**
+ * Migrations numérotées (docs/format-echange.md, « Base »). Chacune s'exécute une seule fois, dans une transaction,
+ * et laisse sa trace dans `schema_migrations`. Ne jamais modifier une migration publiée : en ajouter une nouvelle.
+ * Elles s'appliquent après le schéma de départ (CREATE IF NOT EXISTS) et l'ajout de colonnes historique (`migrate`).
+ */
+export const MIGRATIONS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+  {
+    version: 1,
+    name: "boutiques",
+    sql: `
+CREATE TABLE shops (
+  domain TEXT PRIMARY KEY,
+  access_token TEXT,
+  access_expires_at INTEGER,
+  refresh_token TEXT,
+  refresh_expires_at INTEGER,
+  scopes TEXT,
+  installed_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  uninstalled_at TEXT
+);`,
+  },
+  {
+    version: 2,
+    name: "site_de_la_boutique",
+    sql: `
+ALTER TABLE sites ADD COLUMN shop_domain TEXT;
+CREATE UNIQUE INDEX sites_shop_domain ON sites(shop_domain) WHERE shop_domain IS NOT NULL;`,
+  },
+  {
+    version: 3,
+    name: "appels_shopify_et_effacement",
+    sql: `
+-- Appels signés reçus de Shopify (doublons) : identifiant, sujet, date. Ni le corps, ni la boutique.
+CREATE TABLE webhook_events (
+  webhook_id TEXT PRIMARY KEY,
+  topic TEXT NOT NULL,
+  received_at TEXT NOT NULL
+);
+CREATE INDEX webhook_events_received ON webhook_events(received_at);
+
+-- Demandes d'effacement d'une boutique (shop/redact), exécutées après la réponse et reprises jusqu'à leur clôture.
+-- Le domaine n'est gardé que tant que la demande est en attente : effacé à la clôture.
+CREATE TABLE shop_redactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_domain TEXT,
+  received_at TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'closed')),
+  outcome TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  closed_at TEXT
+);
+CREATE INDEX shop_redactions_pending ON shop_redactions(state, shop_domain);
+
+-- Autorisation d'effacer l'historique d'UNE adresse de site : une ligne au plus, posée et retirée dans la même
+-- transaction par purgeShop (shopify/redact.ts), seule fonction qui l'écrit. Vide en dehors de cette transaction.
+CREATE TABLE history_delete_grant (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  site_host TEXT NOT NULL
+);
+
+-- Les quatre tables d'historique refusent toujours la suppression, sauf pour l'adresse portée par l'autorisation.
+DROP TRIGGER IF EXISTS shopify_changes_no_delete;
+CREATE TRIGGER shopify_changes_no_delete BEFORE DELETE ON shopify_changes
+WHEN NOT EXISTS (SELECT 1 FROM history_delete_grant g WHERE g.id = 1 AND g.site_host = OLD.site_host)
+BEGIN
+  SELECT RAISE(ABORT, 'historique Shopify : suppression interdite');
+END;
+DROP TRIGGER IF EXISTS shopify_verifications_no_delete;
+CREATE TRIGGER shopify_verifications_no_delete BEFORE DELETE ON shopify_verifications
+WHEN NOT EXISTS (SELECT 1 FROM history_delete_grant g WHERE g.id = 1 AND g.site_host = OLD.site_host)
+BEGIN
+  SELECT RAISE(ABORT, 'vérifications Shopify : suppression interdite');
+END;
+DROP TRIGGER IF EXISTS shopify_batches_no_delete;
+CREATE TRIGGER shopify_batches_no_delete BEFORE DELETE ON shopify_batches
+WHEN NOT EXISTS (SELECT 1 FROM history_delete_grant g WHERE g.id = 1 AND g.site_host = OLD.site_host)
+BEGIN
+  SELECT RAISE(ABORT, 'lots de corrections : suppression interdite');
+END;
+DROP TRIGGER IF EXISTS shopify_batch_items_no_delete;
+CREATE TRIGGER shopify_batch_items_no_delete BEFORE DELETE ON shopify_batch_items
+WHEN NOT EXISTS (SELECT 1 FROM history_delete_grant g JOIN shopify_batches b ON b.site_host = g.site_host WHERE g.id = 1 AND b.id = OLD.batch_id)
+BEGIN
+  SELECT RAISE(ABORT, 'lots de corrections : suppression interdite');
+END;`,
+  },
+  {
+    version: 4,
+    name: "avis_rejoues_et_preuves_d_effacement",
+    sql: `
+-- Date du dernier enregistrement de jetons : un avis de désinstallation daté d'avant est écarté.
+ALTER TABLE shops ADD COLUMN tokens_saved_at TEXT;
+-- Dernier avertissement « demande en attente au-delà de 30 jours » (au plus un par jour).
+ALTER TABLE shop_redactions ADD COLUMN last_warned_at TEXT;
+-- Empreintes (SHA-256) des corps d'avis de désinstallation traités, gardées sans limite de durée : un corps déjà
+-- vu n'est jamais retraité, quel que soit son identifiant. Ni le corps, ni la boutique en clair.
+CREATE TABLE IF NOT EXISTS uninstall_digests (
+  digest TEXT PRIMARY KEY,
+  received_at TEXT NOT NULL
+);`,
+  },
+  {
+    version: 5,
+    name: "avis_de_desinstallation_verifies",
+    sql: `
+-- Un avis de désinstallation n'est plus jamais cru sur parole : Shopify est interrogé. Les empreintes des corps ne
+-- servent plus (une seconde désinstallation réelle au corps identique doit être traitée).
+DROP TABLE IF EXISTS uninstall_digests;
+-- Avis de désinstallation en attente de confirmation par Shopify (une ligne par boutique), reposés au démarrage puis
+-- toutes les heures, sans aucun effet entre-temps. Supprimés quand Shopify a répondu clairement.
+CREATE TABLE IF NOT EXISTS uninstall_checks (
+  shop_domain TEXT PRIMARY KEY,
+  received_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT
+);`,
+  },
+];
+
+export function runMigrations(db: DB, migrations: ReadonlyArray<{ version: number; name: string; sql: string }> = MIGRATIONS): void {
+  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+  const done = new Set((db.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: number }>).map((r) => Number(r.version)));
+  for (const m of [...migrations].sort((a, b) => a.version - b.version)) {
+    if (done.has(m.version)) continue;
+    tx(db, () => {
+      db.exec(m.sql);
+      db.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(m.version, m.name, new Date().toISOString());
+    });
+  }
 }
 
 /**

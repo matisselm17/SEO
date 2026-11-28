@@ -20,6 +20,7 @@ import { StrengthList } from "./Overview";
 import { useOverflowHint } from "../ui/useVirtual";
 import { NoResults, QueryError, RelaunchButton, ReliabilityNote, isRunning } from "./common";
 import { SpeedSection } from "./Speed";
+import { useFeature } from "../lib/features";
 
 type SevFilter = "all" | Severity;
 
@@ -146,7 +147,7 @@ function Evidence({ issue, siteId }: { issue: IssueDetail; siteId: string }) {
 function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: string | null; onClose: () => void }) {
   const q = useIssue(site.id, issueId);
   const settings = useSettings();
-  const chatReady = settings.data?.integrations.chat.configured === true;
+  const chatReady = useFeature("assistant") && settings.data?.integrations.chat.configured === true;
   const issue = q.data?.issue && q.data.issue.id === issueId ? q.data.issue : null;
   const askAssistant = () => {
     if (!issue) return;
@@ -240,6 +241,7 @@ function IssueSheet({ site, issueId, onClose }: { site: SiteSummary; issueId: st
 export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: string | null }) {
   const q = useIssues(site.id);
   const search = useSearch();
+  const speed = useFeature("pageSpeed");
   // Une valeur inconnue dans l'adresse revient à « tous », plutôt qu'à une liste vide.
   const rawSev = search.get("gravite");
   const sev: SevFilter = rawSev === "critical" || rawSev === "warning" || rawSev === "info" ? rawSev : "all";
@@ -369,7 +371,7 @@ export function AuditScreen({ site, issueId }: { site: SiteSummary; issueId: str
             ))
           )}
 
-          {!cat && sev === "all" && <SpeedSection site={site} />}
+          {!cat && sev === "all" && speed && <SpeedSection site={site} />}
 
           {q.data.strengths.length > 0 && !cat && sev === "all" && (
             <Section id="audit-strengths" title="Ce qui est déjà bien fait" description="Critères validés sur au moins 90 % des pages.">

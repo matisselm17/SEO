@@ -213,7 +213,7 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
   const primary = conn?.primaryLocale ?? "fr";
   const primaryName = localeLabel(primary).toLowerCase();
   const [intent, setIntent] = useState<WriteIntent | null>(null);
-  const [changed, setChanged] = useState<{ at: string; verified: boolean } | null>(null);
+  const [changed, setChanged] = useState<{ at: string; verified: boolean; restore: boolean; locale: boolean } | null>(null);
   const [resets, setResets] = useState<Record<string, number>>({});
   const [draftTitle, setDraftTitle] = useState<string | null>(null);
   const [draftDesc, setDraftDesc] = useState<string | null>(null);
@@ -297,7 +297,7 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
   };
 
   const onDone = (res: ShopifyChangeResponse) => {
-    setChanged({ at: res.change.appliedAt, verified: res.change.afterVerified });
+    setChanged({ at: res.change.appliedAt, verified: res.change.afterVerified, restore: res.change.kind === "restore", locale: !!res.change.locale });
     const k = changeKey(res.change.field, res.change.image?.id, res.change.locale);
     setResets((m) => ({ ...m, [k]: (m[k] ?? 0) + 1 }));
   };
@@ -383,14 +383,24 @@ export function ShopifyResourceSheet({ site, shop, resourceId, onClose }: { site
                   </div>
                 )}
                 {changed && (
-                  <div className={`notice notice--compact ${changed.verified ? "notice--good" : "notice--warning"}`} role="status">
-                    {changed.verified ? <CircleCheck size={15} className="notice__icon" aria-hidden /> : <Info size={15} className="notice__icon" aria-hidden />}
+                  <div className={`notice notice--compact ${!changed.verified ? "notice--warning" : changed.restore ? "notice--good" : "notice--info"}`} role="status">
+                    {changed.verified && changed.restore ? <CircleCheck size={15} className="notice__icon" aria-hidden /> : <Info size={15} className="notice__icon" aria-hidden />}
                     <div className="notice__body">
-                      <p className="notice__title">{changed.verified ? `Boutique modifiée le ${fmtDateTime(changed.at)}` : `Modification acceptée par Shopify le ${fmtDateTime(changed.at)}`}</p>
+                      <p className="notice__title">
+                        {!changed.verified
+                          ? `Modification acceptée par Shopify le ${fmtDateTime(changed.at)}`
+                          : changed.restore
+                            ? `Valeur d'avant remise dans Shopify le ${fmtDateTime(changed.at)}`
+                            : `Valeur enregistrée dans Shopify le ${fmtDateTime(changed.at)}`}
+                      </p>
                       <p className="notice__text">
-                        {changed.verified
-                          ? "La note de la page ne changera qu'à la prochaine analyse du site, qui relira la page en ligne."
-                          : "La nouvelle valeur n'a pas pu être relue juste après. Relisez l'élément pour vérifier ce que montre la boutique."}
+                        {!changed.verified
+                          ? "La nouvelle valeur n'a pas pu être relue juste après. Relisez l'élément pour vérifier ce que montre la boutique."
+                          : changed.restore
+                            ? "La note de la page ne changera qu'à la prochaine analyse du site, qui relira la page en ligne."
+                            : changed.locale
+                              ? "Les traductions ne peuvent pas encore être vérifiées sur la page publique. La note de la page ne changera qu'à la prochaine analyse du site."
+                              : "Chat SEO va relire la page publique d'ici quelques secondes pour vérifier que la correction y apparaît : le résultat s'affiche dans l'historique ci-dessous. La note de la page dans l'analyse ne changera qu'à la prochaine analyse du site."}
                       </p>
                       <div className="notice__actions">
                         {changed.verified ? <RelaunchButton site={site} /> : <Button size="sm" variant="secondary" icon={<RefreshCw size={14} aria-hidden />} loading={q.fetching} onClick={() => void q.refetch()}>Relire l'élément</Button>}

@@ -3,11 +3,11 @@
  * Une seule valeur par confirmation ; l'avant et l'après sont toujours montrés.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, Image as ImageIcon, ImageOff, Info, Layers, RotateCcw, TriangleAlert, Undo2, Zap } from "lucide-react";
+import { ArrowRight, CircleAlert, CircleCheck, CircleMinus, ExternalLink, Image as ImageIcon, ImageOff, Info, Layers, RefreshCw, RotateCcw, TriangleAlert, Undo2, Zap } from "lucide-react";
 import { DEMO_ENABLED } from "../lib/transport";
-import type { ShopifyChange, ShopifyChangeRequest, ShopifyChangeResponse, ShopifyResourceType, SiteSummary } from "../lib/types";
+import type { CheckStatus, ShopifyChange, ShopifyChangeRequest, ShopifyChangeResponse, ShopifyResourceType, SiteSummary } from "../lib/types";
 import { toAppError, type AppError } from "../lib/api";
-import { FIELD_LABEL, TYPE_LABEL, applyShopifyChange, emptyMeaning, fieldInline, localeLabel, restoreShopifyChange, safeImageUrl } from "../lib/shopify";
+import { CRITERION_LABEL, FIELD_LABEL, TYPE_LABEL, applyShopifyChange, emptyMeaning, fieldInline, localeLabel, restoreShopifyChange, safeHttpsUrl, safeImageUrl, verifyShopifyChange } from "../lib/shopify";
 import { startAudit } from "../lib/actions";
 import { invalidateShopify } from "../lib/live";
 import { fmtDateTime } from "../lib/format";
@@ -16,6 +16,7 @@ import { Button, Link } from "../ui/Button";
 import { ErrorState, useRetryCountdown } from "../ui/States";
 import { Tag } from "../ui/Badge";
 import { useToast } from "../ui/Toast";
+import { CorrectionStatus } from "../ui/CorrectionStatus";
 import { shopPath, sitePath } from "../lib/router";
 
 /** Vignette d'une image Shopify : affichée seulement si son adresse est en https, sinon une vignette neutre. */
@@ -112,12 +113,22 @@ export function ConfirmWrite({ site, intent, onClose, onDone, onReload, onReread
     try {
       const res = isRestore ? await restoreShopifyChange(site.id, it.change.id) : await applyShopifyChange(site.id, it.req);
       if (res.change.afterVerified) {
-        toast.show({
-          tone: "success",
-          title: isRestore ? `Valeur d'avant remise dans Shopify` : `${FIELD_LABEL[field]} modifié dans Shopify`,
-          text: "La note de la page ne changera qu'à la prochaine analyse du site.",
-          action: { label: "Relancer l'analyse", onClick: () => void startAudit(site.id, undefined, toast) },
-        });
+        toast.show(
+          isRestore
+            ? {
+                tone: "success",
+                title: "Valeur d'avant remise dans Shopify",
+                text: "La note de la page ne changera qu'à la prochaine analyse du site.",
+                action: { label: "Relancer l'analyse", onClick: () => void startAudit(site.id, undefined, toast) },
+              }
+            : {
+                tone: "success",
+                title: "Valeur enregistrée dans Shopify",
+                text: locale
+                  ? "Les traductions ne peuvent pas encore être vérifiées sur la page publique."
+                  : "Chat SEO va relire la page publique d'ici quelques secondes pour vérifier la correction. Le résultat s'affiche dans l'historique.",
+              },
+        );
       } else {
         toast.show({
           tone: "neutral",
@@ -270,6 +281,14 @@ export function ChangeList({ site, changes, onRestore, showResource = true, empt
   /** Lecture seule : « Annuler » reste visible, désactivé, avec cette raison. */
   blocked?: string | null;
 }) {
+  // Relectures demandées en cours : la pastille passe à « Vérification en cours… » sans attendre la réponse.
+  const [checking, setChecking] = useState<ReadonlySet<string>>(() => new Set());
+  const onChecking = (id: string, on: boolean) => setChecking((prev) => {
+    const next = new Set(prev);
+    if (on) next.add(id);
+    else next.delete(id);
+    return next;
+  });
   if (changes.length === 0) return <>{empty ?? null}</>;
   const byId = new Map(changes.map((c) => [c.id, c]));
   return (
@@ -298,6 +317,9 @@ export function ChangeList({ site, changes, onRestore, showResource = true, empt
               <time dateTime={c.appliedAt}>{fmtDateTime(c.appliedAt)}</time>
               {showResource && <span className="mono change__path">{c.path}</span>}
             </p>
+            {c.kind === "edit" && c.correctionStatus && (
+              <div className="change__state"><CorrectionStatus status={checking.has(c.id) ? "verifying" : c.correctionStatus} /></div>
+            )}
           </div>
           <div className="change__body">
             {c.image && <Thumb url={c.image.url} size={40} />}
@@ -332,8 +354,121 @@ export function ChangeList({ site, changes, onRestore, showResource = true, empt
               <span className="change__status" title="Seule la dernière modification d'un champ peut être annulée.">Remplacée depuis</span>
             )}
           </div>
+          {c.kind === "edit" && c.correctionStatus && <Verification site={site} change={c} onChecking={onChecking} />}
         </li>
       ))}
     </ol>
+  );
+}
+
+const CRITERION_ICON: Record<CheckStatus, typeof CircleCheck> = { pass: CircleCheck, warn: TriangleAlert, fail: CircleMinus };
+
+function Verdict({ status }: { status: CheckStatus }) {
+  const Icon = CRITERION_ICON[status];
+  return <span className={`verdict verdict--${status}`}><Icon size={13} aria-hidden />{CRITERION_LABEL[status]}</span>;
+}
+
+/**
+ * Dernière relecture de la page publique pour une correction, et « Vérifier » à la demande.
+ * Tout ce qui vient de la page relue (message, texte affiché, adresse) est affiché comme du texte.
+ */
+function Verification({ site, change: c, onChecking }: { site: SiteSummary; change: ShopifyChange; onChecking: (id: string, on: boolean) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
+  const v = c.verification;
+  const status = c.correctionStatus;
+  // Une seule demande à la fois, même en cas de double appui.
+  const sending = useRef(false);
+  useEffect(() => setError(null), [c.id, v?.checkedAt]);
+
+  // Seule la dernière modification d'un champ, encore en place, se vérifie ; jamais pendant une relecture.
+  // Une traduction n'est pas encore vérifiable : pas de bouton qui ne mènerait à rien.
+  const canVerify = c.restorable && !c.locale && status !== "cancelled" && status !== "verifying";
+  if (!v && !canVerify && status !== "verifying") return null;
+
+  const verify = async () => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    onChecking(c.id, true);
+    setError(null);
+    try {
+      await verifyShopifyChange(site.id, c.id);
+    } catch (err) {
+      setError(toAppError(err));
+    } finally {
+      sending.current = false;
+      setBusy(false);
+      onChecking(c.id, false);
+    }
+  };
+
+  const href = safeHttpsUrl(v?.url ?? null);
+  return (
+    <div className="verif">
+      {status === "verifying" && !busy ? (
+        <p className="verif__msg"><Info size={14} aria-hidden /><span>La page publique va être relue pour vérifier que la correction y apparaît. Le résultat s'affichera ici.</span></p>
+      ) : busy ? (
+        <p className="verif__msg" role="status"><Info size={14} aria-hidden /><span>Relecture de la page publique en cours : cela peut prendre une vingtaine de secondes.</span></p>
+      ) : v ? (
+        <p className="verif__msg">
+          {v.outcome === "verified" ? <CircleCheck size={14} aria-hidden /> : v.outcome === "failed" ? <CircleAlert size={14} aria-hidden /> : <Info size={14} aria-hidden />}
+          <span>{v.message}</span>
+        </p>
+      ) : (
+        <p className="verif__msg"><Info size={14} aria-hidden /><span>La page publique n'a pas encore été relue depuis cette correction.</span></p>
+      )}
+
+      {v && (
+        <dl className="verif__facts">
+          <dt>Relue le</dt>
+          <dd><time dateTime={v.checkedAt}>{fmtDateTime(v.checkedAt)}</time></dd>
+          {v.rendered !== null && (
+            <>
+              <dt>Ce que la page affiche</dt>
+              <dd><span className="verif__rendered">{v.rendered}</span></dd>
+            </>
+          )}
+          {v.criterion && (
+            <>
+              <dt>Critère « {v.criterion.label} »</dt>
+              <dd>
+                {v.criterion.before ? <Verdict status={v.criterion.before} /> : <span>Page absente de l'analyse</span>}
+                <ArrowRight size={12} className="verif__arrow" aria-label="puis" />
+                <Verdict status={v.criterion.after} />
+              </dd>
+            </>
+          )}
+          {v.pageScore && (
+            <>
+              <dt>Note de la page</dt>
+              <dd className="tnum">
+                {v.pageScore.before !== null ? <span>{v.pageScore.before} sur 100</span> : <span>Pas de note dans l'analyse</span>}
+                <ArrowRight size={12} className="verif__arrow" aria-label="puis" />
+                <span>{v.pageScore.after} sur 100 sur la page relue</span>
+              </dd>
+            </>
+          )}
+        </dl>
+      )}
+
+      {(href || canVerify) && (
+        <div className="verif__foot">
+          {canVerify && (
+            <Button size="sm" variant="secondary" icon={<RefreshCw size={14} aria-hidden />} loading={busy} onClick={() => void verify()}>
+              {v ? "Vérifier à nouveau" : "Vérifier"}
+            </Button>
+          )}
+          {href && (
+            <a className="text-link verif__link" href={href} target="_blank" rel="noopener noreferrer">
+              Voir la page relue <ExternalLink size={12} aria-hidden /><span className="sr-only"> (nouvel onglet)</span>
+            </a>
+          )}
+        </div>
+      )}
+      {error && (
+        <p className="verif__error" role="alert"><CircleAlert size={13} aria-hidden /><span>{error.message}{error.action ? ` ${error.action}` : ""}</span></p>
+      )}
+    </div>
   );
 }

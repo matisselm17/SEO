@@ -84,8 +84,26 @@ function list<T extends string>(v: unknown, allowed: readonly T[], what: string)
   return out;
 }
 
+/**
+ * Bornes propres au serveur (mode intégré) : plafond du réglage de jetons d'IA (AI_TOKENS_PER_DAY_MAX) et mode
+ * « auto » absent. Vide en mode local : rien ne change.
+ */
+export interface PolicyBounds {
+  /** Plafond de `aiTokensPerDay` ; une règle enregistrée au-dessus est ramenée à ce plafond à la lecture. */
+  aiTokensMax?: number;
+  /** Mode intégré : le mode « auto » n'existe pas ; une règle « auto » déjà en base est lue « propose ». */
+  noAuto?: boolean;
+}
+
+/** Bornes des plafonds compte tenu des bornes du serveur (AutomationState.limits). */
+export function policyLimits(bounds: PolicyBounds = {}): AutomationState["limits"] {
+  if (bounds.aiTokensMax === undefined) return POLICY_LIMITS;
+  const { min, max } = POLICY_LIMITS.aiTokensPerDay;
+  return { ...POLICY_LIMITS, aiTokensPerDay: { min, max: Math.max(min, Math.min(max, bounds.aiTokensMax)) } };
+}
+
 /** Valide une règle reçue : toutes les clés, rien d'autre, chaque valeur dans ses bornes. */
-export function parsePolicy(raw: unknown): AutomationPolicy {
+export function parsePolicy(raw: unknown, limits: AutomationState["limits"] = POLICY_LIMITS): AutomationPolicy {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw errors.badRequest("La règle d'automatisation manque.", "Envoyez { policy: { … } }.");
   const o = raw as Record<string, unknown>;
   const extra = Object.keys(o).filter((k) => !(KEYS as readonly string[]).includes(k));
@@ -97,7 +115,7 @@ export function parsePolicy(raw: unknown): AutomationPolicy {
   if (typeof o.translations !== "boolean") throw errors.badRequest("« translations » doit valoir true ou false.", null);
   const bounded = (k: keyof typeof POLICY_LIMITS, label: string) => {
     const v = o[k];
-    const { min, max } = POLICY_LIMITS[k];
+    const { min, max } = limits[k];
     if (!isInt(v) || v < min || v > max) throw errors.badRequest(`${label} doit être un entier entre ${min.toLocaleString("fr-FR")} et ${max.toLocaleString("fr-FR")}.`, "Choisissez une valeur dans cette fourchette.");
     return v;
   };
@@ -115,15 +133,24 @@ export function parsePolicy(raw: unknown): AutomationPolicy {
 
 // ───────── Stockage
 
-export function getPolicy(db: DB, siteId: string): AutomationPolicy {
+export function getPolicy(db: DB, siteId: string, bounds: PolicyBounds = {}): AutomationPolicy {
   const r = db.prepare("SELECT policy_json FROM automation_policies WHERE site_id = ?").get(siteId) as Row | undefined;
-  if (!r) return structuredClone(DEFAULT_POLICY);
-  try {
-    return parsePolicy(JSON.parse(r.policy_json as string));
-  } catch {
-    // Une règle enregistrée illisible ne donne jamais plus de droits : on revient à la règle par défaut.
-    return structuredClone(DEFAULT_POLICY);
+  let policy: AutomationPolicy;
+  if (!r) policy = structuredClone(DEFAULT_POLICY);
+  else {
+    try {
+      policy = parsePolicy(JSON.parse(r.policy_json as string));
+    } catch {
+      // Une règle enregistrée illisible ne donne jamais plus de droits : on revient à la règle par défaut.
+      policy = structuredClone(DEFAULT_POLICY);
+    }
   }
+  // Bornes du serveur, appliquées à la lecture (une règle venue du mode local ne les dépasse jamais) : elles ne
+  // font que restreindre.
+  const max = policyLimits(bounds).aiTokensPerDay.max;
+  if (policy.aiTokensPerDay > max) policy.aiTokensPerDay = max;
+  if (bounds.noAuto && policy.mode === "auto") policy.mode = "propose";
+  return policy;
 }
 
 export function setPolicy(db: DB, siteId: string, policy: AutomationPolicy, at: string): void {

@@ -3,8 +3,10 @@
  * limitée au fil de la lecture, en-têtes de sécurité, compression, limites par minute.
  */
 import { brotliCompressSync, constants as zc, gzipSync } from "node:zlib";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "./errors.ts";
+import { parseShopDomain } from "./shopify/auth.ts";
+import { verifySessionToken } from "./shopify/session.ts";
 
 export const JSON_LIMIT = 64 * 1024;
 export const UPLOAD_LIMIT = 21 * 1024 * 1024;
@@ -23,15 +25,131 @@ export const CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-/** En-têtes de sécurité sur toutes les réponses. */
-export const securityHeaders: MiddlewareHandler = async (c, next) => {
+/** Domaine de l'administration Shopify, qui affiche l'application intégrée dans un cadre. */
+export const SHOPIFY_ADMIN_ORIGIN = "https://admin.shopify.com";
+/** Script App Bridge, chargé par index.html en mode intégré. */
+export const APP_BRIDGE_SRC = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
+
+/**
+ * Politique de sécurité du mode intégré : App Bridge depuis cdn.shopify.com. `frameAncestors` : liste de la directive
+ * `frame-ancestors` (`'none'` pour tout ce qui n'est pas la page de l'application).
+ */
+export function embeddedCsp(frameAncestors: string): string {
+  return CSP.split("; ")
+    .map((d) => (d === "frame-ancestors 'none'" ? `frame-ancestors ${frameAncestors}` : d))
+    .concat("script-src 'self' https://cdn.shopify.com")
+    .join("; ");
+}
+
+/**
+ * Mode intégré : `frame-ancestors` de la page de l'application. La boutique vient du paramètre `shop` de l'adresse
+ * s'il a la forme `xxx.myshopify.com` (il ne sert qu'à cet en-tête, jamais à identifier la requête) ; sinon
+ * l'administration Shopify seule.
+ */
+export function appFrameAncestors(url: string): string {
+  let shop: string | null = null;
+  try {
+    const raw = new URL(url).searchParams.get("shop");
+    // Forme exacte seulement : ni majuscules, ni schéma, ni espace (la valeur va telle quelle dans un en-tête).
+    shop = raw !== null && parseShopDomain(raw) === raw ? raw : null;
+  } catch {
+    shop = null;
+  }
+  return shop ? `https://${shop} ${SHOPIFY_ADMIN_ORIGIN}` : SHOPIFY_ADMIN_ORIGIN;
+}
+
+/** Page de l'application (index.html servi pour une route de l'interface) : hors /api et de type HTML. */
+function isAppPage(c: Context): boolean {
+  const p = c.req.path;
+  if (p === "/api" || p.startsWith("/api/")) return false;
+  return (c.res.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html");
+}
+
+/**
+ * En-têtes de sécurité sur toutes les réponses. Mode local : aucun cadre permis (`frame-ancestors 'none'`,
+ * `X-Frame-Options: DENY`). Mode intégré : pas de `X-Frame-Options` (qui ne sait pas exprimer une liste) ; la page de
+ * l'application peut s'afficher dans l'administration Shopify et la boutique qui l'ouvre, tout le reste
+ * (`/api`, fichiers) a `frame-ancestors 'none'`.
+ */
+export function securityHeadersFor(embedded: boolean): MiddlewareHandler {
+  return async (c, next) => {
+    await next();
+    const h = c.res.headers;
+    h.set("Content-Security-Policy", embedded ? embeddedCsp(isAppPage(c) ? appFrameAncestors(c.req.url) : "'none'") : CSP);
+    h.set("Referrer-Policy", "no-referrer");
+    h.set("X-Content-Type-Options", "nosniff");
+    if (embedded) {
+      h.delete("X-Frame-Options");
+      // Mode intégré (servi en HTTPS derrière Shopify) : le navigateur n'emploie plus jamais HTTP pour ce domaine.
+      h.set("Strict-Transport-Security", HSTS);
+    } else h.set("X-Frame-Options", "DENY");
+  };
+}
+
+/** Valeur de Strict-Transport-Security en mode intégré (docs/format-echange.md, « Exploitation », « Transport »). */
+export const HSTS = "max-age=31536000";
+
+/** En-têtes de sécurité du mode local. */
+export const securityHeaders: MiddlewareHandler = securityHeadersFor(false);
+
+/**
+ * Mode intégré, sur /api : une réponse d'une boutique n'est jamais resservie à une autre depuis un cache
+ * (`Cache-Control: private, no-cache`, `Vary: Authorization`). Les flux SSE gardent `no-cache` (pas de mise en tampon
+ * par un cache) ; ni compression ni corps ne sont touchés.
+ */
+export const privateApiCache: MiddlewareHandler = async (c, next) => {
   await next();
   const h = c.res.headers;
-  h.set("Content-Security-Policy", CSP);
-  h.set("Referrer-Policy", "no-referrer");
-  h.set("X-Content-Type-Options", "nosniff");
-  h.set("X-Frame-Options", "DENY");
+  h.set("Cache-Control", "private, no-cache");
+  const vary = (h.get("vary") ?? "").split(",").map((v) => v.trim().toLowerCase());
+  if (!vary.includes("authorization")) h.append("Vary", "Authorization");
 };
+
+/** En-tête qui demande à App Bridge un jeton de session neuf et de rejouer la requête une fois. */
+export const RETRY_SESSION_HEADER = "X-Shopify-Retry-Invalid-Session-Request";
+
+/** Refus d'identification : jamais la vérification qui a échoué, jamais le jeton ni le secret. */
+export const sessionErrors = {
+  unauthorized: () =>
+    new HttpError(401, "unauthorized", "Votre session Shopify n'est pas valide ou a expiré.", "Rechargez l'application depuis votre administration Shopify."),
+  /** Réservé à la désinstallation (lot C) : non émis pour l'instant. */
+  shopNotAllowed: () =>
+    new HttpError(403, "shop_not_allowed", "Cette application n'est pas ouverte depuis la boutique qu'elle sert.", "Ouvrez l'application depuis l'administration de la boutique concernée."),
+};
+
+/** Variables de contexte déposées par les gardes : `shop`, boutique du jeton de session vérifié (mode intégré). */
+export type AppEnv = { Variables: { shop?: string } };
+
+export interface SessionGuardOptions {
+  clientId: string;
+  secret: string;
+  now?: () => number;
+  /**
+   * Appelé après une vérification réussie, avec la boutique du jeton ; `rejected` (Shopify refuse le jeton à
+   * l'échange) donne un 401.
+   */
+  onSession?: (shop: string, token: string) => Promise<"ok" | "rejected">;
+}
+
+const BEARER = /^Bearer ([A-Za-z0-9_.-]{1,4096})$/;
+
+/**
+ * Mode intégré : jeton de session Shopify obligatoire sur toutes les routes où ce garde est monté (/api/*, flux SSE
+ * et routes inconnues comprises). Seul l'en-tête `Authorization: Bearer` est lu : jamais un paramètre d'adresse.
+ */
+export function guardSession(opts: SessionGuardOptions): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    const m = BEARER.exec(c.req.header("authorization") ?? "");
+    if (!m) throw sessionErrors.unauthorized();
+    const token = m[1];
+    const check = verifySessionToken(token, { secret: opts.secret, clientId: opts.clientId, now: opts.now });
+    if (!check.ok) throw sessionErrors.unauthorized();
+    // La boutique de la requête : celle du jeton vérifié, et rien d'autre (adresse, corps, en-tête).
+    if (opts.onSession && (await opts.onSession(check.shop, token)) === "rejected") throw sessionErrors.unauthorized();
+    c.set("shop", check.shop);
+    return next();
+  };
+}
 
 /** Port de l'interface de développement (Vite), qui relaie /api en gardant l'en-tête Host d'origine. */
 export const DEV_UI_PORT = "5173";
@@ -186,20 +304,21 @@ export const compress: MiddlewareHandler = async (c, next) => {
   c.res = new Response(out, { status: res.status, headers });
 };
 
-/** Limite par fenêtre glissante d'une minute. */
+/** Limite par fenêtre glissante (une minute par défaut ; `windowMs` pour une autre durée, ex. une heure). */
 export class RateLimiter {
   private hits = new Map<string, number[]>();
   constructor(
     private perMinute: number,
     private now: () => number = Date.now,
+    private windowMs = 60_000,
   ) {}
 
   /** Millisecondes avant qu'une demande de plus soit permise (0 : tout de suite). */
   waitMs(key: string): number {
     const t = this.now();
-    const list = (this.hits.get(key) ?? []).filter((x) => t - x < 60_000);
+    const list = (this.hits.get(key) ?? []).filter((x) => t - x < this.windowMs);
     this.hits.set(key, list);
-    return list.length < this.perMinute ? 0 : Math.max(1, list[0] + 60_000 - t);
+    return list.length < this.perMinute ? 0 : Math.max(1, list[0] + this.windowMs - t);
   }
 
   /**
@@ -222,11 +341,11 @@ export class RateLimiter {
   /** Lève rate_limited si la limite est atteinte ; sinon compte la demande. */
   take(key: string, what: string): void {
     const t = this.now();
-    const list = (this.hits.get(key) ?? []).filter((x) => t - x < 60_000);
+    const list = (this.hits.get(key) ?? []).filter((x) => t - x < this.windowMs);
     if (list.length >= this.perMinute) {
-      const retry = Math.max(1, Math.ceil((list[0] + 60_000 - t) / 1000));
+      const retry = Math.max(1, Math.ceil((list[0] + this.windowMs - t) / 1000));
       this.hits.set(key, list);
-      throw new HttpError(429, "rate_limited", `Trop de demandes ${what} en peu de temps.`, `Patientez ${retry} seconde${retry > 1 ? "s" : ""}, puis réessayez.`, {
+      throw new HttpError(429, "rate_limited", `Trop de demandes ${what} en peu de temps.`, retry >= 120 ? `Patientez ${Math.ceil(retry / 60)} minutes, puis réessayez.` : `Patientez ${retry} seconde${retry > 1 ? "s" : ""}, puis réessayez.`, {
         retryAfterSeconds: retry,
       });
     }

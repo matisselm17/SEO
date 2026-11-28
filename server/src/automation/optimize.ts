@@ -15,7 +15,7 @@ import type { SiteRow, Store } from "../store.ts";
 import type { BatchService } from "../shopify/batches.ts";
 import type { LiveImage } from "../shopify/read.ts";
 import type { ResourceAudit, ShopifyService } from "../shopify/service.ts";
-import { addUsage, automationErrors, failingByAudit, getPolicy, getUsage, ruleViolation } from "./policy.ts";
+import { addUsage, automationErrors, failingByAudit, getPolicy, getUsage, ruleViolation, type PolicyBounds } from "./policy.ts";
 
 const TYPES: ShopifyResourceType[] = ["product", "collection", "page", "article"];
 const FIELDS = ["seo_title", "seo_description", "image_alt"] as const;
@@ -63,8 +63,8 @@ interface Candidate {
 }
 
 /** Éléments que la règle autorise pour ce champ : d'abord ceux dont l'analyse est en défaut, puis les champs vides. */
-export function pickCandidates(shopify: ShopifyService, store: Store, site: SiteRow, field: OptimizeField, resourceType: ShopifyResourceType | null): Candidate[] {
-  const policy = getPolicy(store.db, site.id);
+export function pickCandidates(shopify: ShopifyService, store: Store, site: SiteRow, field: OptimizeField, resourceType: ShopifyResourceType | null, bounds: PolicyBounds = {}): Candidate[] {
+  const policy = getPolicy(store.db, site.id, bounds);
   const out: Candidate[] = [];
   for (const { row, audit } of shopify.storedRows(site.id)) {
     if (resourceType && row.type !== resourceType) continue;
@@ -139,6 +139,8 @@ export interface OptimizerDeps {
   client: ChatClient | null;
   model: string;
   now?: () => number;
+  /** Bornes du serveur sur la règle (mode intégré : plafond de jetons, pas de mode « auto »). */
+  bounds?: PolicyBounds;
 }
 
 export class Optimizer {
@@ -152,13 +154,18 @@ export class Optimizer {
     await this.preparing.get(siteId);
   }
 
+  /** Une préparation est-elle en cours (libération des services inactifs) ? */
+  busy(): boolean {
+    return this.preparing.size > 0;
+  }
+
   /** Contrôles avant de répondre 202, puis préparation en tâche de fond. */
   async start(site: SiteRow, body: Partial<OptimizeRequest>, chatNotConfigured: () => HttpError): Promise<ShopifyBatch> {
     const req = parseOptimizeRequest(body);
     const { store, shopify, batches } = this.d;
     shopify.assertConfigured();
     await batches.assertReady(site);
-    const policy = getPolicy(store.db, site.id);
+    const policy = getPolicy(store.db, site.id, this.d.bounds);
     if (policy.mode === "off") throw automationErrors.off();
     if (!this.d.client) throw chatNotConfigured();
     if (!policy.fields.includes(req.field)) throw automationErrors.notAllowed(ruleViolation(policy, { type: req.resourceType ?? policy.resourceTypes[0], field: req.field, locale: null, before: null, audit: null })!);
@@ -178,11 +185,11 @@ export class Optimizer {
     const client = this.d.client!;
     let error: ApiError["error"] | null = null;
     try {
-      const policy = getPolicy(store.db, site.id);
+      const policy = getPolicy(store.db, site.id, this.d.bounds);
       const want = Math.min(req.limit ?? policy.maxChangesPerRun, policy.maxChangesPerRun, 50);
       const info = await shopify.connectedInfo(site);
       const lang = (info.primaryLocale && LANG[info.primaryLocale.split("-")[0]]) || "français";
-      const candidates = pickCandidates(shopify, store, site, req.field, req.resourceType);
+      const candidates = pickCandidates(shopify, store, site, req.field, req.resourceType, this.d.bounds);
       let accepted = 0;
       let calls = 0;
       // Au plus deux appels par proposition voulue : une proposition écartée n'entraîne pas une dépense sans fin.

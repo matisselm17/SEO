@@ -66,6 +66,8 @@ export type Route =
   | { name: "shopify"; siteId: string; resourceId: string | null; view: ShopifyView; batchId: string | null }
   | { name: "assistant"; siteId: string }
   | { name: "settings"; siteId: string | null }
+  /** Rapport d'optimisation imprimable (pas d'entrée dans la navigation latérale). */
+  | { name: "report"; siteId: string }
   | { name: "notfound" };
 
 /** Onglets de la section Boutique Shopify, chacun avec son adresse. */
@@ -87,6 +89,7 @@ const SECTION_SLUGS: Record<string, SectionName> = {
   boutique: "shopify",
   assistant: "assistant",
   parametres: "settings",
+  rapport: "report",
 };
 
 export const SECTION_PATHS: Record<SectionName, string> = {
@@ -99,6 +102,7 @@ export const SECTION_PATHS: Record<SectionName, string> = {
   shopify: "/boutique",
   assistant: "/assistant",
   settings: "/parametres",
+  report: "/rapport",
 };
 
 export function parseRoute(path: string): Route {

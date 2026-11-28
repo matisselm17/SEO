@@ -6,7 +6,8 @@
  * internes dérivés (shr_…, img_…), stables d'une lecture à l'autre.
  */
 import { createHash } from "node:crypto";
-import type { ShopifyChange, ShopifyField, ShopifyResourceType } from "../../../shared/api.ts";
+import type { CheckStatus, ShopifyChange, ShopifyCorrectionStatus, ShopifyField, ShopifyResourceType, ShopifyVerification } from "../../../shared/api.ts";
+import { CRITERIA_BY_ID } from "../analyse/grille.ts";
 import { newId, tx, type DB, type Row } from "../db.ts";
 
 export const RESOURCE_TYPES: ShopifyResourceType[] = ["product", "collection", "page", "article"];
@@ -218,7 +219,7 @@ export function latestByField(db: DB, siteHost: string, resourceId?: string): Ma
  * avec la valeur envoyée et afterVerified false ; l'annuler reste sûr : l'annulation relit d'abord Shopify
  * et n'écrit que si la valeur actuelle est bien celle-là.
  */
-export function toChange(c: ChangeRow, latest: Map<string, string>): ShopifyChange {
+export function toChange(c: ChangeRow, latest: Map<string, string>, v: VerificationState = NO_VERIFICATION): ShopifyChange {
   return {
     id: c.id,
     resourceId: c.resource_id,
@@ -237,5 +238,113 @@ export function toChange(c: ChangeRow, latest: Map<string, string>): ShopifyChan
     restoredByChangeId: c.restored_by_change_id,
     batchId: c.batch_id ?? null,
     restorable: latest.get(fieldKey(c)) === c.id && c.restored_by_change_id === null,
+    correctionStatus: correctionStatus(c, v),
+    verification: c.kind === "restore" || !v.last ? null : toVerification(v.last),
+  };
+}
+
+/** La modification est-elle la dernière de son champ (élément, champ, image, langue) ? */
+export function isLatestOfField(c: ChangeRow, latest: Map<string, string>): boolean {
+  return latest.get(fieldKey(c)) === c.id;
+}
+
+// ───────── Vérifications (relectures de la page publique, ajout seul)
+
+export interface VerificationRow {
+  id: string;
+  change_id: string;
+  site_host: string;
+  checked_at: string;
+  outcome: ShopifyVerification["outcome"];
+  reason: ShopifyVerification["reason"];
+  message: string;
+  url: string | null;
+  displayed: number | null;
+  rendered: string | null;
+  criterion_id: string | null;
+  criterion_before: CheckStatus | null;
+  criterion_after: CheckStatus | null;
+  criterion_points: number | null;
+  criterion_max: number | null;
+  criterion_message: string | null;
+  page_score_before: number | null;
+  page_score_after: number | null;
+}
+
+/** Ce que le statut d'une modification doit savoir de ses vérifications. */
+export interface VerificationState {
+  /** Dernière relecture enregistrée ; null si aucune. */
+  last: VerificationRow | null;
+  /** Une relecture est en file ou en cours dans ce processus. */
+  verifying: boolean;
+}
+export const NO_VERIFICATION: VerificationState = { last: null, verifying: false };
+
+export function insertVerification(db: DB, v: Omit<VerificationRow, "id">): VerificationRow {
+  const id = newId("vrf");
+  db.prepare(
+    `INSERT INTO shopify_verifications (id, change_id, site_host, checked_at, outcome, reason, message, url, displayed, rendered,
+      criterion_id, criterion_before, criterion_after, criterion_points, criterion_max, criterion_message, page_score_before, page_score_after)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id, v.change_id, v.site_host, v.checked_at, v.outcome, v.reason, v.message, v.url, v.displayed, v.rendered,
+    v.criterion_id, v.criterion_before, v.criterion_after, v.criterion_points, v.criterion_max, v.criterion_message, v.page_score_before, v.page_score_after,
+  );
+  return db.prepare("SELECT * FROM shopify_verifications WHERE id = ?").get(id) as unknown as VerificationRow;
+}
+
+/** Dernière relecture de chaque modification d'un site (par identifiant de modification). */
+export function lastVerifications(db: DB, siteHost: string): Map<string, VerificationRow> {
+  const rows = db
+    .prepare(
+      `SELECT * FROM shopify_verifications WHERE site_host = ?
+       AND rowid IN (SELECT MAX(rowid) FROM shopify_verifications WHERE site_host = ? GROUP BY change_id)`,
+    )
+    .all(siteHost, siteHost) as unknown as VerificationRow[];
+  return new Map(rows.map((r) => [r.change_id, r]));
+}
+
+export function countVerifications(db: DB, changeId: string): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM shopify_verifications WHERE change_id = ?").get(changeId) as { n: number }).n;
+}
+
+export function lastVerification(db: DB, changeId: string): VerificationRow | null {
+  return (db.prepare("SELECT * FROM shopify_verifications WHERE change_id = ? ORDER BY rowid DESC LIMIT 1").get(changeId) as unknown as VerificationRow) ?? null;
+}
+
+/** Statut de la correction, calculé (jamais stocké) : voir ShopifyChange.correctionStatus. */
+export function correctionStatus(c: ChangeRow, v: VerificationState): ShopifyCorrectionStatus | null {
+  // Une écriture non confirmée par Shopify (« pending ») n'est pas une correction appliquée.
+  if (c.kind === "restore" || c.status !== "applied") return null;
+  if (c.restored_by_change_id) return "cancelled";
+  if (v.verifying) return "verifying";
+  if (v.last?.outcome === "verified") return "verified";
+  if (v.last?.outcome === "failed") return "failed";
+  return "applied";
+}
+
+export function toVerification(r: VerificationRow): ShopifyVerification {
+  const criterion =
+    r.criterion_id && r.criterion_after !== null && r.criterion_points !== null && r.criterion_max !== null
+      ? {
+          id: r.criterion_id,
+          label: CRITERIA_BY_ID.get(r.criterion_id)?.label ?? r.criterion_id,
+          before: r.criterion_before,
+          after: r.criterion_after,
+          points: r.criterion_points,
+          max: r.criterion_max,
+          message: r.criterion_message ?? "",
+        }
+      : null;
+  return {
+    checkedAt: r.checked_at,
+    outcome: r.outcome,
+    reason: r.reason,
+    message: r.message,
+    url: r.url,
+    displayed: r.displayed === null ? null : r.displayed === 1,
+    rendered: r.rendered,
+    criterion,
+    pageScore: r.page_score_after === null ? null : { before: r.page_score_before, after: r.page_score_after },
   };
 }

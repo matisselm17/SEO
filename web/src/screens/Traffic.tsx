@@ -21,6 +21,7 @@ import { useToast } from "../ui/Toast";
 import { CodeBlock } from "../ui/CodeBlock";
 import { QueryError } from "./common";
 import { VisitsChapter } from "./Visits";
+import { useFeature } from "../lib/features";
 
 type Available = Extract<SearchConsoleData, { available: true }>;
 const ACCEPT = ".zip,.csv,application/zip,text/csv";
@@ -457,7 +458,10 @@ function Imported({ data, site }: { data: Available; site: SiteSummary }) {
 
 export function TrafficScreen({ site }: { site: SiteSummary }) {
   const q = useSearchConsole(site.id);
-  const google = useSettings().data?.integrations.searchConsole.configured === true;
+  // « Lire depuis Google » n'existe que si la section le permet (Settings.features.searchConsoleSync) ; le dépôt reste.
+  const syncAllowed = useFeature("searchConsoleSync");
+  const google = useSettings().data?.integrations.searchConsole.configured === true && syncAllowed;
+  const visits = useFeature("analytics");
   const g = useGoogleSync(site.id);
   const toast = useToast();
   const u = useUpload(site.id);
@@ -486,7 +490,9 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
     <>
       <PageHeader
         title="Mots-clés et trafic organique"
-        description="Ce que Google vous apporte : les recherches qui mènent à votre site, les pages sur lesquelles on clique, puis ce que font les visiteurs une fois arrivés."
+        description={visits
+          ? "Ce que Google vous apporte : les recherches qui mènent à votre site, les pages sur lesquelles on clique, puis ce que font les visiteurs une fois arrivés."
+          : "Ce que Google vous apporte : les recherches qui mènent à votre site et les pages sur lesquelles on clique."}
         meta={data?.available ? (
           <span className="gsc-source small">
             <span className="gsc-source__tag">{data.source === "google" ? "Lu chez Google" : "Export déposé"}</span>
@@ -520,7 +526,7 @@ export function TrafficScreen({ site }: { site: SiteSummary }) {
       {data && !data.available && <NoImport siteId={site.id} google={google} />}
       {data && data.available && <Imported data={data} site={site} />}
       {data?.available && <p className="muted small gsc-foot">{plural(data.queries?.length ?? 0, "recherche", "recherches")} et {plural(data.pages?.length ?? 0, "page", "pages")} {data.source === "google" ? "lues chez Google" : "dans l'export"}.</p>}
-      {data && <VisitsChapter site={site} withGsc={data.available} />}
+      {data && visits && <VisitsChapter site={site} withGsc={data.available} />}
     </>
   );
 }

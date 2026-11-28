@@ -3,7 +3,8 @@ import { Menu, Moon, Sun, WifiOff, X } from "lucide-react";
 import type { SiteSummary } from "../lib/types";
 import { sitePath, usePath, type SectionName } from "../lib/router";
 import { prefetch } from "../lib/cache";
-import { keys, useSettings } from "../lib/queries";
+import { keys } from "../lib/queries";
+import { sectionState, useFeatures, useShopifySection } from "../lib/features";
 import { setTheme, useTheme } from "../lib/theme";
 import { DEMO_ENABLED } from "../lib/transport";
 import { Link } from "../ui/Button";
@@ -84,8 +85,10 @@ function SidebarContent({ sites, site, section, counts, onNavigate }: {
   onNavigate?: () => void;
 }) {
   // « Boutique Shopify » n'apparaît que si une boutique est configurée côté serveur (ou si on y est déjà, par l'adresse).
-  const shopify = useSettings().data?.integrations.shopify?.configured === true;
-  const items = NAV.filter((n) => n.id !== "shopify" || shopify || section === "shopify");
+  const shopify = useShopifySection();
+  // Sections facultatives (Settings.features) : absentes tant que les réglages ne sont pas chargés.
+  const features = useFeatures();
+  const items = NAV.filter((n) => (n.id !== "shopify" || shopify || section === "shopify") && sectionState(n.id, features) === true);
   return (
     <>
       <div className="sidebar__top">

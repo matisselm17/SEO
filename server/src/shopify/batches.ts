@@ -22,7 +22,7 @@ import type {
   ShopifyResourceType,
   UpdateBatchItemRequest,
 } from "../../../shared/api.ts";
-import { addUsage, autoEnabled, autoGate, automationErrors, getPolicy, getUsage, ruleViolation, type AutoDecision } from "../automation/policy.ts";
+import { addUsage, autoEnabled, autoGate, automationErrors, getPolicy, getUsage, ruleViolation, type AutoDecision, type PolicyBounds } from "../automation/policy.ts";
 import { newId, tx, type DB, type Row } from "../db.ts";
 import { errors, HttpError } from "../errors.ts";
 import type { EventHub } from "../events.ts";
@@ -167,12 +167,15 @@ export interface BatchServiceOptions {
   now?: () => number;
   /** Attente entre deux écritures quand la cadence est atteinte (les tests la remplacent). */
   sleep?: (ms: number) => Promise<void>;
+  /** Bornes du serveur sur la règle (mode intégré : pas de mode « auto »). */
+  bounds?: PolicyBounds;
 }
 
 export class BatchService {
   readonly autoAllowed: boolean;
   private readonly now: () => number;
   private readonly sleep?: (ms: number) => Promise<void>;
+  private readonly bounds: PolicyBounds;
   /** Écriture (ou annulation) en cours ou réservée, par site. */
   private running = new Map<string, Run>();
 
@@ -185,6 +188,12 @@ export class BatchService {
     this.autoAllowed = opts.autoAllowed === true;
     this.now = opts.now ?? Date.now;
     this.sleep = opts.sleep;
+    this.bounds = opts.bounds ?? {};
+  }
+
+  /** Une écriture ou une annulation est-elle en cours (libération des services inactifs) ? */
+  busy(): boolean {
+    return this.running.size > 0;
   }
 
   private get db(): DB {
@@ -196,7 +205,7 @@ export class BatchService {
 
   // ───── Vues
 
-  private itemView(r: ItemRow): ShopifyBatchItem {
+  private itemView(r: ItemRow, withStatus = false): ShopifyBatchItem {
     let state = r.state;
     // Une ligne écrite puis annulée depuis l'historique (seule) est montrée annulée.
     if (state === "applied" && r.change_id && getChange(this.db, r.change_id)?.restored_by_change_id) state = "restored";
@@ -215,13 +224,14 @@ export class BatchService {
       selected: r.selected === 1,
       state,
       changeId: r.change_id,
+      correctionStatus: withStatus && r.change_id ? this.shopify.correctionStatusOf(r.change_id) : null,
       error: r.error,
       autoApplied: r.auto_applied === 1,
     };
   }
 
-  private view(b: BatchRow): ShopifyBatch {
-    const items = itemsOf(this.db, b.id).map((r) => this.itemView(r));
+  private view(b: BatchRow, withStatus = true): ShopifyBatch {
+    const items = itemsOf(this.db, b.id).map((r) => this.itemView(r, withStatus));
     const counts = { total: items.length, selected: 0, applied: 0, conflict: 0, failed: 0, restored: 0 };
     for (const i of items) {
       if (i.selected) counts.selected++;
@@ -251,7 +261,8 @@ export class BatchService {
   list(site: SiteRow): ShopifyBatchSummary[] {
     const rows = this.db.prepare("SELECT * FROM shopify_batches WHERE site_host = ? ORDER BY rowid DESC").all(site.host) as unknown as BatchRow[];
     return rows.map((b) => {
-      const { items: _items, ...summary } = this.view(b);
+      // Le résumé n'a pas besoin du statut de chaque correction.
+      const { items: _items, ...summary } = this.view(b, false);
       return summary;
     });
   }
@@ -367,7 +378,7 @@ export class BatchService {
    * Une proposition refusée n'entre pas dans le lot (elle n'est jamais corrigée en silence).
    */
   async addProposals(site: SiteRow, batchId: string | null, origin: ProposalOrigin, proposals: Proposal[], opts: { title?: string } = {}): Promise<{ batch: ShopifyBatch | null; refused: Refusal[] }> {
-    const policy = getPolicy(this.db, site.id);
+    const policy = getPolicy(this.db, site.id, this.bounds);
     if (policy.mode === "off") throw automationErrors.off();
     // Un lot de l'IA ne reçoit des propositions que pendant sa préparation (jamais après un abandon).
     const stillPreparing = () => !batchId || getBatch(this.db, batchId)?.state === "preparing";
@@ -454,7 +465,7 @@ export class BatchService {
   maybeAutoApply(site: SiteRow, batchId: string): boolean {
     const b = this.row(site, batchId);
     if (b.origin !== "automation" || b.state !== "draft") return false;
-    const policy = getPolicy(this.db, site.id);
+    const policy = getPolicy(this.db, site.id, this.bounds);
     if (!autoEnabled({ writesEnabled: this.shopify.writesEnabled, autoAllowed: this.autoAllowed, policy, origin: b.origin })) return false;
     if (this.running.has(site.id) || this.applyingIn(site)) return false;
     let run: Run;
@@ -617,7 +628,7 @@ export class BatchService {
     return autoGate({
       writesEnabled: this.shopify.writesEnabled,
       autoAllowed: this.autoAllowed,
-      policy: getPolicy(this.db, site.id),
+      policy: getPolicy(this.db, site.id, this.bounds),
       origin: getBatch(this.db, batchId)?.origin ?? "manual",
       line: { type: item.resource_type, field: item.field, locale: item.locale, before: item.before_value, audit: this.shopify.auditFor(site.id, item.resource_id), proposed: item.proposed, resourceTitle: item.resource_title },
       usage: getUsage(this.db, site.host, this.now()),

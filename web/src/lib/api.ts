@@ -1,4 +1,5 @@
-import { transport } from "./transport";
+import { SessionTokenError, transport } from "./transport";
+import { ACCESS_FALLBACK, denyAccess } from "./access";
 import type { ApiError, ErrorCode } from "./types";
 
 /** Erreur affichable : celle du serveur, ou une erreur réseau construite ici. */
@@ -56,6 +57,10 @@ async function errorFromResponse(res: Response): Promise<ApiRequestError> {
       details: e.details,
     });
   }
+  if (res.status === 401) {
+    // Refus d'identification au corps illisible : texte de repli du mode intégré.
+    return new ApiRequestError({ code: "unauthorized", ...ACCESS_FALLBACK, status: 401 });
+  }
   return new ApiRequestError({
     code: "internal",
     message: res.status >= 500 ? "Le serveur a rencontré une erreur." : "La requête n'a pas abouti.",
@@ -71,9 +76,20 @@ export async function request(path: string, init?: RequestInit): Promise<Respons
     res = await transport(`/api${path}`, init);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (err instanceof SessionTokenError) {
+      // App Bridge n'a pas donné de jeton cette fois : aucune requête n'est partie. C'est peut-être passager
+      // (réseau, administration lente) : erreur ordinaire, réessayable, sans remplacer l'application.
+      throw new ApiRequestError({ ...NETWORK_ERROR, message: "Shopify n'a pas confirmé votre session.", action: "Réessayez dans un instant, ou rechargez la page." });
+    }
     throw new ApiRequestError(NETWORK_ERROR);
   }
-  if (!res.ok && res.status !== 304) throw await errorFromResponse(res);
+  if (!res.ok && res.status !== 304) {
+    const e = await errorFromResponse(res);
+    // 401 : la relance avec un jeton neuf a déjà eu lieu dans transport, ou la page est hors de Shopify.
+    // 403 shop_not_allowed : jeton valide d'une autre boutique. Les deux remplacent l'application entière.
+    if (res.status === 401 || (res.status === 403 && e.code === "shop_not_allowed")) denyAccess({ message: e.message, action: e.action });
+    throw e;
+  }
   return res;
 }
 

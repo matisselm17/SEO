@@ -53,7 +53,14 @@ Note de passage pour reprendre le travail dans une nouvelle session. Les règles
 - Texte alternatif des images de collection et d'article : à vérifier sur une boutique d'essai.
 - Le site public a renvoyé une page de vérification anti-robot après de nombreux chargements le 27 novembre : espacer les analyses.
 
-## Vérifié
+## Ajouté le 27 novembre (nuit) : vérification des corrections
+
+Une écriture acceptée par Shopify n'est plus considérée comme une correction réussie. Après chaque modification, le serveur relit la page publique (`server/src/shopify/verification.ts`), lui applique la grille de l'analyse et donne un statut : appliquée, vérification en cours, vérifiée, échouée, annulée. Chaque relecture est gardée dans un journal en ajout seul (`shopify_verifications`). L'historique, la fiche d'un élément et les lignes d'un lot affichent ce statut ; un bouton « Vérifier » relance la relecture. Aucune écriture ni appel à Shopify dans ce chemin. Essai réel en lecture seule : 11 des 12 corrections en place vérifiées, la traduction non vérifiable. Détail et points ouverts : `docs/plan-validation-corrections.md`.
+
+## Ajouté le 28 novembre : cap sur la mise en production, lot A
+
+Le plan est dans `docs/plan-mise-en-production.md` (périmètre de la V1, blocages, lots A à E, hébergement, soumission). Les lots A (connexion d'application publique intégrée à Shopify, mode `embedded`), B (plusieurs boutiques, jetons chiffrés en base, un site par boutique, séparation testée sur toutes les routes, migrations numérotées), C (désinstallation et effacement sur appels signés de Shopify), D (sections masquées, limites par boutique, sauvegardes, `/healthz`, image de déploiement) et E (évolution et rapport d'optimisation, boutique protégée par un mot de passe) sont développés et testés avec un faux Shopify ; ils n'ont jamais tourné dans une vraie administration Shopify. Le mode `local` reste le mode par défaut et n'a pas changé. Contrat : `docs/format-echange.md`, section « Application intégrée à Shopify ».
+
 
 - `npm --prefix server run typecheck` et `npm --prefix server run test` : 108 tests réussis.
 - `npm --prefix web run typecheck` et `npm --prefix web run build`.

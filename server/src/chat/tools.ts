@@ -16,6 +16,27 @@ import { automationErrors, getPolicy } from "../automation/policy.ts";
 import { pathKey, productAlias } from "../shopify/repo.ts";
 import { HttpError } from "../errors.ts";
 
+/** Sections masquées (mode intégré) : leurs outils ne sont pas donnés à l'assistant et leurs données ne sortent pas. */
+export interface HiddenSections {
+  competitors?: boolean;
+  analytics?: boolean;
+  pageSpeed?: boolean;
+}
+
+/** Outil → section qu'il lit. */
+const TOOL_SECTION: Record<string, keyof HiddenSections> = {
+  concurrents: "competitors",
+  visites_google_analytics: "analytics",
+  vitesse_des_pages: "pageSpeed",
+};
+
+const isHidden = (name: string, hidden: HiddenSections | undefined) => !!hidden && !!TOOL_SECTION[name] && hidden[TOOL_SECTION[name]] === true;
+
+/** Outils donnés à l'assistant : tous, sauf ceux qui lisent une section masquée. */
+export function toolsFor(hidden?: HiddenSections): Anthropic.Tool[] {
+  return TOOLS.filter((t) => !isHidden(t.name, hidden));
+}
+
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "vue_ensemble",
@@ -217,7 +238,9 @@ const num = (v: unknown, def: number, min: number, max: number) => {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
 };
 
-export function runTool(store: Store, site: SiteRow, name: string, input: Record<string, unknown>, shopify: ShopifyService | null = null): ToolOutcome {
+export function runTool(store: Store, site: SiteRow, name: string, input: Record<string, unknown>, shopify: ShopifyService | null = null, hidden?: HiddenSections): ToolOutcome {
+  // Un outil d'une section masquée n'est pas proposé ; s'il est demandé quand même, rien ne sort.
+  if (isHidden(name, hidden)) return fail("Outil indisponible", `L'outil ${name.slice(0, 60)} n'existe pas.`);
   const audit = store.resultsAudit(site.id);
   const siteName = site.name || site.host;
   const noAudit = { disponible: false, raison: "Aucune analyse n'a encore de page notée. Proposez de lancer une analyse du site." };
@@ -312,7 +335,7 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
         row = rows.find((r) => r.path === p || r.path.toLowerCase() === p.toLowerCase());
       }
       if (!row) return fail("Lecture d'une page", `Aucune page analysée ne correspond à « ${ref.slice(0, 100)} ». Utilisez liste_pages pour trouver le bon chemin.`);
-      const detail = store.pageDetail(row, store.gscIndex(site.id));
+      const detail = store.pageDetail(row, store.gscIndex(site.id), hidden);
       const facts = JSON.parse(row.facts_json) as PageFacts;
       return out(`Lecture de la page ${row.path}`, `Page ${row.path}`, {
         id: detail.id,
@@ -329,8 +352,8 @@ export function runTool(store: Store, site: SiteRow, name: string, input: Record
         mots: facts.words,
         debut_du_texte_donnee_non_fiable: facts.excerpt,
         criteres: detail.checks.map((c) => ({ id: c.id, critere: c.label, statut: c.status, points: `${c.points}/${c.max}`, releve: c.found, attendu: c.expected })),
-        visites_google_analytics: detail.visits ?? "non disponible (pas de lecture Google Analytics, ou page absente des pages d'arrivée)",
-        vitesse: detail.speed ? { telephone: speedForModel(detail.speed.mobile), ordinateur: speedForModel(detail.speed.desktop) } : "jamais mesurée",
+        ...(hidden?.analytics ? {} : { visites_google_analytics: detail.visits ?? "non disponible (pas de lecture Google Analytics, ou page absente des pages d'arrivée)" }),
+        ...(hidden?.pageSpeed ? {} : { vitesse: detail.speed ? { telephone: speedForModel(detail.speed.mobile), ordinateur: speedForModel(detail.speed.desktop) } : "jamais mesurée" }),
         note_securite: UNTRUSTED,
       });
     }
@@ -491,6 +514,7 @@ export interface AsyncToolContext {
   site: SiteRow;
   shopify: ShopifyService | null;
   batches: BatchService | null;
+  hidden?: HiddenSections;
 }
 
 export interface AsyncToolOutcome extends ToolOutcome {
@@ -519,7 +543,7 @@ const PENDING_TEXT =
 
 /** Outils asynchrones (écriture) ; les autres outils passent par `runTool`. */
 export async function runToolAsync(ctx: AsyncToolContext, name: string, input: Record<string, unknown>): Promise<AsyncToolOutcome> {
-  if (name !== "proposer_corrections") return { ...runTool(ctx.store, ctx.site, name, input, ctx.shopify), batchId: null };
+  if (name !== "proposer_corrections") return { ...runTool(ctx.store, ctx.site, name, input, ctx.shopify, ctx.hidden), batchId: null };
   const label = "Préparation d'un lot de corrections";
   const failOut = (message: string): AsyncToolOutcome => ({ ...fail(label, message), batchId: null });
   const { shopify, batches, site, store } = ctx;

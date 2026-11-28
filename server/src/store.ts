@@ -37,6 +37,8 @@ export interface SiteRow {
   host: string;
   name: string | null;
   created_at: string;
+  /** Mode intégré : domaine `xxx.myshopify.com` de la boutique propriétaire ; null en mode local (jamais renvoyé). */
+  shop_domain?: string | null;
 }
 
 export interface AuditRow {
@@ -103,20 +105,62 @@ export function parseSpeedMeasure(v: unknown, siteId: string): SpeedMeasure | nu
   return null;
 }
 
+/** Note et gravités des problèmes d'une analyse (résumé gardé pour la frise de l'évolution). */
+export interface AuditSummary {
+  score: number | null;
+  severities: Array<"critical" | "warning" | "info">;
+}
+
+/** Analyses dont l'agrégat et les enregistrements des pages restent en mémoire (les plus récemment lues). */
+export const AUDIT_CACHE_MAX = 16;
+/** Résumés d'analyses gardés (quelques octets chacun). */
+export const SUMMARY_CACHE_MAX = 512;
+
+/** Lecture d'un cache borné : une entrée lue redevient la plus récente ; une version périmée est oubliée. */
+function cacheGet<T extends { version: number }>(cache: Map<string, T>, key: string, version: number): T | null {
+  const v = cache.get(key);
+  if (!v) return null;
+  cache.delete(key);
+  if (v.version !== version) return null;
+  cache.set(key, v);
+  return v;
+}
+
+/** Écriture dans un cache borné : au-delà de `max` entrées, les moins récemment lues sont oubliées. */
+function cacheSet<T>(cache: Map<string, T>, key: string, value: T, max: number): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > max) cache.delete(cache.keys().next().value as string);
+}
+
 export class Store {
-  /** Cache des agrégats par analyse, invalidé à chaque page ajoutée. */
+  /**
+   * Caches par analyse, invalidés à chaque page ajoutée et bornés (`AUDIT_CACHE_MAX`, les moins récemment lus sont
+   * oubliés) : le détail des pages des analyses anciennes ne reste pas en mémoire.
+   */
   private aggCache = new Map<string, { version: number; agg: SiteAggregate }>();
   private recordCache = new Map<string, { version: number; records: PageRecord[] }>();
+  /** Note et compteurs d'une analyse (frise de l'évolution), sans les enregistrements des pages. */
+  private summaryCache = new Map<string, { version: number; summary: AuditSummary }>();
   private versions = new Map<string, number>();
 
   constructor(public db: DB) {}
 
   // ───────── Sites
 
-  insertSite(url: string, host: string, name: string | null): SiteRow {
-    const row: SiteRow = { id: newId("site"), url, host, name, created_at: now() };
-    this.db.prepare("INSERT INTO sites (id, url, host, name, created_at) VALUES (?, ?, ?, ?, ?)").run(row.id, row.url, row.host, row.name, row.created_at);
+  insertSite(url: string, host: string, name: string | null, shopDomain: string | null = null): SiteRow {
+    const row: SiteRow = { id: newId("site"), url, host, name, created_at: now(), shop_domain: shopDomain };
+    this.db.prepare("INSERT INTO sites (id, url, host, name, created_at, shop_domain) VALUES (?, ?, ?, ?, ?, ?)").run(row.id, row.url, row.host, row.name, row.created_at, shopDomain);
     return row;
+  }
+  /** Mode intégré : site de la boutique (au plus un, index unique). */
+  siteByShop(shopDomain: string): SiteRow | null {
+    return (this.db.prepare("SELECT * FROM sites WHERE shop_domain = ?").get(shopDomain) as unknown as SiteRow) ?? null;
+  }
+  /** Rattache à une boutique un site qui n'en a pas encore. Renvoie false si le site a déjà une boutique (ou n'existe plus). */
+  attachSiteToShop(siteId: string, shopDomain: string): boolean {
+    const res = this.db.prepare("UPDATE sites SET shop_domain = ? WHERE id = ? AND shop_domain IS NULL").run(shopDomain, siteId);
+    return Number(res.changes) === 1;
   }
   getSite(id: string): SiteRow | null {
     return (this.db.prepare("SELECT * FROM sites WHERE id = ?").get(id) as unknown as SiteRow) ?? null;
@@ -195,6 +239,10 @@ export class Store {
         .prepare("SELECT * FROM audits WHERE site_id = ? AND seq < ? AND state = 'done' AND pages_done > 0 ORDER BY seq DESC LIMIT 1")
         .get(siteId, beforeSeq) as unknown as AuditRow) ?? null
     );
+  }
+  /** Analyses terminées avec au moins une page notée, de la plus ancienne à la plus récente. */
+  doneAudits(siteId: string): AuditRow[] {
+    return this.db.prepare("SELECT * FROM audits WHERE site_id = ? AND state = 'done' AND pages_done > 0 ORDER BY seq").all(siteId) as unknown as AuditRow[];
   }
   runningAudits(): AuditRow[] {
     return this.db.prepare("SELECT * FROM audits WHERE state IN ('queued', 'running')").all() as unknown as AuditRow[];
@@ -290,29 +338,54 @@ export class Store {
     return r ? (JSON.parse(r.data_json as string) as CatalogueProduct[]) : null;
   }
 
+  /** Après un effacement fait directement en base (shopify/redact.ts) : oublie les caches de ces analyses. */
+  forgetAudits(auditIds: string[]): void {
+    for (const id of auditIds) this.invalidate(id, true);
+  }
+
   private invalidate(auditId: string, drop = false): void {
     this.versions.set(auditId, (this.versions.get(auditId) ?? 0) + 1);
     if (drop) {
       this.aggCache.delete(auditId);
       this.recordCache.delete(auditId);
+      this.summaryCache.delete(auditId);
     }
+  }
+
+  /** Taille des caches par analyse (tests). */
+  cacheSizes(): { aggregates: number; records: number; summaries: number } {
+    return { aggregates: this.aggCache.size, records: this.recordCache.size, summaries: this.summaryCache.size };
+  }
+
+  /**
+   * Note et compteurs de problèmes d'une analyse, calculés comme `aggregate` mais sans garder les enregistrements des
+   * pages ni l'agrégat complet (seul ce résumé, de quelques octets, est gardé).
+   */
+  auditSummary(auditId: string, siteName: string): AuditSummary {
+    const version = this.versions.get(auditId) ?? 0;
+    const hit = cacheGet(this.summaryCache, auditId, version);
+    if (hit) return hit.summary;
+    const agg = cacheGet(this.aggCache, auditId, version)?.agg ?? aggregate(cacheGet(this.recordCache, auditId, version)?.records ?? this.pageRows(auditId).map(toRecord), siteName, this.catalogue(auditId));
+    const summary: AuditSummary = { score: agg.score, severities: agg.issues.map((i) => i.severity) };
+    cacheSet(this.summaryCache, auditId, { version, summary }, SUMMARY_CACHE_MAX);
+    return summary;
   }
 
   records(auditId: string): PageRecord[] {
     const version = this.versions.get(auditId) ?? 0;
-    const cached = this.recordCache.get(auditId);
-    if (cached && cached.version === version) return cached.records;
+    const cached = cacheGet(this.recordCache, auditId, version);
+    if (cached) return cached.records;
     const records = this.pageRows(auditId).map(toRecord);
-    this.recordCache.set(auditId, { version, records });
+    cacheSet(this.recordCache, auditId, { version, records }, AUDIT_CACHE_MAX);
     return records;
   }
 
   aggregate(auditId: string, siteName: string): SiteAggregate {
     const version = this.versions.get(auditId) ?? 0;
-    const cached = this.aggCache.get(auditId);
-    if (cached && cached.version === version) return cached.agg;
+    const cached = cacheGet(this.aggCache, auditId, version);
+    if (cached) return cached.agg;
     const agg = aggregate(this.records(auditId), siteName, this.catalogue(auditId));
-    this.aggCache.set(auditId, { version, agg });
+    cacheSet(this.aggCache, auditId, { version, agg }, AUDIT_CACHE_MAX);
     return agg;
   }
 
@@ -587,7 +660,8 @@ export class Store {
     };
   }
 
-  pageDetail(r: PageRow, gsc: Map<string, { clicks: number; impressions: number; position: number }> | null): PageDetail {
+  /** `hidden` : sections masquées (mode intégré) ; leurs données valent null. */
+  pageDetail(r: PageRow, gsc: Map<string, { clicks: number; impressions: number; position: number }> | null, hidden?: { analytics?: boolean; pageSpeed?: boolean }): PageDetail {
     const facts = JSON.parse(r.facts_json) as PageFacts;
     const checks = JSON.parse(r.checks_json) as PageCheck[];
     return {
@@ -605,8 +679,8 @@ export class Store {
       },
       // L'export « Performances » ne relie pas les requêtes aux pages ; la lecture directe chez Google, si.
       queries: this.gscQueriesFor(r.site_id, r.url_key),
-      visits: this.visitsFor(r.site_id, r.path),
-      speed: this.speedFor(r.site_id, r.path),
+      visits: hidden?.analytics ? null : this.visitsFor(r.site_id, r.path),
+      speed: hidden?.pageSpeed ? null : this.speedFor(r.site_id, r.path),
       // Renseigné par la route (ShopifyService.resourceIdForPage) : dépend de la boutique configurée et lue.
       shopifyResourceId: null,
     };

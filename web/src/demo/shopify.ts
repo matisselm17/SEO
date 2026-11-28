@@ -43,9 +43,10 @@
 import type {
   ApiError, AutomationPolicy, AutomationState, CheckStatus, CreateBatchRequest, ErrorCode, OptimizeRequest, ProposalOrigin, ShopifyBatch,
   ShopifyBatchItem, ShopifyChange, ShopifyChangeRequest, ShopifyConnection, ShopifyField, ShopifyImage, ShopifyResourceDetail,
-  ShopifyResourceSummary, ShopifyResourceType, ShopifyState, ShopifyTranslation, UpdateAutomationRequest, UpdateBatchItemRequest,
+  ShopifyResourceSummary, ShopifyResourceType, ShopifyState, ShopifyTranslation, ShopifyVerification, UpdateAutomationRequest, UpdateBatchItemRequest,
 } from "../lib/types";
 import { rng, type DemoPage } from "./data";
+import { demoEmbeddedMode } from "../lib/embedded";
 
 export type ShopMode = "lecture" | "ecriture" | "ecriture-partielle" | "jamais-lue" | "erreur" | "non-configuree";
 const MODES: ShopMode[] = ["lecture", "ecriture", "ecriture-partielle", "jamais-lue", "erreur", "non-configuree"];
@@ -76,6 +77,8 @@ interface Res {
   en: Record<"seo_title" | "seo_description", { value: string | null; outdated: boolean }>;
   /** Page de l'inventaire de même chemin. */
   pagePath: string;
+  /** Note de cette page dans l'inventaire (null : pas de page analysée). */
+  score: number | null;
 }
 
 interface Shop {
@@ -87,6 +90,12 @@ interface Shop {
   batches: ShopifyBatch[];
   automation: AutomationState;
   timers: Map<string, ReturnType<typeof setInterval>>;
+  /** Relectures à programmer dès qu'une requête fournit de quoi émettre l'événement « shopify ». */
+  pendingVerify: string[];
+  /** Corrections laissées « appliquées » sans relecture au chargement (comme après un redémarrage du serveur). */
+  seedKeep: Set<string>;
+  /** Relectures à la demande de la dernière minute (10 au plus). */
+  verifies: number[];
 }
 
 const scopesAll = ["read_content", "read_products", "read_translations", "write_content", "write_files", "write_products", "write_translations"];
@@ -161,7 +170,7 @@ function buildShop(inventory: DemoPage[]): Shop {
     resources.push({
       // Comme le serveur : « shr_ » suivi de 6 à 40 caractères [a-z0-9].
       id: `shr_${(slug.normalize("NFD").replace(/[^a-z0-9]/g, "").slice(0, 30) + n.toString(36)).padEnd(6, "0")}`,
-      type, path: p.summary.path, title: name, seoTitle, seoDescription, images, pagePath: p.summary.path,
+      type, path: p.summary.path, title: name, seoTitle, seoDescription, images, pagePath: p.summary.path, score: p.summary.score,
       en: {
         seo_title: { value: seoTitle && r() > 0.5 ? `${name} — handmade stoneware | Atelier Lune` : null, outdated: r() > 0.8 },
         seo_description: { value: seoDescription && r() > 0.4 ? `${name}: hand-thrown stoneware made in our Nantes workshop.` : null, outdated: r() > 0.7 },
@@ -176,8 +185,12 @@ function buildShop(inventory: DemoPage[]): Shop {
   const changes: ShopifyChange[] = [];
   if (bol) {
     const before = null;
-    bol.seoDescription = "Bol en grès émaillé bleu, tourné à la main à Nantes.";
+    bol.seoDescription = "Bol en grès émaillé bleu, tourné à la main dans notre atelier de Nantes. Passe au lave-vaisselle.";
     changes.push(change(bol, "seo_description", null, null, before, bol.seoDescription, "2026-11-27T10:20:31.000Z", "edit"));
+    // Une traduction : la relecture ne peut pas conclure (pas encore vérifiable).
+    const prevEn = bol.en.seo_description.value;
+    bol.en.seo_description = { value: `${bol.title}: blue glazed stoneware bowl, hand-thrown in our Nantes workshop.`, outdated: false };
+    changes.push(change(bol, "seo_description", null, "en", prevEn, bol.en.seo_description.value, "2026-11-27T10:24:12.000Z", "edit"));
     const other = resources.filter((x) => x.type === "collection")[1];
     if (other) {
       const prev = other.seoTitle;
@@ -188,11 +201,17 @@ function buildShop(inventory: DemoPage[]): Shop {
   }
   const shop: Shop = {
     resources, changes, syncedAt: shopMode === "jamais-lue" ? null : "2026-11-27T10:12:04.000Z", writes: [], lastSync: null,
-    batches: [], automation: initialAutomation(), timers: new Map(),
+    batches: [], automation: initialAutomation(), timers: new Map(), pendingVerify: [], seedKeep: new Set(), verifies: [],
   };
   if (shop.syncedAt) seedBatches(shop);
   shop.changes.sort((a, b) => b.appliedAt.localeCompare(a.appliedAt));
   refreshRestorable(shop.changes);
+  // Relectures déjà faites au chargement, sauf celles laissées « appliquées » ou encore en attente.
+  for (const c of shop.changes) {
+    if (c.kind !== "edit" || c.correctionStatus !== "applied" || !c.restorable || shop.seedKeep.has(c.id)) continue;
+    if (shop.pendingVerify.includes(c.id)) c.correctionStatus = "verifying";
+    else applyVerification(shop, c, new Date(new Date(c.appliedAt).getTime() + 16_000).toISOString());
+  }
   return shop;
 }
 
@@ -202,6 +221,7 @@ function change(res: Res, field: ShopifyField, image: ShopifyImage | null, local
     id: `chg_${(seq++).toString(36)}`, resourceId: res.id, resourceType: res.type, resourceTitle: res.title, path: res.path, field,
     image: image ? { id: image.id, url: image.url } : null, locale, before, after, appliedAt: at, kind,
     afterVerified: true, restoresChangeId: restores, restoredByChangeId: null, restorable: false, batchId: null,
+    correctionStatus: kind === "edit" ? "applied" : null, verification: null,
   };
 }
 
@@ -211,8 +231,100 @@ function refreshRestorable(changes: ShopifyChange[]) {
   for (const c of changes) {
     const k = `${c.resourceId}|${c.field}|${c.image?.id ?? ""}|${c.locale ?? ""}`;
     c.restorable = !seen.has(k) && c.restoredByChangeId === null;
+    if (c.kind === "edit" && c.restoredByChangeId !== null) c.correctionStatus = "cancelled";
     seen.add(k);
   }
+}
+
+// ───────── Relecture de la page publique après une correction (même grille que l'analyse, simulée)
+
+const CRITERION: Record<ShopifyField, { id: string; label: string; max: number }> = {
+  seo_title: { id: "title", label: "Titre de la page", max: 8 },
+  seo_description: { id: "meta_description", label: "Description", max: 7 },
+  image_alt: { id: "image_alt", label: "Textes alternatifs des images", max: 5 },
+};
+const pointsOf = (st: CheckStatus, max: number) => (st === "pass" ? max : st === "warn" ? Math.round(max * 0.6) : 0);
+
+/** Ce que la page publique affiche pour un champ, quand ce champ vaut `value`. */
+function renderedFor(res: Res, field: "seo_title" | "seo_description", value: string | null): string | null {
+  return field === "seo_title" ? `${value ?? res.title} – ${SHOP_NAME}` : value ?? bodyStart(res);
+}
+
+function verificationOf(res: Res, c: ShopifyChange, at: string): ShopifyVerification {
+  if (c.locale) {
+    return {
+      checkedAt: at, outcome: "inconclusive", reason: "not_supported",
+      message: "Les traductions ne peuvent pas encore être vérifiées sur la page publique : la correction reste appliquée.",
+      url: null, displayed: null, rendered: null, criterion: null, pageScore: null,
+    };
+  }
+  const url = `https://${SHOP_HOST}${res.path}`;
+  const crit = CRITERION[c.field];
+  const analysed = res.score !== null;
+  let rendered: string | null;
+  let displayed: boolean | null;
+  let before: CheckStatus;
+  let after: CheckStatus;
+  let critMessage: string;
+  if (c.field === "image_alt") {
+    const im = res.images.find((i) => i.id === c.image?.id);
+    if (!im) {
+      return { checkedAt: at, outcome: "inconclusive", reason: "image_not_found", message: "L'image n'a pas été retrouvée sur la page publique : la correction n'a pas pu être vérifiée.", url, displayed: null, rendered: null, criterion: null, pageScore: null };
+    }
+    rendered = im.alt;
+    displayed = c.after === null ? null : im.alt === c.after;
+    const described = res.images.filter((i) => i.alt).length;
+    const describedBefore = described - (c.before ? 0 : 1) + (c.after ? 0 : 1);
+    const status = (n: number): CheckStatus => (n >= res.images.length ? "pass" : n > 0 ? "warn" : "fail");
+    before = status(describedBefore);
+    after = status(described);
+    critMessage = `${described} image${described > 1 ? "s" : ""} décrite${described > 1 ? "s" : ""} sur ${res.images.length}.`;
+  } else {
+    const [min, max] = c.field === "seo_title" ? [30, 60] : [70, 160];
+    rendered = renderedFor(res, c.field, c.field === "seo_title" ? res.seoTitle : res.seoDescription);
+    displayed = c.after === null ? null : !!rendered && rendered.includes(c.after);
+    before = gridStatus(renderedFor(res, c.field, c.before), min, max);
+    after = gridStatus(rendered, min, max);
+    const n = rendered ? [...rendered].length : 0;
+    critMessage = c.field === "seo_title" ? `Le titre affiché fait ${n} caractères.` : rendered ? `La description fait ${n} caractères.` : "Aucune description affichée.";
+  }
+  const thing = c.field === "seo_title" ? "le nouveau titre" : c.field === "seo_description" ? "la nouvelle description" : "le nouveau texte alternatif";
+  // Le texte alternatif se juge sur l'image elle-même ; titre et description, sur le critère de la grille.
+  const ok = c.field === "image_alt" ? displayed !== false : displayed !== false && after === "pass";
+  const outcome: ShopifyVerification["outcome"] = ok ? "verified" : "failed";
+  const reason: ShopifyVerification["reason"] = ok ? "ok" : displayed === false ? "not_displayed" : "criterion_failing";
+  const message = ok
+    ? c.field === "image_alt"
+      ? "L'image porte bien le nouveau texte alternatif sur la page publique."
+      : `La page affiche ${thing} et le critère « ${crit.label} » est validé.`
+    : reason === "not_displayed"
+      ? `La page n'affiche pas encore ${thing} : la boutique met parfois quelques minutes à se mettre à jour.`
+      : `La page affiche bien ${thing}, mais le critère « ${crit.label} » n'est pas encore validé : ${critMessage.charAt(0).toLowerCase()}${critMessage.slice(1, -1)}.`;
+  const pts = pointsOf(after, crit.max);
+  return {
+    checkedAt: at, outcome, reason, message, url, displayed,
+    rendered: rendered ? [...rendered].slice(0, 300).join("") : null,
+    criterion: { id: crit.id, label: crit.label, before: analysed ? before : null, after, points: pts, max: crit.max, message: critMessage },
+    pageScore: analysed ? { before: res.score, after: Math.max(0, Math.min(100, res.score! + pts - pointsOf(before, crit.max))) } : null,
+  };
+}
+
+function applyVerification(shop: Shop, c: ShopifyChange, at: string) {
+  const res = shop.resources.find((r) => r.id === c.resourceId);
+  if (!res) return;
+  const v = verificationOf(res, c, at);
+  c.verification = v;
+  c.correctionStatus = v.outcome === "inconclusive" ? "applied" : v.outcome;
+}
+
+/** Relecture automatique, quelques secondes après l'écriture (une quinzaine côté serveur). */
+function scheduleVerify(ctx: ShopCtx, shop: Shop, c: ShopifyChange, ms: number) {
+  c.correctionStatus = "verifying";
+  setTimeout(() => {
+    if (c.correctionStatus !== "verifying" || !c.restorable) return;
+    applyVerification(shop, c, new Date().toISOString());
+    ctx.emit();
+  }, ms);
 }
 
 // ───────── Réponses
@@ -392,6 +504,10 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
   if (conn.state === "other_shop") return apiError(409, "shopify_other_shop", `La boutique connectée (${SHOP_HOST}) n'est pas celle de ce site.`, `Ouvrez le site ${SHOP_HOST} pour gérer sa boutique.`, { shopHost: SHOP_HOST });
   if (conn.state === "error") return apiError(502, "shopify_unavailable", "Shopify ne répond pas pour le moment.", "Réessayez dans quelques minutes.", { retryable: true });
   const shop = shopOf(ctx);
+  for (const id of shop.pendingVerify.splice(0)) {
+    const c = shop.changes.find((x) => x.id === id);
+    if (c) scheduleVerify(ctx, shop, c, 12_000);
+  }
 
   if (sub === "sync" && method === "POST") {
     // Une lecture complète par minute au plus.
@@ -442,6 +558,22 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
       const limit = Math.min(200, Math.max(1, Number(q.get("limit") ?? 50)));
       await ctx.delay(140);
       return json({ changes: shop.changes.slice(offset, offset + limit), total: shop.changes.length, offset, limit });
+    }
+    // Relecture à la demande : n'écrit rien, disponible même quand les écritures sont désactivées.
+    if (method === "POST" && parts[1] && parts[2] === "verify") {
+      const target = shop.changes.find((c) => c.id === parts[1]);
+      if (!target) return apiError(404, "not_found", "Cette modification n'existe pas.", null);
+      if (target.kind !== "edit" || !target.restorable || target.correctionStatus === "cancelled") {
+        return apiError(400, "bad_request", "Cette modification a été annulée ou remplacée depuis : seule la dernière modification d'un champ se vérifie.", null);
+      }
+      const t = Date.now();
+      shop.verifies = shop.verifies.filter((x) => t - x < 60_000);
+      if (shop.verifies.length >= 10) return apiError(429, "rate_limited", "Trop de vérifications en peu de temps.", "Patientez une minute, puis recommencez.", { retryAfterSeconds: 60 });
+      shop.verifies.push(t);
+      await ctx.delay(2200);
+      applyVerification(shop, target, new Date().toISOString());
+      ctx.emit();
+      return json({ change: target });
     }
     // Écritures : mêmes garde-fous que le serveur.
     if (method !== "POST") return apiError(404, "not_found", "Cette ressource n'existe pas.", null);
@@ -513,6 +645,9 @@ export async function handleShopify(ctx: ShopCtx, parts: string[], method: strin
     shop.changes.unshift(c);
     refreshRestorable(shop.changes);
     shop.writes.push(now);
+    // Traduction : pas encore vérifiable, la relecture conclut tout de suite sans charger de page.
+    if (locale) applyVerification(shop, c, new Date().toISOString());
+    else scheduleVerify(ctx, shop, c, 6_000);
     ctx.emit();
     return json({ change: c, resource: detailOf(res, ctx, shop) }, 201);
   }
@@ -562,7 +697,8 @@ function initialAutomation(): AutomationState {
   return {
     policy,
     limits: LIMITS,
-    autoAllowed: iaMode === "auto",
+    // Mode intégré (?integre=…) : jamais de mode automatique, quel que soit ?ia=.
+    autoAllowed: iaMode === "auto" && demoEmbeddedMode === "non",
     writesEnabled: shopifyWritesEnabled,
     aiConfigured: aiConfiguredDemo,
     usage: {
@@ -607,7 +743,7 @@ function newItem(res: Res, field: ShopifyField, proposed: string, note: string |
   return {
     id: itemId(), resourceId: res.id, resourceType: res.type, resourceTitle: res.title, path: res.path, field,
     image: image ? { id: image.id, url: image.url } : null, locale,
-    before: readValue(res, field, image?.id ?? null, locale), proposed, note, selected: true, state: "pending", changeId: null, error: null,
+    before: readValue(res, field, image?.id ?? null, locale), proposed, note, selected: true, state: "pending", changeId: null, correctionStatus: null, error: null,
     autoApplied: false,
   };
 }
@@ -656,6 +792,8 @@ function writeItem(shop: Shop, b: ShopifyBatch, it: ShopifyBatchItem, at: string
   shop.changes.unshift(c);
   it.state = "applied";
   it.changeId = c.id;
+  // La ligne porte le statut de sa correction, lu au moment de la réponse.
+  Object.defineProperty(it, "correctionStatus", { enumerable: true, configurable: true, get: () => c.correctionStatus });
 }
 
 function restoreItem(shop: Shop, b: ShopifyBatch, it: ShopifyBatchItem, at: string): boolean {
@@ -749,6 +887,9 @@ function seedBatches(shop: Shop) {
   });
   partial.state = "partial";
   partial.finishedAt = at(partial.createdAt, 100);
+  // Une correction jamais relue (comme après un redémarrage du serveur) : « Vérifier » à la demande.
+  const unread = partial.items[1]?.changeId;
+  if (unread) shop.seedKeep.add(unread);
 
   // Appliqué sans validation humaine par l'optimisation automatique.
   const auto = newBatch("Descriptions vides de produits", "automation", "2026-11-26T22:00:00.000Z", "applying");
@@ -767,6 +908,9 @@ function seedBatches(shop: Shop) {
     writeItem(shop, auto, it, at(auto.createdAt, 30 + i * 2));
     it.autoApplied = it.state === "applied";
   });
+  // La dernière ligne écrite attend encore sa relecture : elle se termine quelques secondes après le chargement.
+  const lastWritten = [...auto.items].reverse().find((i) => i.state === "applied")?.changeId;
+  if (lastWritten) shop.pendingVerify.push(lastWritten);
   auto.state = auto.items.some((i) => i.state === "pending") ? "draft" : "applied";
   auto.autoApplied = auto.items.some((i) => i.autoApplied);
   auto.finishedAt = auto.state === "draft" ? null : at(auto.createdAt, 40);
@@ -825,6 +969,11 @@ function runApply(ctx: ShopCtx, shop: Shop, b: ShopifyBatch, auto: boolean) {
     }
     if (next) {
       writeItem(shop, b, next, new Date().toISOString());
+      const written = next.state === "applied" ? shop.changes.find((c) => c.id === next.changeId) : undefined;
+      if (written) {
+        if (written.locale) applyVerification(shop, written, new Date().toISOString());
+        else scheduleVerify(ctx, shop, written, 6_000);
+      }
       if (auto && next.state === "applied") {
         next.autoApplied = true;
         b.autoApplied = true;
@@ -1117,6 +1266,32 @@ export function assistantBatch(ctx: ShopCtx): string | null {
   // Un lot préparé par l'assistant attend toujours une validation humaine, quel que soit le niveau (format d'échange).
   ctx.emit();
   return b.id;
+}
+
+/**
+ * Bilan des corrections pour l'évolution (Progress.corrections), compté sur l'historique de la boutique tel que
+ * GET …/shopify/changes le renvoie : les compteurs du rapport correspondent donc à sa liste. Sans boutique reliée
+ * à ce site (autre boutique, non configurée, en erreur), tout vaut 0.
+ */
+export function demoCorrections(ctx: ShopCtx): { verified: number; applied: number; failed: number; cancelled: number; resourcesOptimized: number; firstAt: string | null; lastAt: string | null } {
+  const empty = { verified: 0, applied: 0, failed: 0, cancelled: 0, resourcesOptimized: 0, firstAt: null, lastAt: null };
+  if (connectionFor(ctx.host).state !== "connected") return empty;
+  const edits = shopOf(ctx).changes.filter((c) => c.kind === "edit");
+  const out = { ...empty };
+  const optimized = new Set<string>();
+  const inPlace: string[] = [];
+  for (const c of edits) {
+    const st = c.correctionStatus;
+    if (st === "verified") {
+      out.verified++;
+      optimized.add(c.resourceId);
+    } else if (st === "applied" || st === "verifying") out.applied++;
+    else if (st === "failed") out.failed++;
+    else if (st === "cancelled") out.cancelled++;
+    if (c.restoredByChangeId === null) inPlace.push(c.appliedAt);
+  }
+  inPlace.sort();
+  return { ...out, resourcesOptimized: optimized.size, firstAt: inPlace[0] ?? null, lastAt: inPlace[inPlace.length - 1] ?? null };
 }
 
 /** Les lots de démonstration existent dès le premier chargement de la boutique. */

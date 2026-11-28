@@ -47,6 +47,10 @@ export type ErrorCode =
   | "automation_not_allowed" // la règle d'autorisation refuse cette correction ; le message dit laquelle
   | "budget_exceeded" // plafond du jour atteint (modifications ou jetons d'IA) ; details.resetsAt
   | "batch_not_editable" // ce lot n'est plus un brouillon
+  | "storefront_locked" // la boutique en ligne est protégée par un mot de passe : ses pages publiques ne peuvent pas être analysées
+  | "unauthorized" // mode intégré : jeton de session Shopify absent, invalide ou expiré (statut 401)
+  | "shop_not_allowed" // mode intégré : le jeton de session est valide mais le serveur ne sert plus cette boutique (statut 403 ; réservé à la désinstallation)
+  | "not_in_embedded_mode" // mode intégré : cette action n'existe pas (ajout ou suppression d'un site, réglages du serveur, section masquée) ; statut 403
   | "bad_request"
   | "internal";
 
@@ -722,6 +726,54 @@ export interface ShopifyChange {
    * même image, même langue) et elle n'a pas déjà été annulée.
    */
   restorable: boolean;
+  /**
+   * Où en est cette correction. null pour une ligne "restore" (une annulation n'est pas une correction).
+   * "applied" : écrite dans Shopify, pas encore vérifiée sur la page publique, ou vérification sans conclusion
+   * (voir `verification`). "verifying" : la page publique va être ou est en train d'être relue.
+   * "verified" : la page publique affiche la valeur et le critère de l'analyse est validé.
+   * "failed" : la page publique a été relue, et la valeur n'y est pas ou le critère n'est toujours pas validé.
+   * "cancelled" : la modification a été annulée (`restoredByChangeId`).
+   * Une écriture acceptée par Shopify n'est jamais "verified" d'office.
+   */
+  correctionStatus: ShopifyCorrectionStatus | null;
+  /** Dernière relecture de la page publique pour cette correction ; null si aucune n'a eu lieu. */
+  verification: ShopifyVerification | null;
+}
+
+export type ShopifyCorrectionStatus = "applied" | "verifying" | "verified" | "failed" | "cancelled";
+
+/**
+ * Résultat d'une relecture de la page publique après une correction, avec la même grille que l'analyse.
+ * Chaque relecture est conservée ; seule la plus récente est renvoyée ici.
+ */
+export interface ShopifyVerification {
+  checkedAt: string;
+  /** "inconclusive" : la relecture n'a pas pu conclure (page non chargée, langue non relue…). La correction reste "applied". */
+  outcome: "verified" | "failed" | "inconclusive";
+  /**
+   * "ok" : valeur affichée et critère validé. "not_displayed" : la page n'affiche pas la valeur écrite (souvent un
+   * délai de mise à jour de la boutique, ou un thème qui n'utilise pas ce champ). "criterion_failing" : la valeur
+   * est affichée mais le critère n'est pas validé. "page_unavailable" : la page n'a pas pu être chargée, ou ce
+   * n'est pas la page attendue. "not_supported" : ce type de correction n'est pas encore vérifiable (traduction).
+   * "image_not_found" : l'image n'a pas été retrouvée dans la page.
+   */
+  reason: "ok" | "not_displayed" | "criterion_failing" | "page_unavailable" | "not_supported" | "image_not_found";
+  /** Explication en français, affichable telle quelle. */
+  message: string;
+  /** Adresse publique relue ; null si aucune page n'a été chargée. */
+  url: string | null;
+  /** La page affiche-t-elle la valeur écrite ? null si la question ne se pose pas (champ vidé, page non chargée). */
+  displayed: boolean | null;
+  /** Ce que la page affiche réellement pour ce champ (titre, description ou texte alternatif), 300 caractères au plus. */
+  rendered: string | null;
+  /**
+   * Le critère de la grille visé par la correction ("title", "meta_description" ou "image_alt") : son verdict dans
+   * l'analyse affichée au moment de la relecture (`before`, null si la page n'y figurait pas) et sur la page relue.
+   * null si aucune page n'a été analysée.
+   */
+  criterion: { id: string; label: string; before: CheckStatus | null; after: CheckStatus; points: number; max: number; message: string } | null;
+  /** Note de la page : dans l'analyse affichée (`before`, null si absente) et sur la page relue. null si non analysée. */
+  pageScore: { before: number | null; after: number } | null;
 }
 
 /** GET /api/sites/:siteId/shopify/resources?type=&q=&missing=&offset=&limit= */
@@ -747,7 +799,75 @@ export interface ShopifyChangeRequest {
 /** Réponse à une écriture ou à une annulation : la modification enregistrée et l'élément relu dans Shopify. */
 export interface ShopifyChangeResponse { change: ShopifyChange; resource: ShopifyResourceDetail }
 /** GET /api/sites/:siteId/shopify/changes?offset=&limit= — la plus récente d'abord. */
+// ───────────────────────── Évolution et rapport ─────────────────────────
+
+/** Une analyse terminée, telle qu'elle compte dans l'évolution. */
+export interface ProgressPoint {
+  auditId: string;
+  finishedAt: string;
+  /** Note sur 100 de cette analyse, sur toutes ses pages. */
+  score: number;
+  pagesAnalyzed: number;
+  maxPages: number;
+  issues: { critical: number; warning: number; info: number };
+}
+
+/**
+ * GET /api/sites/:siteId/progress — évolution du site entre sa première analyse terminée et la dernière.
+ * Rien n'est estimé : ce qui ne peut pas être calculé vaut null.
+ */
+export interface Progress {
+  /** false tant qu'aucune analyse n'est terminée : tous les autres champs sont alors null ou vides. */
+  available: boolean;
+  /** Première analyse terminée du site. */
+  initial: ProgressPoint | null;
+  /** Dernière analyse terminée. Égale à `initial` s'il n'y en a qu'une. */
+  current: ProgressPoint | null;
+  /** Toutes les analyses terminées, de la plus ancienne à la plus récente, 50 au plus (les plus récentes). */
+  timeline: ProgressPoint[];
+  /**
+   * Comparaison à périmètre égal entre `initial` et `current` : seulement les pages présentes dans les deux
+   * analyses, avec la même grille. null s'il n'y a qu'une analyse terminée, si aucune page n'est commune, ou si
+   * le détail des pages de la première analyse n'est plus en base.
+   */
+  comparison: {
+    pagesInCommon: number;
+    /** Pages de `initial` absentes de `current`, et l'inverse : elles n'entrent pas dans la comparaison. */
+    pagesOnlyInitial: number;
+    pagesOnlyCurrent: number;
+    /** Note moyenne des pages communes, dans chaque analyse. */
+    scoreInitial: number;
+    scoreCurrent: number;
+    /** Un problème = un critère en défaut (« à améliorer » ou « en échec ») sur une page commune. */
+    issuesFixed: number;
+    issuesRemaining: number;
+    /** En défaut dans `current` alors que le critère était validé dans `initial`. */
+    issuesNew: number;
+  } | null;
+  /** Corrections appliquées dans la boutique depuis la création du site (lignes « restore » exclues). */
+  corrections: {
+    /** Statut de correction actuel de chaque modification (`ShopifyChange.correctionStatus`). */
+    verified: number;
+    /** « Appliquée » ou « en cours de vérification » : en place mais sans preuve sur la page publique. */
+    applied: number;
+    failed: number;
+    cancelled: number;
+    /** Éléments de la boutique (produits, collections, pages, articles) qui ont au moins une correction vérifiée. */
+    resourcesOptimized: number;
+    /** Date de la première et de la dernière correction encore en place. null s'il n'y en a aucune. */
+    firstAt: string | null;
+    lastAt: string | null;
+  };
+}
+export interface ProgressResponse { progress: Progress }
+
 export interface ShopifyChangesResponse { changes: ShopifyChange[]; total: number; offset: number; limit: number }
+/**
+ * POST /api/sites/:siteId/shopify/changes/:changeId/verify — relit la page publique de cette correction.
+ * Aucune écriture dans la boutique : la route fonctionne aussi quand les écritures sont désactivées.
+ * La réponse arrive quand la relecture est terminée.
+ */
+export interface ShopifyVerifyResponse { change: ShopifyChange }
 
 // ───────────────────────── Lots de corrections ─────────────────────────
 
@@ -777,6 +897,8 @@ export interface ShopifyBatchItem {
    */
   state: "pending" | "applied" | "conflict" | "failed" | "skipped" | "restored";
   changeId: string | null;
+  /** Statut de la correction écrite par cette ligne (celui de `ShopifyChange.correctionStatus`) ; null tant que rien n'est écrit. */
+  correctionStatus: ShopifyCorrectionStatus | null;
   error: string | null;
   /** true si cette ligne a été écrite sans validation humaine, par la règle d'automatisation. */
   autoApplied: boolean;
@@ -948,6 +1070,11 @@ export interface Settings {
     /** Clé PageSpeed Insights présente : la vitesse des pages peut être mesurée. */
     pageSpeed: { configured: boolean };
   };
+  /**
+   * Sections facultatives présentes. Mode local : toutes `true`. Mode intégré : `false` sauf celles ouvertes par
+   * `EMBEDDED_FEATURES` ; une section à `false` n'est pas affichée et ses routes répondent `not_in_embedded_mode`.
+   */
+  features: { competitors: boolean; analytics: boolean; pageSpeed: boolean; assistant: boolean; searchConsoleSync: boolean };
   version: string;
 }
 
@@ -997,7 +1124,7 @@ export type SiteEvent =
   | { type: "page"; page: PageSummary }
   /** L'import Search Console a changé (ajout ou suppression). */
   | { type: "search_console"; available: boolean }
-  /** La boutique Shopify a été relue ou modifiée : l'interface recharge ce qu'elle affiche de la boutique. */
+  /** La boutique Shopify a été relue ou modifiée, ou une correction vient d'être vérifiée : l'interface recharge ce qu'elle affiche de la boutique. */
   | { type: "shopify" }
   /** Les visites Google Analytics ont été relues. */
   | { type: "analytics" }

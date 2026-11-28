@@ -4,11 +4,11 @@
  * Chaque onglet a sa propre adresse (/boutique, /boutique/lots, /boutique/historique, /boutique/automatisation).
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, BookOpenCheck, CircleCheck, CircleMinus, Info, KeyRound, ListPlus, Lock, OctagonAlert, RefreshCw, Search, ShoppingBag, Store, TriangleAlert, X, Zap } from "lucide-react";
+import { ArrowRight, BookOpenCheck, FileText, CircleCheck, CircleMinus, Info, KeyRound, ListPlus, Lock, OctagonAlert, RefreshCw, Search, ShoppingBag, Store, TriangleAlert, X, Zap } from "lucide-react";
 import type { CheckStatus, ShopifyChange, ShopifyField, ShopifyResourceSummary, ShopifyResourceType, ShopifyState, SiteSummary } from "../lib/types";
 import { SHOPIFY_PAGE, useAutomation, useShopify, useShopifyBatches, useShopifyChanges, useShopifyResources, useSites, type ShopifyResourceFilter } from "../lib/queries";
 import { NEW_BATCH, navigate, shopPath, sitePath, type ShopifyView } from "../lib/router";
-import { autoActive, sectionIntro, TYPE_LABEL, TYPE_ORDER, VERDICT_LABEL, syncShopify, useShopifySyncing } from "../lib/shopify";
+import { automationTabLabel, autoActive, sectionIntro, TYPE_LABEL, TYPE_ORDER, VERDICT_LABEL, syncShopify, useShopifySyncing } from "../lib/shopify";
 import { addDraftLines, lineKey, useDraftLines, type DraftLine } from "../lib/batchDraft";
 import { toAppError } from "../lib/api";
 import { invalidateShopify } from "../lib/live";
@@ -28,6 +28,8 @@ import { ChangeList, ConfirmWrite, type WriteIntent } from "./ShopifyChanges";
 import { BatchDetail, BatchList, Composer, DraftBar } from "./ShopifyBatches";
 import { AutomationPanel } from "./ShopifyAutomation";
 import { READONLY_ID, useSticky } from "./shopShared";
+import { isEmbedded } from "../lib/embedded";
+import { reportPath } from "./Evolution";
 
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -382,6 +384,10 @@ function History({ site, onRestore, blocked }: { site: SiteSummary; onRestore: (
   return (
     <>
       <p className="shop-history__lead">Chaque modification faite depuis Chat SEO, la plus récente d'abord, seule ou au sein d'un lot de corrections. Rien n'est jamais effacé de cet historique. Seule la dernière modification d'un champ peut être annulée : la valeur d'avant est alors remise dans la boutique.</p>
+      <p className="shop-history__report">
+        <Link to={reportPath(site.id)} className="text-link"><FileText size={15} aria-hidden />Rapport d'optimisation</Link>
+        <span className="muted"> : l'évolution de la note et les corrections vérifiées, à imprimer ou à enregistrer en PDF.</span>
+      </p>
       <QueryError q={q} />
       {!data && !q.error && (<><LoadingLabel /><SkeletonRows rows={5} height={96} /></>)}
       {data && (
@@ -487,7 +493,7 @@ function Connected({ site, state, resourceId, view, batchId }: { site: SiteSumma
                 { id: "items", label: "Éléments" },
                 { id: "batches", label: "Lots de corrections", count: toValidate || undefined },
                 { id: "history", label: "Historique", count: changes.data?.total },
-                { id: "automation", label: "Automatisation" },
+                { id: "automation", label: automationTabLabel(isEmbedded()) },
               ]}
             />
           </div>

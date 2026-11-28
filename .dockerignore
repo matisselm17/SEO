@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+secrets
+data
+themes
+node_modules
+server/node_modules
+web/node_modules
+server/dist
+web/dist
+docs
+reference
+scripts
+.claude
+*.sqlite*

@@ -43,6 +43,27 @@ Saisies spéciales, dans tous les scénarios :
 - assistant : une question contenant `clé` → clé refusée avant toute réponse (erreur définitive, champ désactivé), `panne` → échec avant toute réponse (la question n'est pas conservée), `limite` → `rate_limited` (45 s) ;
 - Search Console : un fichier nommé `pas-un-export…` est refusé (`invalid_file`).
 
+Accès refusé (mode intégré à Shopify), avec `?acces=…` (mémorisé pour l'onglet, combinable ; `?acces=normal` revient à l'accès normal) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `refuse` | Toute requête répond `401 unauthorized` (page ouverte hors de l'administration Shopify) : l'écran « accès refusé » remplace toute l'application, avec le message et l'action du serveur |
+| `autre-boutique` | Toute requête répond `403 shop_not_allowed` (le serveur ne sert plus cette boutique : application désinstallée) : même écran, autre message |
+| `illisible` | Toute requête répond 401 avec un corps illisible : l'écran affiche le texte de repli de l'interface |
+
+Parcours intégré à Shopify (une boutique, un site), avec `?integre=…` (mémorisé pour l'onglet, combinable ; `?integre=non` revient au mode local) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `non` (défaut) | Mode local : plusieurs sites, ajout, suppression, plafond de pages dans les Paramètres |
+| `oui` | Mode intégré : « Préparation de votre boutique… » pendant environ 2,6 s, puis le site d'Atelier Lune s'ouvre. Ni ajout, ni suppression, ni liste de sites, ni plafond de pages ; toute adresse sans site ou d'un autre site mène au site de la boutique. `POST /api/sites`, `DELETE /api/sites/:id` et `PATCH /api/settings` répondent `403 not_in_embedded_mode` |
+| `echec` | La première lecture des sites échoue (`shopify_unavailable`) : message, action et « Réessayer », qui réussit |
+| `vide` | La lecture des sites rend une liste vide : « Votre boutique n'est pas encore prête. » avec « Réessayer » |
+
+Toute l'interface lit le mode intégré par `isEmbedded()` (`src/lib/embedded.ts`) : présence d'App Bridge hors démonstration, paramètre `?integre=` en démonstration.
+
+Hors démonstration, quand App Bridge est présent (`window.shopify`, script injecté par le serveur en mode intégré), `src/lib/transport.ts` demande un jeton de session neuf avant chaque requête (`Authorization: Bearer …`, délai maximal 10 s) et rejoue une fois une requête refusée avec l'en-tête `X-Shopify-Retry-Invalid-Session-Request`. La démonstration n'envoie jamais de jeton.
+
 Boutique Shopify (`src/demo/shopify.ts`, boutique fictive du site Atelier Lune), avec `?boutique=…` dans l'adresse (mémorisé pour l'onglet, combinable avec `?demo=`) :
 
 | État | Ce qu'il montre |
@@ -60,9 +81,9 @@ Lots de corrections et automatisation (boutique d'Atelier Lune), règle choisie 
 
 | État | Ce qu'il montre |
 |---|---|
-| `propose` (défaut) | L'IA prépare, un humain valide ; mode automatique non autorisé côté serveur |
+| `propose` (défaut) | L'IA prépare, un humain valide ; mode automatique non autorisé côté serveur : il n'est pas proposé, l'encadré « Vous validez chaque proposition » remplace les quatre verrous |
 | `auto` | Mode automatique autorisé et choisi : avec `?boutique=ecriture`, « Préparer des corrections avec l'IA » écrit sans validation les lignes conformes à la règle et au filtre de contenu (`autoApplied` par ligne) ; la section porte alors le signal « Écritures automatiques actives » |
-| `auto-refuse` | « auto » choisi mais non autorisé côté serveur : l'écran dit qu'il se comporte comme « vous validez » |
+| `auto-refuse` | « auto » enregistré mais non autorisé côté serveur : le niveau automatique n'est pas proposé ; l'écran dit qu'il se comporte comme « vous validez » et demande d'en choisir un autre avant d'enregistrer |
 | `arret` | L'IA ne prépare rien (`automation_off`) |
 | `sans-cle` | Aucune clé d'IA (`aiConfigured: false`, assistant non configuré) |
 | `budget` | Plafond de jetons du jour atteint (`budget_exceeded`, heure de remise à zéro) |
@@ -101,6 +122,39 @@ Vitesse des pages, avec `?vitesse=…` (mémorisé pour l'onglet, combinable) :
 | `non-configure` | `integrations.pageSpeed.configured` faux |
 
 Lancer une mesure pendant qu'une autre tourne répond `limit_reached` ; au-delà de 30 pages mesurées dans l'heure, `rate_limited` avec le délai. Une nouvelle demande remet `failures` à zéro ; pendant la mesure, la 4ᵉ page échoue sur ordinateur (la mesure continue). « Mesurer cette page » (fiche d'une page) envoie `pageIds: [id]`. Une amélioration proposée contient « <script> » pour vérifier qu'elle s'affiche comme du texte. Le scénario `sans-config` désactive aussi Google Analytics et la vitesse.
+
+Sections masquées (`Settings.features`), avec `?masquer=…` (liste séparée par des virgules, mémorisée pour l'onglet ; `?masquer=rien` revient à toutes les sections) :
+
+| Valeur | Section masquée |
+|---|---|
+| `rien` (défaut) | Aucune : toutes les sections présentes, comme en mode local |
+| `tout` | Toutes, comme le mode intégré sans `EMBEDDED_FEATURES` |
+| `concurrents` | Concurrents (`competitors`) |
+| `visites` | Visites Google Analytics (`analytics`) |
+| `vitesse` | Vitesse des pages (`pageSpeed`) |
+| `assistant` | Assistant IA et tout bouton « demander à l'assistant » (`assistant`) |
+| `lecture-gsc` | Seulement « Lire depuis Google » (`searchConsoleSync`) ; le dépôt de l'export reste |
+
+Exemple : `?masquer=assistant,vitesse`. En mode intégré (`?integre=oui`), `visites` et `lecture-gsc` sont toujours masquées, et le mode automatique n'est jamais autorisé, quel que soit `?ia=`. Les routes d'une section masquée répondent `403 not_in_embedded_mode` et le faux serveur écrit `[démo] route d'une section masquée appelée` dans la console : l'interface ne doit jamais l'afficher. Le point de vérité de l'interface est `src/lib/features.ts`.
+
+Évolution d'Atelier Lune (`GET …/progress`, bloc « Évolution » de la Vue d'ensemble et « Rapport d'optimisation », `/sites/:id/rapport`), avec `?evolution=…` (mémorisé pour l'onglet) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `plusieurs` (défaut) | Six analyses terminées, du 20 au 26 novembre ; la précédente vaut 61 (comme `score.previous`). La première, plus faible, a deux pages qui n'existent plus : comparaison à périmètre égal sur 40 pages communes, calculée pour de vrai sur les critères des pages |
+| `une` | Une seule analyse terminée : note actuelle et « La comparaison apparaîtra après la prochaine analyse. » |
+| `sans-comparaison` | Six analyses, mais le détail des pages de la première n'est plus conservé : `comparison: null` |
+
+« Aucune analyse terminée » (`available: false`) : `?demo=analyse-figee` (première analyse en cours) ou `?verrou=premiere`. Maison Orlux a toujours une seule analyse. Une relance qui se termine ajoute un point à la courbe. Le bilan des corrections est compté sur l'historique de la boutique de démonstration, comme la liste des corrections vérifiées du rapport : les compteurs et la liste concordent (vérifier une correction dans la boutique les met à jour ensemble). Sans boutique reliée au site (Maison Orlux, `?boutique=non-configuree` ou `erreur`), tout vaut 0.
+
+Boutique protégée par un mot de passe (`storefront_locked`), avec `?verrou=…` (mémorisé pour l'onglet ; `?verrou=non` revient à la normale) :
+
+| État | Ce qu'il montre |
+|---|---|
+| `premiere` | La première analyse d'Atelier Lune a échoué : état dédié dans la Vue d'ensemble, l'Audit, les Pages et les Recommandations (message et action de l'erreur, « Relancer l'analyse », « Ouvrir la section Boutique Shopify ») |
+| `relance` | La dernière analyse a échoué ; les résultats précédents restent affichés et le bandeau d'analyse porte le même état, avec le lien vers la boutique |
+
+Tant que le paramètre est actif, « Relancer l'analyse » échoue de nouveau après 1,5 s.
 
 ## Captures
 
